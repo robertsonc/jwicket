@@ -26,7 +26,7 @@ class FixtureSession:
 
     backend = "fixture"
 
-    def __init__(self, directory: Path, user: str) -> None:
+    def __init__(self, directory: Path, user: str, clock: Optional[Callable[[], float]] = None) -> None:
         self._dir = directory
         self._user = user
         errors_file = directory / "errors.json"
@@ -35,7 +35,7 @@ class FixtureSession:
             loaded = json.loads(errors_file.read_text(encoding="utf-8"))
             self._errors = {str(k): str(v) for k, v in loaded.items()}
         self.closed = False
-        self._live = live_model_for(directory)
+        self._live = live_model_for(directory, clock)
 
     @property
     def user(self) -> str:
@@ -64,9 +64,12 @@ class FixtureSession:
         check_rpc(name)
         self._maybe_fail(name)
         if self._live is not None and name == "get-flow-session-information":
+            filters = {k: str(v) for k, v in params.items() if k != "summary"}
             if params.get("summary"):
-                return self._live.summary_xml()
-            return self._live.sessions_xml({k: str(v) for k, v in params.items()})
+                return self._live.summary_xml(filters)
+            return self._live.sessions_xml(filters)
+        if self._live is not None and name == "get-security-log-information":
+            return self._live.buffer_xml(str(params.get("newer_than") or ""))
         if name == "get-log":
             filename = str(params.get("filename", ""))
             base_file = self._dir / "logs" / f"{filename}.log"
@@ -220,12 +223,21 @@ class LiveModel:
         ElementTree.SubElement(root, "displayed-session-count").text = str(shown)
         return root
 
-    def summary_xml(self) -> Element:
+    def summary_xml(self, filters: Optional[Dict[str, str]] = None) -> Element:
         now = self.clock()
-        active = sum(
-            1 for f in self.flows(now)
+        live = [
+            f for f in self.flows(now)
             if f["prof"].get("action") != "deny" and f["start"] <= now < f["start"] + f["duration"]
-        ) + int(self.spec.get("extra_active", 0))
+        ]
+        if filters:
+            # A filtered summary reports the matching count only (displayed-session-count).
+            wrapper = ElementTree.Element("security-flow-information")
+            info = ElementTree.SubElement(wrapper, "flow-session-information")
+            count = sum(1 for f in live if self._matches(f, filters))
+            ElementTree.SubElement(info, "displayed-session-valid").text = str(count)
+            ElementTree.SubElement(info, "displayed-session-count").text = str(count)
+            return wrapper
+        active = len(live) + int(self.spec.get("extra_active", 0))
         root = ElementTree.Element("flow-session-information")
         summary = ElementTree.SubElement(root, "flow-session-summary-information")
         ElementTree.SubElement(summary, "active-sessions").text = str(active)
@@ -234,6 +246,34 @@ class LiveModel:
         return root
 
     # -- logs --
+
+    def buffer_xml(self, newer_than: str) -> Element:
+        """get-security-log-information: the routing engine's security log buffer (event mode)."""
+        now = self.clock()
+        root = ElementTree.Element("security-log-information")
+        for ts, tag, f in self._flow_events(now)[-300:]:
+            stamp = time.strftime("%Y-%m-%d.%H:%M:%S", time.gmtime(ts))
+            if newer_than and stamp <= newer_than:
+                continue
+            prof = f["prof"]
+            ev = ElementTree.SubElement(root, "security-event")
+            dst = prof.get("public", {}).get(f["dst"], f["dst"]) if f["nat_dst"] else f["dst"]
+            verb = {"RT_FLOW_SESSION_CREATE": "session created", "RT_FLOW_SESSION_CLOSE":
+                    f"session closed {f['reason']}:", "RT_FLOW_SESSION_DENY": "session denied"}[tag]
+            for name, value in (
+                ("security-event-time", stamp), ("security-event-id", tag),
+                ("security-event-message", f"{verb} {f['src']}/{f['sport']}->{dst}/{f['dport']} {prof['app']} "
+                                           f"{prof['policy']} {prof['from']} {prof['to']}"),
+                ("severity", "info"), ("security-event-result", "deny" if "DENY" in tag else "permit"),
+                ("security-event-policy-name", prof["policy"]), ("security-event-protocol", prof["proto"]),
+                ("security-event-source-address", f["src"]), ("security-event-source-port", f["sport"]),
+                ("security-event-destination-address", dst), ("security-event-destination-port", f["dport"]),
+                ("security-event-interface-name", prof["in_iface"]),
+            ):
+                ElementTree.SubElement(ev, name).text = str(value)
+            proc = ElementTree.SubElement(ev, "process")
+            ElementTree.SubElement(proc, "name").text = "flowd"
+        return root
 
     def _flow_events(self, now: float) -> List[Tuple[float, str, Dict[str, Any]]]:
         events = []
@@ -336,8 +376,8 @@ def _bsd_sort_key(line: str) -> str:
     return line[:15]
 
 
-def live_model_for(directory: Path) -> Optional[LiveModel]:
+def live_model_for(directory: Path, clock: Optional[Callable[[], float]] = None) -> Optional[LiveModel]:
     spec_file = directory / "live.json"
     if not spec_file.is_file():
         return None
-    return LiveModel(json.loads(spec_file.read_text(encoding="utf-8")))
+    return LiveModel(json.loads(spec_file.read_text(encoding="utf-8")), clock or time.time)

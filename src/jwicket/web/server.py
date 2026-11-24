@@ -118,11 +118,30 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "jwicket"
     sys_version = ""
     protocol_version = "HTTP/1.0"
-    error_content_type = "application/json"
-    error_message_format = '{"error": "%(message)s"}\n'
-
     def version_string(self) -> str:
         return self.server_version
+
+    def parse_request(self) -> bool:
+        ok = super().parse_request()
+        if ok and self.request_version == "HTTP/0.9":
+            # Python before 3.12 answers a one-word request line HTTP/0.9-style, with no headers at
+            # all (so no CSP). Refuse it with a normal, fully headed response instead.
+            self.request_version = "HTTP/1.0"
+            self.send_error(400, "HTTP/0.9 is not supported")
+            return False
+        return ok
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        """Every error the standard library generates (400, 414, 431, 501, timeouts) goes through the
+        same response path as ours: security headers, JSON body, connection closed."""
+        self.close_connection = True
+        if self.request_version == "HTTP/0.9":
+            self.request_version = "HTTP/1.0"
+        text = message or self.responses.get(code, ("error",))[0]
+        try:
+            self._respond(Response.error(code, str(text)), head_only=self.command == "HEAD")
+        except OSError:
+            LOG.debug("client went away before error %d could be sent", code)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         LOG.info("%s %s", self.client_address[0], format % args)
@@ -181,10 +200,15 @@ class Handler(BaseHTTPRequestHandler):
             if read is None:
                 return
             body = read
+        try:
+            query = parse_query(raw_query)
+        except ValueError:
+            self._respond(Response.error(400, "bad query string"))
+            return
         req = Request(
             method=method,
             path=path,
-            query=parse_query(raw_query),
+            query=query,
             headers=self.headers,  # type: ignore[arg-type]  # email.message.Message is a Mapping enough
             client=str(self.client_address[0]),
             tls=self.server.tls is not None,
@@ -204,7 +228,11 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("POST")
 
     def _not_allowed(self) -> None:
-        self._respond(Response.error(405, "method not allowed"))
+        path = self.path.partition("?")[0].rstrip("/") or "/"
+        allowed = self.server.router.allowed(path) or ["GET", "POST"]
+        resp = Response.error(405, "method not allowed")
+        resp.headers.append(("Allow", ", ".join(allowed)))
+        self._respond(resp)
 
     do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = do_TRACE = do_CONNECT = _not_allowed  # noqa: N815
 

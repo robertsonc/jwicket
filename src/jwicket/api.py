@@ -32,7 +32,7 @@ from jwicket.web.http import Request, Response, clear_cookie, session_cookie
 from jwicket.web.server import Router
 
 Json = Dict[str, Any]
-_SCOPE = re.compile(r"^(root|lsys:[A-Za-z0-9._\-]{1,63}|tenant:[A-Za-z0-9._\-]{1,63})$")
+_SCOPE = re.compile(r"^(root|lsys:[A-Za-z0-9._\-]{1,63}|tenant:[A-Za-z0-9._\-]{1,63})\Z")
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._\-]+")
 MIN_READ_INTERVAL_S = 2.0
 
@@ -148,7 +148,16 @@ def login(app: App, req: Request) -> Response:
     app.audit.record("login", user=sess.user, source=req.client, backend=sess.backend)
     return Response.json(
         200,
-        {"authenticated": True, "user": sess.user, "csrf": sess.csrf, "backend": sess.backend},
+        {
+            "authenticated": True,
+            "user": sess.user,
+            "csrf": sess.csrf,
+            "backend": sess.backend,
+            "credential": app.backend.credential,
+            "idle_timeout_s": app.session_idle_s,
+            "fixture": app.fixture,
+            "version": __version__,
+        },
         [("Set-Cookie", session_cookie(req.cookie_name, token, tls=req.tls))],
     )
 
@@ -204,7 +213,10 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
         except JunosError as err:
             ha = _panel_error(err)
 
-    if config_root is not None:
+    if config_root is None:
+        # Central management is read from the configuration, so it shares the configuration's fate.
+        management = dict(config_status)
+    else:
         inventories = build_inventory(config_root)
         management = facts.central_management(config_root)
         if ha.get("mode") == "standalone" and facts.mnha_configured(config_root):
@@ -234,14 +246,16 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
     return 200, payload
 
 
-def _read_guarded(app: App, req: Request) -> Tuple[Optional[WebSession], Response, Optional[Json]]:
+def _read_guarded(
+    app: App, req: Request, bucket: str = "inventory"
+) -> Tuple[Optional[WebSession], Response, Optional[Json]]:
     sess = _session(app, req)
     if sess is None:
         return None, Response.error(401, "sign-in required"), None
     scope = req.query.get("scope", "root")
     if not _SCOPE.match(scope):
         return sess, Response.error(400, "bad scope"), None
-    limited = throttle_read(app, sess, "inventory", MIN_READ_INTERVAL_S)
+    limited = throttle_read(app, sess, bucket, MIN_READ_INTERVAL_S)
     if limited is not None:
         return sess, limited, None
     try:
@@ -308,7 +322,8 @@ def export(app: App, req: Request) -> Response:
     fmt = req.query.get("format", "json")
     if fmt not in ("json", "csv"):
         return Response.error(400, "format must be json or csv")
-    sess, resp, payload = _read_guarded(app, req)
+    # Its own read bucket: an export right after loading the page is the normal sequence.
+    sess, resp, payload = _read_guarded(app, req, bucket="export")
     if sess is None or payload is None:
         return resp
     host = _FILENAME_SAFE.sub("_", str((payload.get("device") or {}).get("hostname") or "device"))[:40]

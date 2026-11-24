@@ -23,7 +23,7 @@ from jwicket.junos.errors import LoginRejected
 from jwicket.junos.session import DeviceSession, PyEzLocalSession, PyEzUserSession
 
 # Junos local user names are short; remote (RADIUS/TACACS+) names may carry a realm.
-_USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@\-]{0,63}$")
+_USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@\-]{0,63}\Z")
 MAX_SECRET_LEN = 512
 
 

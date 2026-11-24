@@ -21,7 +21,20 @@ DEFAULT_CONFIG_PATH = Path("/var/db/jwicket/jwicket.ini")
 BACKENDS = ("netconf", "lab-token")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 MIN_LAB_TOKEN_LEN = 32
-_HOST_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9.\-\[\]:]+$")
+_HOST_RE = re.compile(r"^(?=.{1,253}\Z)[A-Za-z0-9.\-\[\]:]+\Z")
+
+
+KNOWN_KEYS = {
+    "server": frozenset({
+        "bind", "port", "tls_cert", "tls_key", "allowed_hosts", "max_connections", "socket_timeout_s",
+        "max_body_bytes",
+    }),
+    "auth": frozenset({
+        "backend", "netconf_host", "netconf_port", "rpc_timeout_s", "session_idle_s", "session_absolute_s",
+        "max_sessions", "login_per_source_per_min", "login_global_per_min", "lab_token_file",
+    }),
+    "log": frozenset({"level", "file", "audit_file", "max_bytes", "backups"}),
+}
 
 
 class ConfigError(Exception):
@@ -188,13 +201,16 @@ def parse_settings(text: str, source: Optional[Path] = None) -> Settings:
         cp.read_string(text, source=str(source) if source else "<settings>")
     except configparser.Error as exc:
         raise ConfigError(f"settings file {source or ''} is not valid INI: {exc}") from exc
-    known = {"server", "auth", "log"}
-    unknown = set(cp.sections()) - known
+    unknown = set(cp.sections()) - set(KNOWN_KEYS)
     if unknown:
         raise ConfigError(f"unknown settings section(s): {', '.join(sorted(unknown))}")
-    for name in known:
+    for name, keys in KNOWN_KEYS.items():
         if not cp.has_section(name):
             cp.add_section(name)
+        # A misspelt key would otherwise fall back to its default without a word.
+        stray = sorted(set(cp[name]) - keys)
+        if stray:
+            raise ConfigError(f"unknown setting(s) in [{name}]: {', '.join(stray)}")
 
     s = cp["server"]
     hosts = tuple(h.strip() for h in (s.get("allowed_hosts") or "").split(",") if h.strip())

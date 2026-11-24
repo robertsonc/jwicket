@@ -34,20 +34,49 @@ DEFAULT_LINES = 500
 MAX_LINES = 2000
 MAX_TERMS = 4
 MAX_TERM_LEN = 120
-_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
+_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}\Z")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-_CURSOR = re.compile(r"^(\d{1,9}):([0-9a-f]{12})$")
+_CURSOR = re.compile(r"^(\d{1,9}):([0-9a-f]{12})\Z")
 
 
 class LogQueryError(ValueError):
     """A log request parameter failed validation."""
 
 
+# On-box reporting (``show security log report in-detail <type>``): one RPC per type.
+REPORT_TYPES = (
+    "session-all", "session-close", "session-create", "session-deny",
+    "screen", "idp-all", "utm-all", "ipsec-vpn", "threat", "all",
+)
+MAX_EXPRESSION = 256  # documented limit of the report "expression" option, brackets included
+_EXPRESSION = re.compile(r"^[A-Za-z0-9_.:/=!<>&|() \-]{1,256}\Z")
+_REPORT_TIME = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\Z")
+_BUFFER_TIME = re.compile(r"^\d{4}-\d\d-\d\d\.\d\d:\d\d:\d\d\Z")
+
+# Junos records every NETCONF RPC as UI_NETCONF_CMD (authorization, info), so J-Wicket's own reads
+# appear in any syslog file that takes authorization info, including the default "messages".
+SELF_NOISE = (
+    "Junos logs every NETCONF request as UI_NETCONF_CMD, so each J-Wicket read adds a line to files "
+    "that record authorization messages. The viewer hides your own J-Wicket reads by default."
+)
+
+
+def default_mode(model: Optional[str]) -> Tuple[Optional[str], str]:
+    """The documented default security log mode for a model, when the configuration sets none."""
+    m = (model or "").lower()
+    if m.startswith("vsrx"):
+        return "event", "event is the documented default on vSRX"
+    if m.startswith(("srx3", "srx5", "srx1500", "srx4100", "srx4200")):
+        return "stream", "stream is the documented default for this model"
+    return None, "the default for this model is not documented"
+
+
 # --- sources --------------------------------------------------------------------------------------
 
 
-def sources(config: Optional[Element]) -> Json:
-    """What the configuration says about where logs are. ``config`` holds system/syslog and security/log."""
+def sources(config: Optional[Element], model: Optional[str] = None) -> Json:
+    """What the configuration says about where logs are. ``config`` holds system/syslog and security/log;
+    ``model`` (from get-software-information) decides the documented default mode when none is set."""
     files: List[Json] = []
     syslog = path(config, "system", "syslog")
     for node in kids(syslog, "file"):
@@ -80,6 +109,7 @@ def sources(config: Optional[Element]) -> Json:
     mode = text(seclog, "mode")
     if mode is None and seclog is not None:
         mode = next((local(c.tag) for c in kids(kid(seclog, "mode"))), None)
+    effective, basis = (mode, "set in the configuration") if mode else default_mode(model)
     streams = []
     for stream in kids(seclog, "stream"):
         host = path(stream, "host")
@@ -93,20 +123,37 @@ def sources(config: Optional[Element]) -> Json:
             }
         )
     report = present(seclog, "report")
-    traffic: Json = {"mode": mode, "streams": streams, "report": report, "format": text(seclog, "format")}
-    if mode == "stream" or (mode is None and streams):
+    high_end = (model or "").lower().startswith(("srx54", "srx56", "srx58"))
+    traffic: Json = {
+        "mode": mode,
+        "effective_mode": effective,
+        "mode_basis": basis,
+        "streams": streams,
+        "report": report,
+        "format": text(seclog, "format"),
+    }
+    if effective in ("stream", "stream-event"):
         hosts = ", ".join(str(s["host"] or "?") for s in streams)
         traffic["where"] = (
             "Traffic logs are streamed off the device"
             + (f" to {hosts}" if streams else "")
-            + "; they are not stored here."
-            + (" On-box reporting keeps a local copy for reports." if report else "")
+            + ("." if effective == "stream-event" else "; they are not stored here.")
+            + (" On-box reporting keeps a local copy." if report else "")
         )
-    elif mode == "event":
-        traffic["where"] = "Traffic logs go through syslog: look in a syslog file that matches RT_FLOW."
+    elif effective == "event":
+        traffic["where"] = (
+            "Traffic logs are handled by the routing engine: they appear in the security log buffer and "
+            "in any syslog file that takes them (for example one matching RT_FLOW)."
+        )
     else:
-        traffic["where"] = "The security log mode is not set; the platform default applies (see Spec 004)."
-    return {"status": "ok", "files": files, "traffic": traffic}
+        traffic["where"] = f"The security log mode is not set and {basis}; check 'show security log' on the device."
+
+    extra: List[Json] = []
+    if report and effective in ("stream", "stream-event") and not high_end:
+        extra.append({"id": "report", "name": "On-box reporting", "types": list(REPORT_TYPES)})
+    if effective in ("event", "stream-event"):
+        extra.append({"id": "buffer", "name": "Security log buffer (routing engine)"})
+    return {"status": "ok", "files": files, "traffic": traffic, "databases": extra, "self_noise": SELF_NOISE}
 
 
 def validate_file(name: str, known: List[Json]) -> str:
@@ -133,9 +180,73 @@ def _digest(line: str) -> str:
 
 def clean_lines(raw: str) -> List[str]:
     lines = [_CONTROL.sub("", ln.rstrip("\r")) for ln in raw.split("\n")]
-    while lines and not lines[-1]:
+    while lines and not lines[-1].strip():
         lines.pop()
+    # Junos text output usually starts with a newline; leading blank lines are not log lines.
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    lines = lines[start:]
     return lines[-MAX_WINDOW:] if len(lines) > MAX_WINDOW else lines
+
+
+def parse_expression(raw: Optional[str]) -> Optional[str]:
+    """A report ``expression`` (operators = != >= <= && || and parentheses). Sent as an RPC
+    parameter value, never as CLI text; the character set and length are still checked."""
+    if not raw:
+        return None
+    if len(raw.encode("utf-8")) > MAX_EXPRESSION or not _EXPRESSION.match(raw):
+        raise LogQueryError(
+            f"expression must be at most {MAX_EXPRESSION} characters of A-Z 0-9 _ . : / = ! < > & | ( ) -"
+        )
+    return raw
+
+
+def parse_report_time(raw: Optional[str], label: str) -> Optional[str]:
+    if not raw:
+        return None
+    if not _REPORT_TIME.match(raw):
+        raise LogQueryError(f"{label} must look like 2026-11-24T06:00:00")
+    return raw
+
+
+def parse_buffer_time(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    if not _BUFFER_TIME.match(raw):
+        raise LogQueryError("since must look like 2026-11-24.06:00:00")
+    return raw
+
+
+def buffer_events(reply: Element) -> Json:
+    """``get-security-log-information``: structured events from the routing engine's log buffer."""
+    events: List[Json] = []
+    lines: List[str] = []
+    disabled = any(local(e.tag) == "security-logs-disabled" for e in reply.iter())
+    for ev in (e for e in reply.iter() if local(e.tag) == "security-event"):
+        proc = kid(ev, "process")
+        item = {
+            "time": text(ev, "security-event-time"),
+            "id": text(ev, "security-event-id"),
+            "message": text(ev, "security-event-message"),
+            "severity": text(ev, "severity"),
+            "result": text(ev, "security-event-result"),
+            "user": text(ev, "security-event-username"),
+            "interface": text(ev, "security-event-interface-name"),
+            "protocol": text(ev, "security-event-protocol"),
+            "policy": text(ev, "security-event-policy-name"),
+            "src": text(ev, "security-event-source-address"),
+            "sport": text(ev, "security-event-source-port"),
+            "dst": text(ev, "security-event-destination-address"),
+            "dport": text(ev, "security-event-destination-port"),
+            "process": text(proc, "name"),
+            "pid": text(proc, "pid"),
+        }
+        events.append(item)
+        proc_part = f"{item['process'] or '-'}" + (f"[{item['pid']}]" if item["pid"] else "")
+        line = f"{item['time'] or '-'} {proc_part}: {item['id'] or '-'}: {item['message'] or ''}"
+        lines.append(_CONTROL.sub("", line))
+    return {"events": events[-MAX_LINES:], "lines": lines[-MAX_LINES:], "disabled": disabled}
 
 
 def parse_terms(raw: Optional[str], label: str) -> List[str]:

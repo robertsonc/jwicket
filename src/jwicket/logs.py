@@ -57,13 +57,22 @@ class AuditTrail:
 
     def __init__(self, path: Optional[Path], max_bytes: int = 1_000_000, backups: int = 3) -> None:
         self._lock = threading.Lock()
-        self._logger = logging.getLogger("jwicket.audit")
-        self._logger.propagate = path is None
-        if path is not None:
-            handler = logging.handlers.RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups)
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            self._logger.addHandler(handler)
-            self._logger.setLevel(logging.INFO)
+        if path is None:
+            self._logger = logging.getLogger("jwicket.audit")
+            return
+        # A Logger constructed directly is not registered with the logging manager, so each trail
+        # owns its handler; two trails never write into each other's files.
+        self._logger = logging.Logger("jwicket.audit.file", logging.INFO)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        self._logger.addHandler(handler)
+
+    def close(self) -> None:
+        if self._logger.name != "jwicket.audit.file":
+            return
+        for handler in list(self._logger.handlers):
+            handler.close()
+            self._logger.removeHandler(handler)
 
     def record(self, event: str, *, user: Optional[str], source: str, **fields: Any) -> None:
         entry: dict[str, Any] = {

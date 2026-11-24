@@ -27,13 +27,16 @@ from jwicket.junos.xmlutil import Element, kids, local, text, text_of
 
 Json = Dict[str, Any]
 
+# Above this many matching sessions, J-Wicket refuses to pull rows and asks for a narrower filter.
+# The device sends every matching session from the SPUs to the routing engine for a list request
+# (Juniper KB28956), so this protects the control plane; the count itself is cheap (filtered summary).
 MAX_UNFILTERED = 5000
 DEFAULT_LIMIT = 500
 MAX_LIMIT = 2000
 
 PROTOCOLS = ("tcp", "udp", "icmp", "icmp6", "gre", "esp", "ah", "sctp", "pim", "ospf")
-_APP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,63}$")
-_IFACE = re.compile(r"^[a-z][a-z0-9\-]{1,9}(\d+(/\d+){0,3})?(\.\d{1,5})?$")
+_APP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,63}\Z")
+_IFACE = re.compile(r"^[a-z][a-z0-9\-]{1,9}(\d+(/\d+){0,3})?(\.\d{1,5})?\Z")
 
 
 class FilterError(ValueError):
@@ -146,6 +149,25 @@ def _split_policy(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     return value, None
 
 
+_KNOWN_SESSION_TAGS = {
+    "session-identifier", "status", "session-state", "policy", "timeout", "configured-timeout",
+    "start-time", "duration", "application", "dynamic-application-name", "flow-information",
+}
+
+
+def _extra(node: Element) -> Dict[str, str]:
+    """Scalar fields the model does not name (reply tags vary by release); shown, never dropped."""
+    out: Dict[str, str] = {}
+    for child in kids(node):
+        tag = local(child.tag)
+        if tag in _KNOWN_SESSION_TAGS or len(child):
+            continue
+        value = text_of(child)
+        if value is not None and len(out) < 24:
+            out[tag] = value[:200]
+    return out
+
+
 def _session(node: Element, location: Optional[str]) -> Json:
     wings = [_wing(w) for w in kids(node, "flow-information")]
     inbound = next((w for w in wings if (w["direction"] or "").lower().startswith("in")), wings[0] if wings else None)
@@ -173,6 +195,7 @@ def _session(node: Element, location: Optional[str]) -> Json:
         "in": inbound,
         "out": outbound,
         "nat": nat,
+        "extra": _extra(node),
     }
 
 
@@ -242,4 +265,6 @@ def parse_summary(reply: Element) -> Json:
         "active": total("active-sessions"),
         "max": total("max-sessions"),
         "failed": total("failed-sessions"),
+        # A summary request carrying filters reports how many sessions match them.
+        "matching": total("displayed-session-count"),
     }

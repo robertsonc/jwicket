@@ -15,7 +15,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from jwicket.app import build_app, serve
 from jwicket.auth.backends import validate_secret, validate_username
@@ -32,8 +32,9 @@ class FixtureBackend:
     name = "fixture"
     credential = "password"
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, clock: Optional[Callable[[], float]] = None) -> None:
         self._dir = directory
+        self._clock = clock
         users_file = directory / "users.json"
         users = json.loads(users_file.read_text(encoding="utf-8"))["users"] if users_file.is_file() else ["admin"]
         self.users = [str(u) for u in users]
@@ -43,7 +44,7 @@ class FixtureBackend:
         validate_secret(secret)
         if user not in self.users:
             raise LoginRejected(f"fixture has no user {user!r}")
-        return FixtureSession(self._dir, user)
+        return FixtureSession(self._dir, user, self._clock)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

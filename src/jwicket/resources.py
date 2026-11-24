@@ -23,7 +23,7 @@ CONTENT_TYPES: Dict[str, str] = {
     ".css": "text/css; charset=utf-8",
     ".svg": "image/svg+xml",
 }
-_NAME = re.compile(r"^[a-z0-9][a-z0-9_\-]*(/[a-z0-9][a-z0-9_\-]*)*\.(html|js|css|svg)$")
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_\-]*(/[a-z0-9][a-z0-9_\-]*)*\.(html|js|css|svg)\Z")
 
 _manifest: Optional[Dict[str, bytes]] = None
 _etags: Dict[str, str] = {}
@@ -39,10 +39,15 @@ def _embedded() -> Optional[Dict[str, bytes]]:
 
 
 def manifest() -> Dict[str, bytes]:
-    """Every servable asset, keyed by its path under static/ (for example ``js/logs.js``)."""
+    """Every servable asset, keyed by its path under static/ (for example ``js/logs.js``).
+
+    From the bundle it is built once. From disk (development) it is rebuilt on every call so asset
+    edits show without restarting the development server.
+    """
     global _manifest
-    if _manifest is None:
-        emb = _embedded()
+    emb = _embedded()
+    if _manifest is None or emb is None:
+        _etags.clear()
         if emb is not None:
             found = {k[len("static/"):]: v for k, v in emb.items() if k.startswith("static/")}
         else:

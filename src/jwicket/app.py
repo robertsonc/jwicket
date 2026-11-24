@@ -145,6 +145,19 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def record_startup_refusal(config_path: Path, reason: str) -> None:
+    """Best effort: put the refusal where an operator will look (``file show``), next to the settings."""
+    target = config_path.parent / "startup-refused.txt"
+    if not config_path.parent.is_dir():
+        return
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"jwicket {__version__} refused to start: {reason}\n")
+    except OSError as exc:
+        LOG.debug("could not record startup refusal in %s: %s", target, exc)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     os.umask(0o077)  # every file J-Wicket creates (logs, audit trail) is private to its account
     args = parse_args(sys.argv[1:] if argv is None else argv)
@@ -155,6 +168,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ConfigError as exc:
         logging.basicConfig(level=logging.INFO)
         LOG.error("startup refused: %s", exc)
+        record_startup_refusal(args.config, str(exc))
         return 2
     if args.check_config:
         print(f"{args.config}: ok")
@@ -164,4 +178,5 @@ def main(argv: Optional[List[str]] = None) -> int:
         return serve(settings, build_app(settings, build_backend(settings)))
     except ConfigError as exc:
         LOG.error("startup refused: %s", exc)
+        record_startup_refusal(args.config, str(exc))
         return 2

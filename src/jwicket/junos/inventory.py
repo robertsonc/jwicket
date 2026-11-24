@@ -226,21 +226,24 @@ class AddressResolver:
 
     def resolve(self, name: str, zones: List[str]) -> Json:
         if name in ANY_ADDRESSES:
-            return {"name": name, "kind": "any", "book": None, "leaves": [], "unresolved": []}
-        books = self._books_for(zones)
+            return {"name": name, "kind": "any", "book": None, "leaves": [], "truncated": False, "unresolved": []}
+        found = self._lookup(name, self._books_for(zones))
+        if found is None:
+            return {"name": name, "kind": "unresolved", "book": None, "leaves": [], "truncated": False,
+                    "unresolved": [name]}
+        book, kind, _entry = found
         leaves: List[Json] = []
         unresolved: List[str] = []
-        found = self._lookup(name, books)
-        if found is None:
-            return {"name": name, "kind": "unresolved", "book": None, "leaves": [], "unresolved": [name]}
-        book, kind, _entry = found
-        self._expand(name, books, leaves, unresolved, set(), 0)
+        state = {"limited": False}
+        # Junos lets an address set contain only entries of its own address book, so members are
+        # looked up in the book that holds the set, never along the policy's lookup chain.
+        self._expand(name, [book], leaves, unresolved, set(), 0, state)
         return {
             "name": name,
             "kind": kind,
             "book": book["name"],
             "leaves": leaves[:MAX_LEAVES],
-            "truncated": len(leaves) > MAX_LEAVES,
+            "truncated": len(leaves) > MAX_LEAVES or state["limited"],
             "unresolved": unresolved,
         }
 
@@ -256,9 +259,19 @@ class AddressResolver:
         return None
 
     def _expand(
-        self, name: str, books: List[Json], leaves: List[Json], unresolved: List[str], seen: Set[str], depth: int
+        self,
+        name: str,
+        books: List[Json],
+        leaves: List[Json],
+        unresolved: List[str],
+        seen: Set[str],
+        depth: int,
+        state: Dict[str, bool],
     ) -> None:
-        if name in seen or depth > MAX_EXPANSION_DEPTH or len(leaves) > MAX_LEAVES:
+        if name in seen:
+            return
+        if depth > MAX_EXPANSION_DEPTH or len(leaves) > MAX_LEAVES:
+            state["limited"] = True
             return
         seen.add(name)
         found = self._lookup(name, books)
@@ -270,7 +283,7 @@ class AddressResolver:
             leaves.append({"name": entry["name"], "kind": entry["kind"], "value": entry["value"]})
             return
         for member in list(entry["addresses"]) + list(entry["sets"]):
-            self._expand(member, books, leaves, unresolved, seen, depth + 1)
+            self._expand(member, books, leaves, unresolved, seen, depth + 1, state)
 
 
 class ApplicationResolver:
@@ -317,6 +330,31 @@ class ApplicationResolver:
 # --- policies -------------------------------------------------------------------------------------
 
 
+def _leaf_list(node: Optional[Element], name: str, inactive_out: List[str], prefix: str) -> List[str]:
+    """Active values of a leaf-list; deactivated values are reported in ``inactive_out``."""
+    values: List[str] = []
+    for child in kids(node, name):
+        value = text_of(child)
+        if value is None:
+            continue
+        if is_inactive(child):
+            inactive_out.append(f"{prefix}{name} {value}")
+        else:
+            values.append(value)
+    return values
+
+
+def _flag(node: Optional[Element], name: str, inactive_out: List[str], prefix: str) -> bool:
+    """An empty-element flag is set only if present and active; a deactivated one is reported."""
+    child = kid(node, name)
+    if child is None:
+        return False
+    if is_inactive(child):
+        inactive_out.append(f"{prefix}{name}")
+        return False
+    return True
+
+
 def _unmodeled(node: Optional[Element], known: Iterable[str], prefix: str) -> List[str]:
     known_set = set(known)
     return [f"{prefix}{tag}" for tag in child_tags(node) if tag not in known_set]
@@ -336,17 +374,28 @@ def _policy(
     name = text(node, "name") or "?"
     match = kid(node, "match")
     then = kid(node, "then")
-    permit = kid(then, "permit")
-    action = next((a for a in ("permit", "deny", "reject") if present(then, a)), "unknown")
+    inactive_parts: List[str] = []
+    action = next((a for a in ("permit", "deny", "reject") if _flag(then, a, inactive_parts, "then ")), "unknown")
+    permit = kid(then, "permit") if action == "permit" else None
     log = kid(then, "log")
+    if is_inactive(log):
+        inactive_parts.append("then log")
+        log = None
+    tunnel = path(permit, "tunnel")
     unmodeled = (
         _unmodeled(node, _POLICY_KNOWN, "")
         + _unmodeled(match, _MATCH_KNOWN, "match ")
         + _unmodeled(then, _THEN_KNOWN, "then ")
         + _unmodeled(permit, _PERMIT_KNOWN, "then permit ")
+        + _unmodeled(tunnel, {"ipsec-vpn"}, "then permit tunnel ")
+        + _unmodeled(kid(then, "deny"), (), "then deny ")
+        + _unmodeled(kid(then, "reject"), (), "then reject ")
         + _unmodeled(log, _LOG_KNOWN, "then log ")
     )
-    tunnel = path(permit, "tunnel")
+
+    def leaf(name_: str) -> List[str]:
+        return _leaf_list(match, name_, inactive_parts, "match ")
+
     inactive_reason = "policy" if is_inactive(node) else ("zone-pair" if pair_inactive else None)
     group = group_of(node) or pair_group
     if kind == "global":
@@ -363,21 +412,24 @@ def _policy(
         "name": name,
         "description": text(node, "description"),
         "match": {
-            "source": texts(match, "source-address"),
-            "destination": texts(match, "destination-address"),
-            "application": texts(match, "application"),
-            "source_excluded": present(match, "source-address-excluded"),
-            "destination_excluded": present(match, "destination-address-excluded"),
-            "source_identity": texts(match, "source-identity"),
-            "dynamic_application": texts(match, "dynamic-application"),
-            "url_category": texts(match, "url-category"),
-            "source_end_user_profile": texts(match, "source-end-user-profile"),
+            "source": leaf("source-address"),
+            "destination": leaf("destination-address"),
+            "application": leaf("application"),
+            "source_excluded": _flag(match, "source-address-excluded", inactive_parts, "match "),
+            "destination_excluded": _flag(match, "destination-address-excluded", inactive_parts, "match "),
+            "source_identity": leaf("source-identity"),
+            "dynamic_application": leaf("dynamic-application"),
+            "url_category": leaf("url-category"),
+            "source_end_user_profile": leaf("source-end-user-profile"),
         },
         "action": action,
         "application_services": child_tags(kid(permit, "application-services")),
         "tunnel": text(tunnel, "ipsec-vpn"),
-        "log": {"init": present(log, "session-init"), "close": present(log, "session-close")},
-        "count": present(then, "count"),
+        "log": {
+            "init": _flag(log, "session-init", inactive_parts, "then log "),
+            "close": _flag(log, "session-close", inactive_parts, "then log "),
+        },
+        "count": _flag(then, "count", inactive_parts, "then "),
         "scheduler": text(node, "scheduler-name"),
         "inactive": inactive_reason is not None,
         "inactive_reason": inactive_reason,
@@ -385,6 +437,8 @@ def _policy(
         "inherited": inherited_parts(node),
         "groups": groups_in(node),
         "unmodeled": unmodeled,
+        # Deactivated parts of an otherwise active policy: not in effect, so not in the match lists.
+        "inactive_parts": inactive_parts,
     }
 
 
@@ -508,6 +562,10 @@ def _scope_inventory(scope_id: str, label: str, node: Element, scope_inactive: b
         if row["unmodeled"]:
             warnings.append(
                 f"Policy {row['name']} has settings J-Wicket does not display yet: {', '.join(row['unmodeled'])}."
+            )
+        if row["inactive_parts"] and not row["inactive"]:
+            warnings.append(
+                f"Policy {row['name']} has deactivated parts (not in effect): {', '.join(row['inactive_parts'])}."
             )
         if row["action"] == "unknown":
             warnings.append(f"Policy {row['name']} has no permit, deny or reject action J-Wicket recognises.")

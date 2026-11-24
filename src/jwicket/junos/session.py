@@ -42,7 +42,13 @@ ALLOWED_RPCS: FrozenSet[str] = frozenset(
         # Spec 004. Reply formats are confirmed per release by Q-REL-01.
         "get-flow-session-information",  # show security flow session [filters] / summary
         "get-log",  # show log <file>
+        "get-security-log-information",  # show security log (event-mode RE buffer)
     }
+    | {f"get-sec-log-report-detail-{t}" for t in (
+        # show security log report in-detail <type> (on-box reporting database)
+        "session-all", "session-close", "session-create", "session-deny",
+        "screen", "idp-all", "utm-all", "ipsec-vpn", "threat", "all",
+    )}
 )
 
 # Committed database, with group inheritance expanded and annotated with the source group.
@@ -104,7 +110,8 @@ class PyEzUserSession:
         self._dev = dev
         self._user = user
         self._lock = threading.Lock()
-        self._closed = False
+        self._closed = False  # no further RPCs will be sent
+        self._released = False  # the PyEZ Device has been closed
 
     @property
     def user(self) -> str:
@@ -149,9 +156,11 @@ class PyEzUserSession:
         return self._call(lambda: getattr(self._dev.rpc, method)(**params))
 
     def close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
+        if self._released:
+            return
+        self._released = True
+        # Close even after a transport loss: the Device may still hold ncclient threads and sockets.
         try:
             self._dev.close()
         except Exception as exc:  # noqa: BLE001 - closing a dead session must not raise

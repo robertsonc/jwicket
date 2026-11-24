@@ -8,6 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 from xml.etree import ElementTree
 
 from jwicket.api import App, build_router
@@ -229,9 +230,12 @@ class Clock:
 
 
 class LiveHttpTests(unittest.TestCase):
+    fixture = "branch"
+
     def setUp(self) -> None:
         self.clock = Clock()
-        backend = FixtureBackend(FIXTURES / "branch")
+        # Freeze the live fixture's wall clock so the synthetic session table is identical on every read.
+        backend = FixtureBackend(FIXTURES / self.fixture, clock=lambda: 1_795_503_600.0)
         self.app = App(
             backend=backend,  # type: ignore[arg-type]
             sessions=SessionStore(idle_s=900, absolute_s=3600, max_sessions=4, clock=self.clock),
@@ -315,19 +319,36 @@ class LiveHttpTests(unittest.TestCase):
     def test_sessions_scope_other_than_root_refused(self) -> None:
         self.assertEqual(self.get("/api/sessions?scope=lsys:LS-A")[0], 400)
 
-    def test_unfiltered_read_refused_on_large_tables(self) -> None:
+    def test_refusal_follows_the_matching_count(self) -> None:
+        status, _, data = self.get("/api/sessions")
+        self.assertEqual(status, 200)
+        everything = data["matching"]
+        self.assertEqual(everything, data["summary"]["active"])
+        self.clock.now += 2
+        _, _, narrow = self.get("/api/sessions?dport=53")
+        few = narrow["matching"]
+        self.assertLess(few, everything)
+        self.assertEqual(few, len(narrow["sessions"]["rows"]))
         original = S.MAX_UNFILTERED
-        S.MAX_UNFILTERED = 1
+        S.MAX_UNFILTERED = few  # the unfiltered table is now "too big"; the narrow one is not
         try:
-            status, _, data = self.get("/api/sessions")
-            self.assertEqual(status, 200)
+            self.clock.now += 2
+            _, _, data = self.get("/api/sessions")
             self.assertEqual(data["sessions"]["status"], "refused")
             self.assertEqual(data["sessions"]["rows"], [])
+            self.assertIn(f"{everything:,} sessions match", data["sessions"]["message"])
             self.clock.now += 2
-            status, _, data = self.get("/api/sessions?dport=443")
+            _, _, data = self.get("/api/sessions?dport=53")
             self.assertEqual(data["sessions"]["status"], "ok")
         finally:
             S.MAX_UNFILTERED = original
+
+    def test_filtered_read_keeps_the_table_wide_gauge(self) -> None:
+        _, _, first = self.get("/api/sessions")
+        self.clock.now += 2
+        _, _, narrow = self.get("/api/sessions?dport=53")
+        self.assertEqual(narrow["summary"]["max"], first["summary"]["max"])
+        self.assertIsNotNone(narrow["summary"]["active"])
 
     def test_log_sources_and_tail(self) -> None:
         status, _, data = self.get("/api/logs/sources")
@@ -344,6 +365,26 @@ class LiveHttpTests(unittest.TestCase):
         status, _, again = self.get(f"/api/logs?file=traffic-log&cursor={log['cursor']}")
         self.assertEqual(status, 200)
         self.assertFalse(again["log"]["reset"])
+
+    def test_event_mode_buffer_source(self) -> None:
+        _, _, data = self.get("/api/logs/sources")
+        traffic = data["sources"]["traffic"]
+        self.assertEqual(traffic["effective_mode"], "event")
+        self.assertIn("buffer", [d["id"] for d in data["sources"]["databases"]])
+        self.assertIn("UI_NETCONF_CMD", data["sources"]["self_noise"])
+        status, _, data = self.get("/api/logs?source=buffer")
+        self.assertEqual(status, 200)
+        log = data["log"]
+        self.assertEqual(log["status"], "ok")
+        self.assertTrue(log["events"])
+        self.assertTrue(all(e["id"].startswith("RT_FLOW_SESSION_") for e in log["events"]))
+        self.assertEqual(len(log["events"]), len(log["lines"]))
+        self.clock.now += 2
+        self.assertEqual(self.get("/api/logs?source=buffer&since=2026-11-24%2006:00")[0], 400)
+
+    def test_report_source_is_offered_only_when_configured(self) -> None:
+        _, _, data = self.get("/api/logs/sources")
+        self.assertNotIn("report", [d["id"] for d in data["sources"]["databases"]])
 
     def test_log_file_allowlist_and_validation(self) -> None:
         for path in ("/api/logs?file=..%2F..%2Fetc%2Fpasswd", "/api/logs?file=nope", "/api/logs?lines=many",
@@ -379,6 +420,71 @@ class LiveHttpTests(unittest.TestCase):
         self.assertEqual((status, data["log"]["status"], data["log"]["lines"]), (200, "denied", []))
         status, _, data = self.get("/api/sessions", cookie)
         self.assertEqual((data["summary"]["status"], data["sessions"]["status"]), ("denied", "denied"))
+
+
+class ReportHttpTests(LiveHttpTests):
+    """The cluster fixture streams traffic logs off-box and keeps an on-box report database."""
+
+    fixture = "cluster-lsys"
+
+    def test_sources_explain_stream_mode(self) -> None:
+        _, _, data = self.get("/api/logs/sources")
+        traffic = data["sources"]["traffic"]
+        self.assertEqual((traffic["mode"], traffic["effective_mode"]), ("stream", "stream"))
+        self.assertIn("192.0.2.50", traffic["where"])
+        self.assertIn("report", [d["id"] for d in data["sources"]["databases"]])
+        self.assertNotIn("buffer", [d["id"] for d in data["sources"]["databases"]])
+
+    def test_report_read_and_validation(self) -> None:
+        status, _, data = self.get("/api/logs?source=report&type=session-all&count=50")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["log"]["lines"]), 3)
+        self.assertTrue(data["log"]["lines"][0].startswith("<14>1 "))
+        for bad in ("type=session-everything", "expression=" + "x" * 300, "expression=a%3Bb",
+                    "start=yesterday", "count=lots"):
+            with self.subTest(bad=bad):
+                self.clock.now += 2
+                self.assertEqual(self.get(f"/api/logs?source=report&{bad}")[0], 400)
+        self.clock.now += 2
+        ok = urlencode({"expression": "(source-address=10.30.1.0/24 && destination-port=443)"})
+        self.assertEqual(self.get(f"/api/logs?source=report&{ok}")[0], 200)
+
+    # The branch-fixture tests below do not apply to this fixture.
+    test_sessions_read_and_rate_limit = None  # type: ignore[assignment]
+    test_sessions_pushdown_filters = None  # type: ignore[assignment]
+    test_refusal_follows_the_matching_count = None  # type: ignore[assignment]
+    test_filtered_read_keeps_the_table_wide_gauge = None  # type: ignore[assignment]
+    test_log_sources_and_tail = None  # type: ignore[assignment]
+    test_log_contains_filter_pushdown = None  # type: ignore[assignment]
+    test_event_mode_buffer_source = None  # type: ignore[assignment]
+    test_report_source_is_offered_only_when_configured = None  # type: ignore[assignment]
+
+
+class ModeAndExpressionTests(unittest.TestCase):
+    def test_default_modes(self) -> None:
+        self.assertEqual(L.default_mode("vsrx")[0], "event")
+        self.assertEqual(L.default_mode("srx345")[0], "stream")
+        self.assertEqual(L.default_mode("srx1500")[0], "stream")
+        self.assertEqual(L.default_mode("srx5800")[0], "stream")
+        self.assertIsNone(L.default_mode("srx4600")[0])
+        self.assertIsNone(L.default_mode(None)[0])
+
+    def test_expression_validation(self) -> None:
+        self.assertEqual(L.parse_expression("(a=1 && b!=2) || c>=3"), "(a=1 && b!=2) || c>=3")
+        for bad in ("x" * 257, "a=1; show", "a='1'", 'a="1"', "a=1\n"):
+            with self.subTest(bad=bad), self.assertRaises(L.LogQueryError):
+                L.parse_expression(bad)
+
+    def test_buffer_events_shape(self) -> None:
+        reply = xml(
+            "<security-log-information><security-event><security-event-time>2026-11-24.06:00:01</security-event-time>"
+            "<security-event-id>RT_FLOW_SESSION_DENY</security-event-id><security-event-message>session denied x"
+            "</security-event-message><process><name>flowd</name><pid>12</pid></process></security-event>"
+            "</security-log-information>"
+        )
+        got = L.buffer_events(reply)
+        self.assertEqual(got["lines"], ["2026-11-24.06:00:01 flowd[12]: RT_FLOW_SESSION_DENY: session denied x"])
+        self.assertFalse(got["disabled"])
 
 
 def _rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
