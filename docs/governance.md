@@ -154,6 +154,9 @@ records the owner's acceptance in its Status field yet, and none is qualified.
 7. Open questions name who decides and what settles them.
 8. Nothing writes to a device unless the spec is Spec 002 or builds on it, and nothing that writes
    ships before G4.
+9. Every view and state is usable by an operator who does not know Junos: the Junos concepts it
+   shows are explained where they appear, with the matching command alongside
+   ([ADR 0010](adr/0010-usable-without-knowing-junos.md)).
 
 **Changing an accepted spec.** Edit it in a pull request and add a dated line to its Status
 section saying what changed. If the change reverses a decision recorded in an ADR, write the ADR
@@ -216,7 +219,7 @@ These block a gate or a qualification run. Each is the owner's unless the row sa
 | D4 | Side project, or a proposal to the product team? A side project can stop at G3 with no device writes | Whether G4 and G5 are pursued | [Charter, open question 3](charter.md#9-open-questions-for-the-owner) |
 | D5 | Does preview-only mode (a load into the operator's private copy and a commit check) count as "no device writes" for G3? If not, Spec 003 at G3 uses J-Wicket's local model only. Owner with the security reviewer | G3 scope | [Spec 002, open question 2](specs/002-change-protocol.md#20-open-questions) |
 | D6 | Confirm Junos-FIPS mode devices as a non-goal for the unsigned app, and that J-Wicket replaces the management UI only, not firewall web authentication or Juniper Secure Connect | Ledger rows; charter non-goals | [Charter, section 7](charter.md#junos-fips-mode) |
-| D7 | Place the tests that the gate definitions do not name ([3.1](#31-tests-the-gate-definitions-do-not-place)), and accept or reject the **proposed** additions to the exit criteria in [section 3](#3-gates-g0-to-g5): the Spec 001 and 004 acceptance criteria at G1, and the `out-of-scope` and `replace` clauses at G2 | G1, G2 planning | This page |
+| D7 | Place the tests that the gate definitions do not name ([3.1](#31-tests-the-gate-definitions-do-not-place)), and accept or reject the **proposed** additions to the exit criteria in [section 3](#3-gates-g0-to-g5): the Spec 001 and 004 acceptance criteria at G1, the `out-of-scope` and `replace` clauses at G2, and the G2 check with operators new to Junos that [ADR 0010](adr/0010-usable-without-knowing-junos.md) proposes | G1, G2 planning | This page |
 | D8 | Does G5 require the `P2` and `P3` rows, or can a read-only J-Wicket reach customer production after G2 with a signed package and a support statement? | G5 scope | This page |
 | D9 | Set the budgets for Q-HW-01 and Q-LOAD-01 to Q-LOAD-03 before they run | Those tests | This page |
 | D10 | Adopt the J-Web 24.4 reference observation as a qualification item ([4.12](#412-proposed-additions)) | Spec 002 open question 16; catalog unknowns | [Catalog, unknowns](catalog.md#unknowns-and-what-settles-them) |
@@ -1010,7 +1013,8 @@ Three deliverables, in order. Each is read-only. None asks anyone to change a pr
 | 3 | **TLS and the G1 security work** | A TLS and certificate-provisioning spec accepted; Q-TLS-01 run on the lab vSRX; the [known code gaps](architecture.md#15-known-gaps-in-the-current-code) fixed or accepted, so that Q-SEC-01 reviews a stable target | A named security reviewer (D1); Q-RT-01 showing `ssl` | Q-TLS-01 and Q-SEC-01 can start |
 
 Not in the next three: any write path, building Spec 003, and non-loopback listeners on hardware. Spec 003's
-review and the expansion of the parity ledger continue in parallel, as documents. After these
+review, the expansion of the parity ledger and a spec for explaining Junos in place (read-only,
+[ADR 0010](adr/0010-usable-without-knowing-junos.md)) continue in parallel, as documents. After these
 three: SRX300-class hardware (Q-HW-01) and a second and third release for Q-REL-01.
 
 ## 9. Risk register

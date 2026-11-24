@@ -94,11 +94,13 @@ also a web server on the routing engine, and it has to earn trust through the se
 | --- | --- | --- |
 | Customers who manage an SRX on the box (the destination) | The J-Web 24.4 tasks, done safely, with the login class they already have | Not before G5: signed package, support statement, HA and upgrade qualified |
 | Systems engineers (SEs) and labs (first, while J-Wicket is unqualified) | Read-only look-ups and demos on lab devices | Now on synthetic fixtures (`make dev`); on a disposable lab vSRX only through [deploy-lab.md](deploy-lab.md) for qualification; real-lab use is a G2 exit criterion |
+| Operators new to Junos (a rule that applies to every audience in this table) | To use each screen without knowing Junos: concepts explained where they appear, the matching Junos command alongside | A design rule from [ADR 0010](adr/0010-usable-without-knowing-junos.md) on; the explain-in-place layer needs its own spec, not yet written |
 | Operators with restricted login classes (auditors, read-only staff) | To see exactly what Junos lets them see, with denied reads shown as denied | A design rule from Spec 001 on; proven on a device by Q-AUTH-03 (G1) |
 | The named security reviewer and the qualification lab owner | Evidence they can check | G1 and G4 sign-off; certification of every `qualified` ledger row |
 
 SEs and labs come first because J-Wicket is unqualified. That ordering is about risk, not about who
-the product is for.
+the product is for. Installing J-Wicket takes someone with Junos skills, an SE or an administrator,
+once per device; J-Wicket does not remove that step ([ADR 0010](adr/0010-usable-without-knowing-junos.md)).
 
 ## 2. What success means
 
@@ -121,6 +123,7 @@ Security Director Cloud". Its table of contents has 453 topics and its PDF has 1
 | --- | --- | --- |
 | Reviewing scope | Every screen states the device, its node and role in a cluster (the role waits on Q-HA-02), the logical system or tenant, the signed-in user, the time of the read, and any central manager detected ("also managed from"). Denied reads show as denied, never as empty. Exports carry the same stamp. | [Spec 001](specs/001-policy-inventory.md), [ADR 0004](adr/0004-no-sample-data.md), [ADR 0009](adr/0009-central-management-coexistence.md) |
 | Explaining policy decisions | For a zone pair, the evaluation order: zone-pair policies, then the global policies that apply, then the default policy, with inactive rules shown as skipped and inherited rules shown with the group they came from. Flow-level answers come from the device's own lookup, not from a J-Wicket matcher. | [Spec 001](specs/001-policy-inventory.md), [ADR 0005](adr/0005-committed-config-with-provenance.md), [ADR 0006](adr/0006-device-explains-policy-decisions.md) |
+| Usable without knowing Junos | Each Junos concept on a screen (for example zones, screens, host-inbound traffic, source and destination NAT, global and default policies) is explained where it appears, in plain words, with the matching Junos command alongside; log lines and states are decoded into sentences. Read-only. | [ADR 0010](adr/0010-usable-without-knowing-junos.md); spec to be written |
 | Recovering from changes | Every change is a reviewed diff, committed with automatic rollback, attributed to the operator, refused in place when a configuration group owns the object, and acknowledged when a central manager also owns the device. | [Spec 002](specs/002-change-protocol.md) (specified, not built) |
 
 **The owner's binding additions.** The UI must be as good to look at as it is to use. Log viewing
@@ -140,6 +143,7 @@ SEs choosing J-Wicket over J-Web for look-ups on real labs (the spike report's o
 | Read before write | Least-privilege, TLS-protected on-box reads are proven (G1) and read parity is reached (G2) before any live write path exists (G4). The first configuration wizard is preview-only (G3). | [governance.md](governance.md), README |
 | Junos is the authority for identity, rights and configuration | Sign-in is delegated to Junos through a NETCONF session per operator; J-Wicket stores no password and has no roles of its own. Reads use the committed configuration with inheritance. The device, not J-Wicket, answers "which policy matches this flow". | [ADR 0002](adr/0002-junos-delegated-sign-in.md), [ADR 0005](adr/0005-committed-config-with-provenance.md), [ADR 0006](adr/0006-device-explains-policy-decisions.md) |
 | Least privilege | Every read runs with the operator's own login class. The daemon's own account is used only by the loopback-only lab-token backend, which says so on every screen. Only allowlisted RPCs can be sent, and only the configuration subtrees a feature needs are read. | [ADR 0002](adr/0002-junos-delegated-sign-in.md), [`src/jwicket/junos/session.py`](../src/jwicket/junos/session.py) |
+| Usable without knowing Junos | Every view and state can be used by an operator new to Junos. Junos is explained and shown, not hidden, so the operator learns the commands as they go. An explanation of Junos behaviour is sourced, or it is not shipped. | [ADR 0010](adr/0010-usable-without-knowing-junos.md) |
 | No sample data | A panel shows device data or one of `denied`, `unsupported`, `failed`, `session-lost`. Fixture data appears only in the development server, under a banner. | [ADR 0004](adr/0004-no-sample-data.md) |
 | Offline-capable, as ADR 0007 defines it | No runtime internet dependency: every asset comes from the device and the Content Security Policy allows only the device. It does **not** mean the UI works while the device is unreachable, and device data is never cached in the browser. Review away from the device uses explicit, stamped exports. | [ADR 0007](adr/0007-offline-capable-meaning.md) |
 | One device only | J-Wicket manages the device it runs on and nothing else. Multi-device management belongs to Security Director, Security Director Cloud and Mist, which J-Wicket detects and treats as co-owners. | [ADR 0009](adr/0009-central-management-coexistence.md) |

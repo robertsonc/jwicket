@@ -10,7 +10,8 @@ a later record supersedes an earlier one and says so.
 Proposed and only the owner accepts it. So all nine read **Proposed** until the owner accepts each
 one in a pull request, which then sets `Status: Accepted (YYYY-MM-DD)` and links the pull request
 here (decision D11 in [governance section 2.5](../governance.md#25-decisions-pending)). Until then
-they may still be corrected in place.
+they may still be corrected in place. ADR 0010 records an owner decision made on 2026-11-24, so it
+starts as Accepted.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
@@ -23,6 +24,7 @@ they may still be corrected in place.
 | [0007](0007-offline-capable-meaning.md) | "Offline-capable" means no runtime internet dependency, not browser caching of device data. `localStorage` holds UI preferences and operator-saved query text, never device replies (widened 2026-11-24 for Spec 004's saved queries; Spec 004 open question 14) | Proposed |
 | [0008](0008-release-scoped-parity.md) | Parity is measured against one named J-Web release, in a ledger | Proposed |
 | [0009](0009-central-management-coexistence.md) | Detect central management and treat it as a co-owner of the configuration | Proposed |
+| [0010](0010-usable-without-knowing-junos.md) | Every screen is usable without knowing Junos: concepts explained in place, the command alongside; reads stay first; an SE or administrator installs | Accepted (2026-11-24, owner decision; confirmed by the merge of its pull request) |
 
 Corrections made in place on 2026-11-24, while the records are Proposed: ADR 0001 names the roadmap
 phase that would bring a signed package (phase 6, Production); ADR 0002 points its multi-factor
