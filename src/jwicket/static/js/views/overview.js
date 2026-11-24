@@ -257,7 +257,7 @@ class Overview {
     this.sessAgo = h('span', null, '');
     const link = h(
       'a',
-      { href: '#/sessions', on: { click: (e) => { e.preventDefault(); this.ctx.navigate('sessions', {}); } } },
+      { href: this.ctx.href('sessions', {}), on: { click: (e) => { e.preventDefault(); this.ctx.navigate('sessions', {}); } } },
       'Open Sessions',
       icon('arrow-right'),
     );
@@ -473,7 +473,7 @@ class Overview {
       const ok = section && section.status === 'ok';
       return h(
         'a',
-        { class: 'inv-count', href: `#/${viewId}`, on: { click: go(viewId, params) }, title: ok ? `${label}: ${sub}` : `${label}: ${section ? section.status : 'not read'}` },
+        { class: 'inv-count', href: this.ctx.href(viewId, params), on: { click: go(viewId, params) }, title: ok ? `${label}: ${sub}` : `${label}: ${section ? section.status : 'not read'}` },
         h('b', null, ok ? fmt.num(value) : '\u2014'),
         h('span', null, ok ? label : `${label}: ${section ? section.status : 'not read'}`),
         ok && meter ? meter : null,
@@ -611,7 +611,7 @@ class Overview {
             'a',
             {
               class: ['mx-cell', !p && 'empty', from === to && 'self'],
-              href: '#/policies',
+              href: this.ctx.href('policies', params),
               title: label,
               'aria-label': label,
               on: { click: (e) => { e.preventDefault(); this.ctx.navigate('policies', params); } },
@@ -912,7 +912,7 @@ class Overview {
                   : h('span', { class: 'muted' }, e.name),
                 h('span', { class: 'top-zones' }, zones),
               ),
-              h('a', { class: 'top-count', href: '#/sessions', title: `Sessions of ${e.name}`, on: { click: toSessions } }, fmt.num(e.count)),
+              h('a', { class: 'top-count', href: this.ctx.href('sessions', e.real ? { q: `policy:${quote(e.name)}` } : {}), title: `Sessions of ${e.name}`, on: { click: toSessions } }, fmt.num(e.count)),
               h('span', { class: ['bar', action === 'permit' ? 'permit' : action === 'deny' ? 'deny' : action === 'reject' ? 'reject' : 'muted'], 'aria-hidden': 'true' }, h('i', { style: { '--w': `${(e.count / max) * 100}%` } })),
             ),
           );
@@ -1100,7 +1100,7 @@ class Overview {
     put(t.foot, 
       this.denyAgo,
       h('span', { class: 'spacer' }),
-      h('a', { href: '#/logs', on: { click: (e) => { e.preventDefault(); this.ctx.navigate('logs', params); } } }, 'Open in Logs', icon('arrow-right')),
+      h('a', { href: this.ctx.href('logs', params), on: { click: (e) => { e.preventDefault(); this.ctx.navigate('logs', params); } } }, 'Open in Logs', icon('arrow-right')),
     );
     t.foot.hidden = false;
   }
@@ -1124,7 +1124,7 @@ class Overview {
       h('span', { class: 'tick-time' }, d.time || '\u2014'),
       h(
         'a',
-        { class: 'tick-flow', href: '#/logs', title: `Show these denies in Logs: ${q}`, 'aria-label': label, on: { click: open } },
+        { class: 'tick-flow', href: this.ctx.href('logs', { source, q }), title: `Show these denies in Logs: ${q}`, 'aria-label': label, on: { click: open } },
         h('span', { class: 'ip' }, d.src || '?'),
         h('span', { class: 'arrow' }, ARROW),
         h('span', { class: 'ip' }, d.dst || '?'),
@@ -1199,7 +1199,7 @@ class Overview {
             'a',
             {
               class: 'qlink',
-              href: `#/${v}?${sp.toString()}`,
+              href: this.ctx.href(v, sp),
               on: { click: (e) => { e.preventDefault(); this.ctx.navigate(v, l.params); } },
             },
             h('span', { class: 'qlink-icon' }, icon(v)),

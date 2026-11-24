@@ -260,7 +260,10 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 13px/1.45 var(--font-ui);
-  font-feature-settings: "cv11", "ss01";
+  /* No programming ligatures anywhere: an operator must see "!=" and "->" exactly as typed and
+     logged, not as glyphs that look like other characters. */
+  font-variant-ligatures: no-contextual;
+  font-feature-settings: "cv11", "ss01", "calt" 0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -320,6 +323,13 @@ svg {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
   border-radius: 4px;
+}
+
+/* Focus lands on these only programmatically (a panel opening, a view mounting) so that screen
+   readers start there; they are not controls, so they get no ring. */
+.panel-title:focus-visible,
+.main:focus-visible {
+  outline: none;
 }
 
 * {
@@ -2169,6 +2179,19 @@ tr:hover .cell-actions,
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
+}
+
+/* Phone width: the key hints fit on one line; the privacy note does not, so it gives way. */
+@media (max-width: 560px) {
+  .pal-foot {
+    gap: var(--s3);
+    overflow: hidden;
+  }
+
+  .pal-foot span:last-child {
+    display: none;
+  }
 }
 
 .keys-dialog {
@@ -3331,6 +3354,10 @@ a.inv-count:hover {
     top: 0 !important;
     width: 100vw;
     border-left: 0;
+  }
+  /* The full-screen sheet still leaves the fixture banner showing: fixture data is never unlabelled. */
+  .fixture-banner:not([hidden]) ~ .panel {
+    top: 24px !important;
   }
   .panel-scrim.show { display: block; }
   .layer { padding: var(--s3); }

@@ -23,7 +23,6 @@ const ICON = 'M12 3l7.5 3v5.2c0 4.4-3.1 8.2-7.5 9.8-4.4-1.6-7.5-5.4-7.5-9.8V6z M
 const SEP = ' \u00b7 ';
 const ARROW = '\u2192';
 const LIST_LIMIT = 4;
-const EXPORT_GAP_MS = 2200;
 const AGE_TICK_MS = 30000;
 const SUMMARY_PREF = 'jwicket.policies.summary'; // UI preference only (never device data)
 
@@ -465,7 +464,6 @@ class PoliciesView {
     this.snap = null;
     this.model = null;
     this.receivedAt = 0;
-    this.lastExport = 0;
     this.text = '';
     this.ast = null;
     this.match = () => true;
@@ -1707,24 +1705,9 @@ class PoliciesView {
 
   exportAs(fmtName) {
     if (!['json', 'csv'].includes(fmtName)) return;
-    const scope = this.ctx.store.scope;
-    const now = Date.now();
-    const wait = Math.max(0, this.receivedAt + EXPORT_GAP_MS - now, this.lastExport + EXPORT_GAP_MS - now);
-    const go = () => {
-      if (this.dead) return;
-      this.lastExport = Date.now();
-      const a = this.h('a', { href: `/api/export?scope=${encodeURIComponent(scope)}&format=${fmtName}`, download: '', class: 'sr-only' });
-      document.body.append(a);
-      a.click();
-      a.remove();
-      this.ctx.ui.toast(`Exporting ${scopeTitle(this.snap, scope)} as ${fmtName.toUpperCase()}: a fresh read of the device, not a copy of this page.`, 'ok');
-    };
-    if (wait > 0) {
-      this.ctx.ui.toast(`Export reads the device again; starting in ${Math.ceil(wait / 1000)} s.`, 'info');
-      setTimeout(go, wait);
-    } else {
-      go();
-    }
+    // The shell fetches the export and saves it from a Blob, pacing reads and turning a 429 or 401
+    // into a message, so an error reply is never saved as the file.
+    this.ctx.ui.exportInventory(fmtName, this.ctx.store.scope);
   }
 
   // ---- keyboard --------------------------------------------------------------------------------

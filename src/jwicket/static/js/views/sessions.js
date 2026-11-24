@@ -1842,7 +1842,22 @@ class SessionsView {
     document.body.append(el);
     const r = btn.getBoundingClientRect();
     const w = el.offsetWidth;
-    el.style.top = `${Math.round(r.bottom + 6)}px`;
+    // Keep the whole menu on screen: below the button when it fits, else above it, and never under
+    // the phone-width bottom navigation (the rail moves there).
+    const rail = document.getElementById('rail');
+    const rr = rail ? rail.getBoundingClientRect() : null;
+    const floor = rr && rr.height && rr.top > window.innerHeight / 2 ? rr.top : window.innerHeight;
+    const below = floor - r.bottom - 14;
+    const above = r.top - 14;
+    const natural = el.scrollHeight;
+    if (natural > below && above > below) {
+      const mh = Math.min(natural, above);
+      el.style.maxHeight = `${Math.floor(mh)}px`;
+      el.style.top = `${Math.round(r.top - 6 - mh)}px`;
+    } else {
+      el.style.maxHeight = `${Math.floor(Math.max(120, below))}px`;
+      el.style.top = `${Math.round(r.bottom + 6)}px`;
+    }
     el.style.left = `${Math.round(Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w)))}px`;
     btn.setAttribute('aria-expanded', 'true');
     this.menu = { el, btn, onDoc };
@@ -1901,10 +1916,9 @@ class SessionsView {
   }
 
   toggleDensity() {
-    // Row density is a shell preference (rail foot and palette); use the shell's own control so its
-    // label and stored preference stay in step.
-    const shellBtn = [...document.querySelectorAll('.rail-foot button.rail-item')].find((b) => b.hasAttribute('aria-pressed'));
-    if (shellBtn) shellBtn.click();
+    // Row density is a shell preference (rail foot, palette, this menu): the shell stores it and
+    // dispatches jwicket:density, which refits the rows.
+    if (typeof this.ctx.ui.toggleDensity === 'function') this.ctx.ui.toggleDensity();
   }
 
   openSortMenu() {

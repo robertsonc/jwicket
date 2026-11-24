@@ -27,7 +27,6 @@ const VIEW_BY_ID = new Map(VIEWS.map((v) => [v.id, v]));
 const SCOPE_RE = /^(root|lsys:[A-Za-z0-9._-]{1,63}|tenant:[A-Za-z0-9._-]{1,63})$/;
 const PREF = { theme: 'jwicket.theme', density: 'jwicket.density', rail: 'jwicket.rail' };
 const ANNOUNCE_GAP_MS = 10000;
-const EXPORT_GAP_MS = 2200;
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
 const SEP = ' · ';
 
@@ -57,7 +56,6 @@ const S = {
   fixture: false,
   recent: [], // query strings visited in this tab (memory only)
   reading: 0,
-  lastExport: 0,
 };
 
 const listeners = { inventory: new Set(), sessions: new Set(), scope: new Set() };
@@ -658,6 +656,9 @@ function makeCtx(record) {
       return routeCopy();
     },
     navigate,
+    /** The hash navigate(viewId, params) would set: for href attributes, so open-in-new-tab and
+        copy-link keep the filters and the scope. */
+    href: (viewId, params) => hashFor(VIEW_BY_ID.has(viewId) ? viewId : 'overview', withScope(toParams(params))),
     setParams,
     store: makeStore(record),
     ui: {
@@ -668,6 +669,8 @@ function makeCtx(record) {
       setLive: (viewId, on) => setLive(viewId, Boolean(on), record),
       noteFixture,
       copy,
+      toggleDensity,
+      exportInventory: (fmt, scope) => exportInventory(fmt, scope || S.scope),
     },
     query: engines.query,
     logparse: engines.logparse,
@@ -1337,18 +1340,30 @@ function refresh() {
   toast('Refreshing from the device…', 'info');
 }
 
-function exportInventory(fmt) {
-  const wait = S.lastExport + EXPORT_GAP_MS - Date.now();
-  const go = () => {
-    S.lastExport = Date.now();
-    const link = h('a', { href: api.buildUrl('/api/export', { scope: S.scope, format: fmt }), download: '', class: 'sr-only' });
-    document.body.append(link);
-    link.click();
-    link.remove();
-    toast(`Exporting ${scopeLabel(S.scope)} as ${fmt.toUpperCase()} (a fresh device read).`, 'ok');
-  };
-  if (wait > 0) setTimeout(go, wait);
-  else go();
+/** Export the inventory (a fresh device read) as a file. Fetched, then saved from a Blob, so that a
+    429 or 401 reply is shown as a message and never saved as the export. */
+async function exportInventory(fmt, scope = S.scope) {
+  if (fmt !== 'json' && fmt !== 'csv') return false;
+  if (!SCOPE_RE.test(scope)) return false;
+  const gen = S.gen;
+  const label = scopeLabel(scope);
+  toast(`Exporting ${label} as ${fmt.toUpperCase()}: a fresh read of the device, not a copy of this page.`, 'info');
+  let res = await api.download('/api/export', { scope, format: fmt });
+  // api.js waits out the Retry-After before the next call for the same endpoint.
+  if (res.status === 429 && gen === S.gen) res = await api.download('/api/export', { scope, format: fmt });
+  if (gen !== S.gen) return false;
+  if (!res.ok) {
+    if (res.status !== 401) toast((res.data && res.data.error) || `The export failed (HTTP ${res.status}).`, 'error');
+    return false;
+  }
+  const url = URL.createObjectURL(res.blob);
+  const link = h('a', { href: url, download: res.filename || `jwicket-${scope.replace(/[^A-Za-z0-9._-]/g, '_')}.${fmt}`, class: 'sr-only' });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  toast(`Saved ${res.filename || `the ${fmt.toUpperCase()} export`}.`, 'ok');
+  return true;
 }
 
 function paletteItems() {
@@ -1715,13 +1730,22 @@ async function onSignIn(event) {
   enterApp();
 }
 
+let signingOut = false;
+
 async function signOut() {
-  if (!S.session) return;
-  const res = await api.post('/api/logout', {});
-  const info = await api.get('/api/session', null, { evenIfHidden: true });
-  if (info.ok) S.server = info.data;
-  if (res.ok) leaveApp('You are signed out. Your device session is closed.', false);
-  else leaveApp(res.data.error || 'J-Wicket could not confirm the sign-out. Close the browser to be sure.', true);
+  if (!S.session || signingOut) return;
+  signingOut = true;
+  try {
+    const res = await api.post('/api/logout', {});
+    const info = await api.get('/api/session', null, { evenIfHidden: true });
+    if (info.ok) S.server = info.data;
+    // A 401 means the session had already ended (idle timeout, or signed out in another tab).
+    const closed = res.ok || res.status === 401 || (info.ok && info.data.authenticated === false);
+    if (closed) leaveApp('You are signed out. Your device session is closed.', false);
+    else leaveApp(res.data.error || 'J-Wicket could not confirm the sign-out. Close the browser to be sure.', true);
+  } finally {
+    signingOut = false;
+  }
 }
 
 function onUnauthorized(data) {

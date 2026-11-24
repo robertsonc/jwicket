@@ -8,6 +8,7 @@
 // * While the tab is hidden, GETs wait for it to be visible again, so live polling stops and resumes
 //   on its own (Junos logs every read; nobody is watching a hidden tab).
 // * Network errors resolve { ok: false, status: 0 }.
+// * download() fetches a file (the inventory export) so that only a 200 body becomes a file.
 //
 // URLs are built only from a fixed /api/ path and URLSearchParams-encoded values.
 
@@ -18,7 +19,7 @@ const NETWORK_ERROR =
 
 // The server refuses a re-read of these endpoints within a short gap (HTTP 429). Pacing requests here
 // keeps normal use (views remounting, a refresh right after a poll) from ever hitting that limit.
-const MIN_GAP_MS = { '/api/inventory': 2100, '/api/sessions': 1600, '/api/logs': 1600 };
+const MIN_GAP_MS = { '/api/inventory': 2100, '/api/export': 2100, '/api/sessions': 1600, '/api/logs': 1600 };
 
 let csrf = '';
 let unauthorizedHandler = null;
@@ -98,6 +99,13 @@ function whenVisible(signal) {
   });
 }
 
+// Only a plain file name from Content-Disposition; anything else falls back to the caller's name.
+function filenameOf(res) {
+  const cd = res.headers.get('Content-Disposition') || '';
+  const m = /filename="([A-Za-z0-9._-]{1,120})"/.exec(cd);
+  return m ? m[1] : '';
+}
+
 function retryAfterOf(res, data) {
   const header = parseInt(res.headers.get('Retry-After') || '', 10);
   if (Number.isFinite(header) && header > 0) return header;
@@ -145,6 +153,20 @@ async function request(method, path, params, body, opts = {}) {
     if (signal && signal.aborted) return { ok: false, status: 0, data: {}, retryAfter: 0, aborted: true };
     return { ok: false, status: 0, data: { error: NETWORK_ERROR }, retryAfter: 0 };
   }
+  if (opts.raw && res.ok) {
+    // A download (export): the body is the file, not JSON for the caller to read.
+    let blob = null;
+    try {
+      blob = await res.blob();
+    } catch (_err) {
+      blob = null;
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    }
+    if (!blob) return { ok: false, status: 0, data: { error: NETWORK_ERROR }, retryAfter: 0 };
+    return { ok: true, status: res.status, data: {}, retryAfter: 0, blob, filename: filenameOf(res) };
+  }
   let data = {};
   try {
     const parsed = await res.json();
@@ -174,6 +196,12 @@ async function request(method, path, params, body, opts = {}) {
 /** get('/api/sessions', { dport: 443 }, { signal }) */
 export function get(path, params, opts) {
   return request('GET', path, params, null, opts);
+}
+
+/** download('/api/export', { scope, format }) -> { ok, status, blob, filename, data, retryAfter }.
+    Errors (401, 429, ...) come back as JSON in data, so an error body is never saved as the file. */
+export function download(path, params, opts) {
+  return request('GET', path, params, null, { ...(opts || {}), raw: true });
 }
 
 /** post('/api/logout', {}) */
