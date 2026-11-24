@@ -670,7 +670,7 @@ flowchart TD
 | O32 Licences | View: read view; add, delete, update: guided action | View: P1; actions: P3 | Needs internet for updates |
 | O33 Security packages | View: read view; install and update: guided action | View: P1; actions: P3 | Needs internet or an offline package upload |
 | O34 Log grids | Read view (Spec 004); see N4 | View, time range, Refresh, filter and Detailed Log View: P0 (the ATP page: P1); export, Save and Load Filter: P1; Show/Hide Columns and PCAP: P3 | Log mode decides where logs are; that SRX5000 has no on-box reporting is inferred (Feature Explorer 8049 does not list it; Q-LOG-01) |
-| O35 System log | Read view (Spec 004); backend built on fixtures, view not yet checked in a browser (AC-004-20) | P0 | Own NETCONF reads appear as UI_NETCONF_CMD lines (Q-LOAD-03) |
+| O35 System log | Read view (Spec 004); backend built on fixtures, view built and exercised by hand, browser acceptance not signed off (AC-004-20) | P0 | Own NETCONF reads appear as UI_NETCONF_CMD lines (Q-LOAD-03) |
 | O36 Alarms | View: read view; definitions: guided change | View: P1; definitions: P4 | — |
 | O37 Monitor clear actions | Guided action; Delete PCAP Files treated as destructive | P3 | Clearing SAs drops tunnels; MNHA SRG1 |
 | O38 Reports | as W12 | P3 | — |
@@ -796,8 +796,8 @@ behind N1 to N4 are `specified` today ([ledger summary, gap 4](parity/jweb-24.4.
   operator, and the server suggests a 5 s poll interval. The audit trail records each change of
   filters or outcome, not every poll. Root scope only for now.
   Code: [`live.py`](../src/jwicket/live.py), [`junos/sessions.py`](../src/jwicket/junos/sessions.py).
-  Status: backend built and tested on fixtures; the Sessions view is built in the working tree,
-  not yet committed, not yet checked in a browser (Spec 004, AC-004-20).
+  Status: backend built and tested on fixtures; the Sessions view is built and committed and has
+  been exercised by hand on the development server; browser acceptance is not signed off (Spec 004, AC-004-20).
 - **Unknown.** Reply element names per release (Q-REL-01); whether 5,000 is safe on small
   platforms (Q-LOAD-02); the cost of polling in UI_NETCONF_CMD log volume (Q-LOAD-03).
 
@@ -821,8 +821,8 @@ behind N1 to N4 are `specified` today ([ledger summary, gap 4](parity/jweb-24.4.
   highlighting run in the browser. J-Wicket's own NETCONF reads appear as UI_NETCONF_CMD lines and
   the viewer hides them by default. Code:
   [`live.py`](../src/jwicket/live.py), [`junos/logs.py`](../src/jwicket/junos/logs.py).
-  Status: backend built and tested on fixtures; the Logs view with highlighting is built in the
-  working tree, not yet committed, not yet checked in a browser (Spec 004, AC-004-20).
+  Status: backend built and tested on fixtures; the Logs view with highlighting is built and
+  committed and has been exercised by hand on the development server; browser acceptance is not signed off (Spec 004, AC-004-20).
 - **Session timelines (designed, not built).** Session create, close and deny logs carry a session
   ID. It is written `session-id-32` in many documentation samples and `session-id` in the Junos
   Syslog Explorer attribute lists and newer samples (verified,

@@ -1,6 +1,8 @@
 # Fixtures
 
-**Everything in this directory is synthetic.** The XML follows the Junos configuration and RPC
+**Everything in this directory is synthetic except `log-samples/juniper-docs.txt`**, a parser corpus of
+log lines copied verbatim from Juniper documentation (see [its README](log-samples/README.md)), which
+also carries addresses outside the ranges below. The XML follows the Junos configuration and RPC
 reply structure as documented for Junos 24.4, but none of it was captured from a device. Addresses
 use RFC 1918 and documentation ranges (RFC 5737); secrets are obvious placeholders.
 
