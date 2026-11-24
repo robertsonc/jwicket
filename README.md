@@ -1,6 +1,6 @@
 # J-Wicket
 
-**J-Web, the SRX's built-in web UI, has a security record that makes it hard to keep turned on. J-Wicket is a read-only alternative designed to run on the firewall itself: live sessions filtered as you type, logs highlighted as log syntax, policies in the order Junos checks them.**
+**J-Web, the SRX's built-in web UI, is thin where operators need it most. J-Wicket is an alternative designed to run on the firewall itself, starting read-only: live sessions filtered as you type, logs highlighted as log syntax, policies in the order Junos checks them.**
 
 [![ci](https://github.com/robertsonc/jwicket/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/robertsonc/jwicket/actions/workflows/ci.yml)
 ![Python 3.9 | 3.11 | 3.13 tested in CI](https://img.shields.io/badge/python-3.9%20%7C%203.11%20%7C%203.13-3776ab)
@@ -14,7 +14,7 @@
 
 *The Sessions view on the development server, polling every 2 s. `dport:443` is sent with the session-table read as an RPC parameter (gold DEVICE chip; here a fixture plays the device), `nat:dst bytes>1M` filters in the browser (sky BROWSER chips), and one session's flow drawer opens on its DNAT path. Synthetic fixture data, not read from a device.*
 
-Juniper published J-Web advisories every year from 2023 to 2026, five 2023 J-Web CVEs are in CISA's Known Exploited Vulnerabilities catalog, and for the 2023 and January 2024 advisories Juniper's workaround was "Disable J-Web, or limit access to only trusted hosts" ([sources](docs/charter.md#1-the-problem-and-who-it-is-for)). In J-Wicket each read is designed to run as your own Junos login, and the Logs view (built, and exercised by hand on synthetic fixtures) exports every line it holds that matches your filter, up to a 2,000 to 10,000-line window, where J-Web 24.4's Monitor > Logs grids export at most 100 rows ([ledger](docs/parity/jweb-24.4.csv)).
+In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids have a manual Refresh and no live tail, export at most 100 rows, and filter the system log on Event and Message with `=` only; security policies are inline grid rows with no policy wizard; and six paths commit at once with no review step ([catalog](docs/catalog.md#key-findings), [ledger](docs/parity/jweb-24.4.csv)). J-Wicket starts with the reads, each designed to run as your own Junos login. Its configuration path (reviewed diffs, confirmed commits and a preview-only policy builder) is specified, not built ([Spec 002](docs/specs/002-change-protocol.md), [Spec 003](docs/specs/003-firewall-policy-builder.md)).
 
 **Stage: foundation, not installable on a production SRX.**
 

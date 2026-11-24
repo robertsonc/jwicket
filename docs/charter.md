@@ -42,7 +42,24 @@ defined in [governance.md](governance.md).
 J-Web is the SRX's built-in browser UI. Operators who manage the firewall on the box, rather than
 from Security Director, Security Director Cloud or Mist, depend on it or on the CLI.
 
-J-Web's security record makes it hard to keep turned on:
+The owner's reason for the project is that J-Web is too thin for real work on the box: too little
+of what an operator needs is there, or usable. What the J-Web 24.4 guide documents bears that out
+in specific places (**verified**, [catalog, key findings](catalog.md#key-findings) and the
+[parity ledger](parity/jweb-24.4.md)):
+
+- Security policy and NAT rules are inline grid rows. There is no security-policy wizard, and of
+  the four "workflow wizards" the guide names (Setup, Chassis Cluster, PPPoE, NAT), two have no
+  documented steps.
+- Six paths commit at once with no review step: History Rollback, Upload and Commit, CLI Editor
+  Commit, Setup and Cluster wizard Finish, Skip Setup, and Add to Security Director Cloud. Upload
+  and CLI Editor replace the whole configuration.
+- No Monitor page lists live flow sessions; the dashboard widget shows active and maximum session
+  counts.
+- The Monitor > Logs grids have a manual Refresh and no live tail, and export at most 100 rows; the
+  System log filter matches Event and Message with `=` only.
+
+Separately, J-Web's security record gives customers a reason to turn it off. This is not why the
+project exists, but it shapes what an alternative has to prove:
 
 - Juniper published J-Web advisories every year from 2023 to 2026. Most were exploitable without
   signing in, and six were rated 9.8 by Juniper (CVSS 3.1): CVE-2023-36845, CVE-2024-21591 and the
@@ -62,7 +79,8 @@ J-Web's security record makes it hard to keep turned on:
 The project's premise, set by the owner, is that an on-box UI can also do more than reproduce
 J-Web's forms: show the operator exactly what scope they are looking at, explain why a policy
 decision comes out the way it does, and make every change easy to review and undo. That premise is
-a product bet, not a measured shortcoming of J-Web. J-Web 24.4 already has a commit menu with
+a product bet: the gaps above are documented, but that J-Wicket fills them better is not yet
+measured. J-Web 24.4 already has a commit menu with
 "Commit the changes with autorollback" ("Explore J-Web") and a Device Administration >
 Configuration Management > History page (**verified**, J-Web 24.4 guide).
 
