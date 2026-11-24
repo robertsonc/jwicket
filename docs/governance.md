@@ -133,8 +133,10 @@ Today: Spec 001 and Spec 004 are implemented on fixtures for their backends and 
 their UI views are built and committed and have been exercised by hand on the development server,
 but not signed off (AC-001-21, AC-004-20 not met), so their ledger rows stay `specified`. They are the first slices the
 owner named. Spec 002 is design
-only. Spec 003, the first planned configuration wizard, is specified and preview-only. No spec
-records the owner's acceptance in its Status field yet, and none is qualified.
+only. Spec 003, the first planned configuration wizard, is specified and preview-only.
+[Spec 005](specs/005-explain-junos-in-place.md), explaining Junos in place, is Draft: nothing is
+built, and it has no ledger rows (catalog N6). No spec records the owner's acceptance in its
+Status field yet, and none is qualified.
 
 **What a reviewer checks.**
 
@@ -1013,9 +1015,10 @@ Three deliverables, in order. Each is read-only. None asks anyone to change a pr
 | 3 | **TLS and the G1 security work** | A TLS and certificate-provisioning spec accepted; Q-TLS-01 run on the lab vSRX; the [known code gaps](architecture.md#15-known-gaps-in-the-current-code) fixed or accepted, so that Q-SEC-01 reviews a stable target | A named security reviewer (D1); Q-RT-01 showing `ssl` | Q-TLS-01 and Q-SEC-01 can start |
 
 Not in the next three: any write path, building Spec 003, and non-loopback listeners on hardware. Spec 003's
-review, the expansion of the parity ledger and a spec for explaining Junos in place (read-only,
-[ADR 0010](adr/0010-usable-without-knowing-junos.md)) continue in parallel, as documents. After these
-three: SRX300-class hardware (Q-HW-01) and a second and third release for Q-REL-01.
+review, the expansion of the parity ledger and [Spec 005](specs/005-explain-junos-in-place.md),
+explaining Junos in place (read-only, [ADR 0010](adr/0010-usable-without-knowing-junos.md)),
+continue in parallel, as documents. After these three: SRX300-class hardware (Q-HW-01) and a
+second and third release for Q-REL-01.
 
 ## 9. Risk register
 

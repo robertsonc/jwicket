@@ -873,7 +873,7 @@ flowchart TD
   each zone pair's policies are labelled "checked in this order"; "Explain a flow" lists the three
   steps Junos takes; every view builds the matching read-only `show` command to copy; denied,
   unsupported and failed states say why in plain words.
-- **Planned** (in a spec still to be written; [ADR 0010](adr/0010-usable-without-knowing-junos.md)). A short,
+- **Planned** (in [Spec 005](specs/005-explain-junos-in-place.md), Draft; [ADR 0010](adr/0010-usable-without-knowing-junos.md)). A short,
   plain-language explanation, with the matching Junos statement or command, wherever a Junos concept
   appears: zones and interfaces, screens, host-inbound traffic, address books and sets, applications
   and application sets, source and destination NAT, global and default policies, inactive
