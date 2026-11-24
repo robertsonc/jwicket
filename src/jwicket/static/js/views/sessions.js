@@ -10,6 +10,10 @@
 // session's lifetime) to compute a live rate from the delta between polls and to draw its sparkline.
 // Nothing read from the device is written to browser storage; localStorage holds UI preferences only
 // (columns, interval, facets rail).
+//
+// The table's DOM rows are keyed by session id too (RowWindow below): a poll patches the cells that
+// changed in place, so the focused row, the opener of the detail panel and the selection stay on the
+// session the operator chose while rows re-sort underneath.
 
 import { Gauge } from '../widgets/gauge.js';
 import { Sparkline } from '../widgets/sparkline.js';
@@ -23,6 +27,8 @@ const RATE_HISTORY = 120;
 const MAX_TRACKED = 8000;
 const FLASH_MS = 1900;
 const MOBILE_W = 700;
+const RETRY_S = 15;
+const ZONE_KEYS = new Set(['zone', 'from', 'to']);
 const SEP = ' · ';
 const ARROW = '→';
 const DASH = '—';
@@ -147,32 +153,301 @@ function haRole(r) {
   return null;
 }
 
+/**
+ * A rate for the table cell: at most 8 characters ("6.9 kB/s", "69 kB/s", "314 kB/s") so it fits
+ * its column; the detail panel and tooltips keep format.rate's precision.
+ */
+function rateShort(v, fmt) {
+  if (!Number.isFinite(v)) return DASH;
+  if (v > 0 && v < 1) return '<1 B/s';
+  if (v < 1000) return `${Math.round(v)} B/s`;
+  const units = ['kB', 'MB', 'GB', 'TB'];
+  let x = v / 1000;
+  let i = 0;
+  while (x >= 999.5 && i < units.length - 1) {
+    x /= 1000;
+    i += 1;
+  }
+  return `${x < 9.95 ? x.toFixed(1) : Math.round(x)} ${units[i]}/s`;
+}
+
+/** Seconds as an operator reads a timeout: "59 s" under two minutes, else "3m 04s". */
+function secs(n, fmt) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return DASH;
+  return v < 120 ? `${Math.max(0, Math.round(v))} s` : fmt.duration(v);
+}
+
+/**
+ * An address split for middle truncation: the head may be cut with an ellipsis when the column is
+ * too narrow, the tail (last group) and the port never are. "2001:db8::1" -> ["2001:db8:", ":1"].
+ */
+function splitTail(text) {
+  const s = String(text);
+  const cut = Math.max(s.lastIndexOf('.'), s.lastIndexOf(':'));
+  const at = cut > 0 && cut < s.length - 1 ? cut : Math.max(1, s.length - 3);
+  return [s.slice(0, at), s.slice(at)];
+}
+
+/** The data-fk (focus key) of the focused element inside root, if any. */
+function focusKeyIn(root) {
+  const a = document.activeElement;
+  if (!a || !root || a === root || !root.contains(a)) return null;
+  return a.dataset && a.dataset.fk ? a.dataset.fk : null;
+}
+
+/** Put focus back on the element with that focus key inside root (after a section was rebuilt). */
+function refocus(root, fk) {
+  if (!fk || !root) return;
+  const a = document.activeElement;
+  if (a && a !== document.body && root.contains(a)) return;
+  for (const el of root.querySelectorAll('[data-fk]')) {
+    if (el.dataset.fk === fk && typeof el.focus === 'function') {
+      el.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
+
+/** Replace root's children; the focused control (by data-fk) is focused again in the new content. */
+function swapKeepFocus(put, root, ...children) {
+  const fk = focusKeyIn(root);
+  put(root, ...children);
+  if (fk) refocus(root, fk);
+}
+
+// ---- keyed row window ----------------------------------------------------------------------------
+
+/**
+ * A fixed-row-height virtual list whose DOM rows are keyed (by session id), not by index. A sync
+ * re-places each row at its index and lets patch(node, i) update what changed; a node keeps its
+ * identity while its key stays in the window, so focus, the panel opener and the selection survive
+ * re-sorting. The focused row stays rendered even when scrolled out of the window, and DOM order is
+ * index order without moving the focused node (moving it would blur it).
+ */
+class RowWindow {
+  constructor({ container, rowHeight, overscan = 10, keyOf, create, patch, onWindow }) {
+    this.container = container;
+    this.rowHeight = Math.max(1, Number(rowHeight) || 28);
+    this.overscan = overscan;
+    this.keyOf = keyOf;
+    this.create = create;
+    this.patch = patch;
+    this.onWindow = onWindow || null;
+    this.count = 0;
+    this.nodes = new Map(); // key -> node
+    this.range = { start: 0, end: -1, first: 0, last: -1 };
+    this.scrollTop = 0;
+    this.viewH = 0;
+    this.offset = 0;
+    container.classList.add('vlist');
+    this.body = document.createElement('div');
+    this.body.className = 'vlist-body';
+    this.body.setAttribute('role', 'rowgroup');
+    container.append(this.body);
+    this.schedule = () => {
+      if (!this.raf) this.raf = requestAnimationFrame(() => {
+        this.raf = 0;
+        this.sync(false);
+      });
+    };
+    this.onScroll = () => {
+      this.scrollTop = this.container.scrollTop;
+      this.schedule();
+    };
+    container.addEventListener('scroll', this.onScroll, { passive: true });
+    this.ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => this.measure(true)) : null;
+    if (this.ro) this.ro.observe(container);
+    this.measure(false);
+  }
+
+  /** Read the scroller geometry (only here, on resize and on scroll: never in the middle of a poll). */
+  measure(sync) {
+    if (!this.body) return;
+    this.viewH = this.container.clientHeight || this.viewH;
+    this.offset = this.body.offsetTop;
+    this.scrollTop = this.container.scrollTop;
+    if (sync) this.schedule();
+  }
+
+  win() {
+    const rh = this.rowHeight;
+    const top = Math.max(0, this.scrollTop - this.offset);
+    const height = this.viewH || 600;
+    const first = Math.max(0, Math.min(this.count - 1, Math.floor(top / rh)));
+    const last = Math.max(-1, Math.min(this.count - 1, Math.ceil((top + height) / rh) - 1));
+    return { first, last, start: Math.max(0, first - this.overscan), end: Math.min(this.count - 1, last + this.overscan) };
+  }
+
+  setCount(n) {
+    this.count = Math.max(0, n | 0);
+    this.body.style.height = `${this.count * this.rowHeight}px`;
+  }
+
+  setRowHeight(px) {
+    const next = Math.max(1, Number(px) || this.rowHeight);
+    if (next === this.rowHeight) return;
+    const firstVisible = this.range.first;
+    this.rowHeight = next;
+    this.setCount(this.count);
+    this.reset();
+    this.scrollToIndex(firstVisible, 'start');
+  }
+
+  /** Drop every DOM row (the columns or the layout changed); the next sync builds them again. */
+  reset() {
+    for (const node of this.nodes.values()) node.remove();
+    this.nodes.clear();
+  }
+
+  focusedNode() {
+    const a = document.activeElement;
+    if (!a || a === document.body || !this.body.contains(a)) return null;
+    for (const node of this.nodes.values()) if (node.contains(a)) return node;
+    return null;
+  }
+
+  /** Place and patch the rows of the window. Every row is patched when `all` (a new poll). */
+  sync(all = true) {
+    if (!this.body) return;
+    const w = this.win();
+    this.range = w;
+    if (this.onWindow) this.onWindow(w);
+    const keys = new Map(); // key -> index
+    for (let i = w.start; i <= w.end; i += 1) keys.set(this.keyOf(i), i);
+    const focused = this.focusedNode();
+    if (focused && !keys.has(focused.dataset.key)) {
+      // Keep the focused row rendered (and focused) wherever it now sits, if it is still listed.
+      const at = this.indexOf ? this.indexOf(focused.dataset.key) : -1;
+      if (at >= 0) keys.set(focused.dataset.key, at);
+    }
+    let lostFocus = false;
+    for (const [key, node] of this.nodes) {
+      if (!keys.has(key)) {
+        if (node === focused) lostFocus = true;
+        node.remove();
+        this.nodes.delete(key);
+      }
+    }
+    const order = [...keys.entries()].sort((a, b) => a[1] - b[1]);
+    const list = [];
+    for (const [key, i] of order) {
+      let node = this.nodes.get(key);
+      if (!node) {
+        node = this.create(i);
+        node.dataset.key = key;
+        node.classList.add('vlist-row');
+        node.style.height = `${this.rowHeight}px`;
+        this.nodes.set(key, node);
+      } else if (all || node._i !== i) {
+        this.patch(node, i);
+      }
+      if (node._i !== i) {
+        node._i = i;
+        node.style.top = `${i * this.rowHeight}px`;
+      }
+      list.push(node);
+    }
+    // DOM order = index order, moving the other nodes around the focused one.
+    let cur = this.body.firstChild;
+    for (const node of list) {
+      if (node === cur) {
+        cur = cur.nextSibling;
+        continue;
+      }
+      if (node === focused && node.parentNode === this.body) {
+        while (cur && cur !== node) {
+          const nx = cur.nextSibling;
+          this.body.append(cur);
+          cur = nx;
+        }
+        cur = node.nextSibling;
+        continue;
+      }
+      this.body.insertBefore(node, cur);
+    }
+    if (lostFocus && typeof this.onFocusLost === 'function') this.onFocusLost();
+  }
+
+  /** Patch one row now (selection changed), if it is rendered. */
+  patchKey(key) {
+    const node = this.nodes.get(key);
+    if (node && Number.isInteger(node._i)) this.patch(node, node._i);
+  }
+
+  nodeFor(key) {
+    return this.nodes.get(key) || null;
+  }
+
+  rowAt(i) {
+    if (i < 0 || i >= this.count) return null;
+    return this.nodes.get(this.keyOf(i)) || null;
+  }
+
+  /** align: 'nearest' (default), 'start', 'center' or 'end'. */
+  scrollToIndex(i, align = 'nearest') {
+    if (!this.count) return;
+    this.measure(false);
+    const idx = Math.max(0, Math.min(this.count - 1, i | 0));
+    const rh = this.rowHeight;
+    const off = this.offset;
+    const view = this.viewH;
+    const top = off + idx * rh;
+    const cur = this.scrollTop;
+    let next = cur;
+    // The sticky header covers the first `off` pixels of the viewport.
+    if (align === 'start') next = top - off;
+    else if (align === 'center') next = top - (view - rh) / 2;
+    else if (align === 'end') next = top - view + rh;
+    else if (top < cur + off) next = top - off;
+    else if (top + rh > cur + view) next = top + rh - view;
+    next = Math.max(0, Math.round(next));
+    if (next !== cur) {
+      this.container.scrollTop = next;
+      this.scrollTop = this.container.scrollTop;
+    }
+    this.sync(false);
+  }
+
+  destroy() {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.container.removeEventListener('scroll', this.onScroll);
+    if (this.ro) this.ro.disconnect();
+    this.nodes.clear();
+    if (this.body) this.body.remove();
+    this.body = null;
+  }
+}
+
 // ---- columns -------------------------------------------------------------------------------------
 
 // w: minimum width in px; fr: share of spare width; prio: lower survives longer when the table is
-// narrower than every column (automatic column fit).
+// narrower than every column (automatic column fit). Each row is its own CSS grid, so widths are
+// fixed or fr (never content-sized, which would misalign the rows). Source and destination fit any
+// IPv4 address with a 5-digit port (21 monospace characters); the zones width follows the zone names
+// in the inventory (see zonesWidth()).
 const COLUMNS = [
-  { id: 'status', label: '', title: 'Status', w: 22, prio: 0, fixed: true },
+  { id: 'status', label: '', title: 'Status', w: 18, prio: 0, fixed: true },
   { id: 'id', label: 'ID', title: 'Session ID', w: 62, prio: 11, sort: 'id', num: true },
-  { id: 'policy', label: 'Policy', w: 96, fr: 1.1, prio: 3, sort: 'policy' },
-  { id: 'zones', label: 'Zones', title: 'From-zone → to-zone (from the policy)', w: 116, fr: 0.6, prio: 6, sort: 'zones' },
-  { id: 'proto', label: 'Proto', title: 'Protocol', w: 52, prio: 8, sort: 'proto' },
-  { id: 'src', label: 'Source', title: 'Client address and port', w: 136, fr: 1, prio: 1, sort: 'src' },
-  { id: 'dst', label: 'Destination', title: 'Destination as the client sent it', w: 136, fr: 1, prio: 1, sort: 'dst' },
-  { id: 'nat', label: 'NAT', title: 'Source NAT (translated source) and destination NAT (translated destination)', w: 176, fr: 0.6, prio: 4, sort: 'nat' },
+  { id: 'policy', label: 'Policy', w: 90, fr: 1.1, prio: 3, sort: 'policy' },
+  { id: 'zones', label: 'Zones', title: 'From-zone → to-zone (from the policy)', w: 110, prio: 5.5, sort: 'zones', onlyWith: 'zones' },
+  { id: 'proto', label: 'Proto', title: 'Protocol', w: 46, prio: 3.5, sort: 'proto' },
+  { id: 'src', label: 'Source', title: 'Client address and port', w: 156, fr: 1, prio: 1, sort: 'src' },
+  { id: 'dst', label: 'Destination', title: 'Destination as the client sent it', w: 156, fr: 1, prio: 1, sort: 'dst' },
+  { id: 'nat', label: 'NAT', title: 'Source NAT (translated source) and destination NAT (translated destination)', w: 168, fr: 0.4, prio: 4, sort: 'nat' },
   { id: 'app', label: 'App', title: 'Application', w: 88, fr: 0.5, prio: 9, sort: 'app' },
-  { id: 'iface', label: 'In → out', title: 'Ingress and egress interface', w: 176, prio: 10, sort: 'iface' },
-  { id: 'bytes', label: 'Bytes ↑↓', title: '↑ from the client, ↓ from the server', w: 96, prio: 2, sort: 'bytes', num: true },
-  { id: 'pkts', label: 'Pkts', title: 'Packets, both directions', w: 56, prio: 12, sort: 'pkts', num: true },
-  { id: 'rate', label: 'Rate', title: 'Live rate: bytes per second between the last two polls', w: 84, prio: 2, sort: 'rate', num: true },
-  { id: 'dur', label: 'Age', title: 'Duration: how long the session has existed', w: 60, prio: 5, sort: 'dur', num: true },
-  { id: 'timeout', label: 'Timeout', title: 'Idle timeout remaining (bar: of the configured timeout)', w: 72, prio: 7, sort: 'timeout', num: true },
+  { id: 'iface', label: 'In → out', title: 'Ingress and egress interface', w: 172, prio: 10, sort: 'iface' },
+  { id: 'bytes', label: 'Bytes ↑↓', title: '↑ from the client, ↓ from the server', w: 86, prio: 2, sort: 'bytes', num: true },
+  { id: 'pkts', label: 'Pkts', title: 'Packets, both directions', w: 54, prio: 12, sort: 'pkts', num: true },
+  { id: 'rate', label: 'Rate', title: 'Rate in bytes per second between the last two polls (dim = average since the session started, until the second poll)', w: 66, prio: 2, sort: 'rate', num: true },
+  { id: 'dur', label: 'Age', title: 'Duration: how long the session has existed', w: 58, prio: 5, sort: 'dur', num: true },
+  { id: 'timeout', label: 'Timeout', title: 'Idle timeout remaining (bar: of the configured timeout; amber under 20 %)', w: 70, prio: 7, sort: 'timeout', num: true },
   { id: 'node', label: 'Node', title: 'Cluster node or SPU', w: 110, prio: 6.5, sort: 'node', onlyWith: 'location' },
 ];
 const COL_BY_ID = new Map(COLUMNS.map((c) => [c.id, c]));
 
 const SORTS = {
-  id: (r) => Number(r.session_id) || ipSortKey(r.session_id),
+  id: (r) => Number(r.session_id) || ipSortKey(r.session_id) || ipSortKey(r.id),
   policy: (r) => r.policy,
   zones: (r) => (r._zones ? `${r._zones.fromText} ${r._zones.toText}` : null),
   proto: (r) => (r.in || {}).proto,
@@ -196,13 +471,16 @@ const SORT_LABEL = {
 
 // ---- facets --------------------------------------------------------------------------------------
 
+// One neutral bar colour for every group (signal colours mean something: violet is NAT, amber a
+// warning); teal stays for interfaces, which is what teal means everywhere in J-Wicket. A bar turns
+// gold when it is hovered or is a filter already applied.
 const FACETS = [
-  { id: 'src', title: 'Source', key: 'src', cls: 'sky', get: (r) => [(r.in || {}).src] },
-  { id: 'dst', title: 'Destination', key: 'dst', cls: 'violet', get: (r) => [(r.in || {}).dst] },
-  { id: 'dport', title: 'Destination port', key: 'dport', cls: 'amber', get: (r) => [(r.in || {}).dport] },
-  { id: 'app', title: 'Application', key: 'app', cls: 'lilac', get: (r) => [r.application] },
-  { id: 'policy', title: 'Policy', key: 'policy', cls: 'gold', get: (r) => [r.policy] },
-  { id: 'iface', title: 'Interface', key: 'iface', cls: 'teal', get: (r) => [...new Set([(r.in || {}).iface, (r.out || {}).iface])] },
+  { id: 'src', title: 'Source', key: 'src', get: (r) => (r.in || {}).src },
+  { id: 'dst', title: 'Destination', key: 'dst', get: (r) => (r.in || {}).dst },
+  { id: 'dport', title: 'Destination port', key: 'dport', get: (r) => (r.in || {}).dport },
+  { id: 'app', title: 'Application', key: 'app', get: (r) => r.application },
+  { id: 'policy', title: 'Policy', key: 'policy', get: (r) => r.policy },
+  { id: 'iface', title: 'Interface', key: 'iface', cls: 'teal', get: (r) => (r.in || {}).iface, get2: (r) => (r.out || {}).iface },
 ];
 const METRICS = [
   { id: 'count', label: 'Sessions', title: 'Top 8 by number of sessions' },
@@ -231,8 +509,11 @@ class SessionsView {
     this.metric = METRICS.some((m) => m.id === prefGet(PREF.metric)) ? prefGet(PREF.metric) : 'count';
     this.manualCols = this.readCols();
 
-    // query state
+    // query state: `text` is what the bar holds, `goodText` the last query that parsed (the one
+    // applied, and the one written to the shareable hash).
     this.text = '';
+    this.goodText = '';
+    this.zoneIgnored = [];
     this.device = {};
     this.deviceKey = '{}';
     this.match = () => true;
@@ -268,11 +549,15 @@ class SessionsView {
 
     // display state
     this.rows = []; // what the grid shows, in order
+    this.indexById = new Map();
     this.cols = [];
     this.mobile = false;
+    this.cardW = 0;
+    this.tabId = null; // the row that takes Tab (roving tabindex)
     this.detail = null;
     this.menu = null;
     this.hover = null;
+    this.sigs = { notices: '', state: '', facets: '', strip: '' };
 
     this.build();
     this.booting = true;
@@ -306,7 +591,10 @@ class SessionsView {
     for (const r of this.ended.values()) r._zones = this.zonesOf(r.policy, idx);
     this.compileBrowser();
     this.renderSub();
+    this.colKey = null; // the zones column depends on the inventory (shown, and its width)
+    this.fitColumns();
     this.recompute();
+    this.renderNotices();
     if (this.detail) this.detail.update();
   }
 
@@ -338,6 +626,7 @@ class SessionsView {
     for (const off of this.offs) off();
     for (const [type, fn] of this.listeners) document.removeEventListener(type, fn);
     if (this.ro) this.ro.disconnect();
+    clearTimeout(this.facetTimer);
     if (this.list) this.list.destroy();
     if (this.bar) this.bar.destroy();
     this.closeMenu();
@@ -367,7 +656,8 @@ class SessionsView {
       this.limit = limit;
       if (!first) this.poll(true);
     }
-    if (first || q !== this.text) {
+    // The hash holds the last query that parsed; a bar holding a query with an error is left alone.
+    if (first || q !== this.goodText) {
       if (this.bar) this.bar.setValue(q);
       this.applyQuery(q, { fromRoute: true });
     } else if (changed) {
@@ -388,7 +678,7 @@ class SessionsView {
   /** Every URL parameter of this view, from the current state. */
   params(extra = {}) {
     const out = {};
-    if (this.text) out.q = this.text;
+    if (this.goodText) out.q = this.goodText;
     if (this.sort !== 'dur') out.sort = this.sort;
     if (this.limit !== DEFAULT_LIMIT) out.limit = this.limit;
     if (this.showBackups) out.backups = 'show';
@@ -428,11 +718,12 @@ class SessionsView {
     this.statNew = h('b', { class: 'num' }, DASH);
     this.statEnded = h('b', { class: 'num' }, DASH);
     this.statListed = h('b', { class: 'num' }, DASH);
-    this.statShown = h('b', { class: 'num' }, DASH);
+    // "137 listed", plus "· 60 shown" only when the browser-side filter keeps fewer rows.
+    this.statShown = h('em', { class: 'sx-shown num', hidden: true }, '');
     this.readTime = h('span', { class: 'sx-read-t num' }, DASH);
     this.readAgo = h('span', { class: 'sx-read-ago' }, '');
     this.nextBar = h('i', { class: 'sx-next-i' });
-    const stat = (cls, el, label, title) => h('div', { class: ['sx-stat', cls], title }, el, h('span', null, label));
+    const stat = (cls, el, label, title, extra = null) => h('div', { class: ['sx-stat', cls], title }, h('span', { class: 'sx-stat-v' }, el, extra), h('span', { class: 'sx-stat-l' }, label));
     this.strip = h(
       'section',
       { class: 'sx-strip', 'aria-label': 'Session table summary' },
@@ -453,8 +744,7 @@ class SessionsView {
         { class: 'sx-stats' },
         stat('up', this.statNew, 'new', 'Sessions in this poll that were not in the previous one'),
         stat('down', this.statEnded, 'ended', 'Sessions in the previous poll that are gone now'),
-        stat('', this.statListed, 'listed', 'Rows the device returned for the device-side filters'),
-        stat('shown', this.statShown, 'shown', 'Rows left after the browser-side filters'),
+        stat('listed', this.statListed, 'listed', 'Rows the device returned for the device-side filters (and, when the browser-side filter keeps fewer, how many are shown)', this.statShown),
       ),
       h('div', { class: 'sx-read' }, h('span', { class: 'sx-cap' }, 'Last read'), this.readTime, this.readAgo),
       h('div', { class: 'sx-next', 'aria-hidden': 'true' }, this.nextBar),
@@ -487,12 +777,20 @@ class SessionsView {
     this.colBtn = h('button', { class: 'btn sm', type: 'button', 'aria-haspopup': 'true', 'aria-expanded': 'false', on: { click: () => this.openColumnsMenu() } }, icon('grid'), h('span', { class: 'sx-hide-sm' }, 'Columns'));
     this.exportBtn = h('button', { class: 'btn sm', type: 'button', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: 'Download the rows on screen (made in the browser, no new device read)', on: { click: () => this.openExportMenu() } }, icon('download'), h('span', { class: 'sx-hide-sm' }, 'Export'));
     this.sortBtn = h('button', { class: 'btn sm sx-sortmenu-btn', type: 'button', 'aria-haspopup': 'true', 'aria-expanded': 'false', on: { click: () => this.openSortMenu() } }, icon('rows'), 'Sort');
-    const tools = h('div', { class: 'sx-tools' }, this.holdBtn, this.sortNote, h('span', { class: 'spacer' }), this.sortBtn, this.facetBtn, this.colBtn, this.exportBtn);
+    // A stale chip while reads fail (the table keeps the last good read), and one faint line when a
+    // column is hidden for a reason the operator should know.
+    this.staleChip = h('span', { class: 'sx-stale', hidden: true, role: 'status' });
+    this.toolNote = h('span', { class: 'sx-toolnote', hidden: true });
+    this.tools = h('div', { class: 'sx-tools' }, this.holdBtn, this.sortNote, this.staleChip, this.toolNote, h('span', { class: 'spacer' }), this.sortBtn, this.facetBtn, this.colBtn, this.exportBtn);
+    const tools = this.tools;
 
     // grid
     this.gridHead = h('div', { class: 'sx-hrow', role: 'row', 'aria-rowindex': '1' });
-    this.scroller = h('div', { class: 'sx-scroll' }, h('div', { class: 'sx-headwrap', role: 'rowgroup' }, this.gridHead));
-    this.grid = h('div', { class: 'sx-grid', role: 'grid', 'aria-label': 'Flow sessions', 'aria-rowcount': '1', 'aria-colcount': '1' }, this.scroller);
+    // The scroller takes focus only when the focused row leaves the table (tabindex -1): the rows
+    // themselves are the Tab stop (roving tabindex).
+    this.scroller = h('div', { class: 'sx-scroll', tabindex: '-1' }, h('div', { class: 'sx-headwrap', role: 'rowgroup' }, this.gridHead));
+    this.skel = h('div', { class: 'sx-skel', hidden: true, 'aria-hidden': 'true' });
+    this.grid = h('div', { class: 'sx-grid', role: 'grid', 'aria-label': 'Flow sessions', 'aria-rowcount': '1', 'aria-colcount': '1', 'aria-describedby': 'sx-grid-keys' }, this.scroller, h('p', { class: 'sr-only', id: 'sx-grid-keys' }, 'Arrow keys, Page Up, Page Down, Home and End move between sessions; Enter opens one. Right and Left arrows move through the values of a row; Enter filters by the value, Alt+Enter excludes it.'));
     this.gridState = h('div', { class: 'sx-gstate', hidden: true });
     this.hov = h(
       'div',
@@ -507,14 +805,22 @@ class SessionsView {
 
     this.el.append(head, this.strip, this.qbHost, this.notices, tools, this.body);
 
-    this.list = new this.ctx.dom.VirtualList({
+    this.list = new RowWindow({
       container: this.scroller,
       rowHeight: this.rowHeight(),
-      count: 0,
       overscan: 10,
-      render: (i) => this.renderRow(i),
+      keyOf: (i) => (this.rows[i] ? this.rows[i].id : `#${i}`),
+      create: (i) => this.createRow(i),
+      patch: (node, i) => this.patchRow(node, i),
+      onWindow: (w) => this.chooseTabRow(w),
     });
-    this.list.body.setAttribute('role', 'rowgroup');
+    this.list.indexOf = (key) => (this.indexById.has(key) ? this.indexById.get(key) : -1);
+    this.list.onFocusLost = () => {
+      // The focused session left the table: keep the keyboard in the grid without landing on
+      // (and so acting on) a session the operator did not choose.
+      if (!this.dead && this.scroller.isConnected) this.scroller.focus({ preventScroll: true });
+    };
+    this.scroller.append(this.skel);
     this.scroller.addEventListener('click', (e) => this.onGridClick(e));
     this.scroller.addEventListener('dblclick', (e) => this.onGridDblClick(e));
     this.scroller.addEventListener('pointerover', (e) => this.onGridOver(e));
@@ -527,7 +833,13 @@ class SessionsView {
     this.gridHead.addEventListener('click', (e) => this.onHeadClick(e));
 
     const fit = this.ctx.dom.rafBatch(() => this.fitColumns());
-    this.ro = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null;
+    // The card width comes from the observer, so a poll never has to read layout to fit columns.
+    this.ro = typeof ResizeObserver === 'function'
+      ? new ResizeObserver((entries) => {
+        for (const e of entries) if (e.contentRect && e.contentRect.width) this.cardW = e.contentRect.width;
+        fit();
+      })
+      : null;
     if (this.ro) this.ro.observe(this.gridCard);
     this.fitColumns();
     this.renderLive();
@@ -537,7 +849,7 @@ class SessionsView {
   }
 
   rowHeight() {
-    if (this.mobile) return document.documentElement.dataset.density === 'comfortable' ? 62 : 54;
+    if (this.mobile) return document.documentElement.dataset.density === 'comfortable' ? 78 : 70;
     const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h'));
     return Number.isFinite(v) && v > 12 ? v + 2 : 28;
   }
@@ -556,13 +868,51 @@ class SessionsView {
   }
 
   available(col) {
-    if (col.onlyWith === 'location') return this.current.some((r) => r.location);
+    if (col.onlyWith === 'location') return this.hasLocation;
+    if (col.onlyWith === 'zones') return this.zoneState().ok !== false;
     return true;
+  }
+
+  /**
+   * Whether zones can be known: they come only from the policy -> zone map of the inventory.
+   * {ok: true} | {ok: null, why: 'loading'} | {ok: false, why: 'denied'|'failed'|'unsupported', message}
+   */
+  zoneState() {
+    const snap = this.ctx.store.lastInventory;
+    if (!snap) {
+      const err = this.ctx.store.inventoryError;
+      return err ? { ok: false, why: err.status === 403 ? 'denied' : 'failed', message: err.message } : { ok: null, why: 'loading' };
+    }
+    const pol = snap.scope && snap.scope.policies;
+    if (pol && pol.status === 'ok') return { ok: true };
+    const st = (pol && pol.status) || (snap.config && snap.config.status) || 'failed';
+    return { ok: false, why: st === 'denied' || st === 'unsupported' ? st : 'failed', message: (pol && pol.message) || (snap.config && snap.config.message) || null };
+  }
+
+  /** Width of a monospace character in the rows (measured once; 6.9 px at 11.5 px). */
+  charWidth() {
+    if (this.charW) return this.charW;
+    const probe = this.h('span', { class: 'sx-row sx-probe', 'aria-hidden': 'true' }, '0123456789'.repeat(4));
+    this.grid.append(probe);
+    const w = probe.getBoundingClientRect().width / 40;
+    probe.remove();
+    this.charW = w > 3 && w < 20 ? w : 6.9;
+    return this.charW;
+  }
+
+  /** The zones column fits the longest "from → to" of the policies in the inventory. */
+  zonesWidth() {
+    const idx = this.ctx.store.policyIndex();
+    let n = 13; // "untrust→trust"
+    const txt = (zs) => (zs.length ? (zs.length === 1 ? zs[0] : `${zs[0]} +${zs.length - 1}`) : 'any');
+    for (const p of idx.values()) n = Math.max(n, txt(p.from || []).length + txt(p.to || []).length);
+    return Math.ceil(Math.min(220, Math.max(72, n * this.charWidth() + 10 + 15)));
   }
 
   fitColumns() {
     if (this.dead) return;
-    const width = this.gridCard.clientWidth || 1000;
+    const width = this.cardW || this.gridCard.clientWidth || 1000;
+    if (!this.cardW && this.gridCard.clientWidth) this.cardW = this.gridCard.clientWidth;
     const mobile = width < MOBILE_W;
     const modeChanged = mobile !== this.mobile;
     this.mobile = mobile;
@@ -572,6 +922,8 @@ class SessionsView {
       this.facetsOpen = !mobile; // phones: facets on request, the table first
       this.renderFacetsToggle();
     }
+    const zw = this.zonesWidth();
+    const widthOf = (c) => (c.id === 'zones' ? zw : c.w);
     let cols;
     if (this.manualCols) {
       cols = COLUMNS.filter((c) => c.fixed || (this.manualCols.includes(c.id) && this.available(c)));
@@ -583,24 +935,37 @@ class SessionsView {
       // Strict priority: the first column that does not fit ends the list, so a less important
       // narrow column never shows while a more important wide one is hidden.
       for (const c of candidates) {
-        if (!c.fixed && total + c.w > avail && pick.size >= 5) break;
+        if (!c.fixed && total + widthOf(c) > avail && pick.size >= 5) break;
         pick.add(c.id);
-        total += c.w;
+        total += widthOf(c);
       }
       cols = COLUMNS.filter((c) => pick.has(c.id));
     }
-    const key = cols.map((c) => c.id).join(',');
+    // The zones column is hidden when zones cannot be known; say why, once, in the toolbar.
+    const zs = this.zoneState();
+    const zonesWanted = !this.manualCols || this.manualCols.includes('zones');
+    if (zs.ok === false && zonesWanted && !mobile) {
+      this.toolNote.textContent = zs.why === 'denied'
+        ? 'Zones hidden: your login class cannot read the policy configuration they come from.'
+        : 'Zones hidden: the policy configuration they come from could not be read.';
+      this.toolNote.hidden = false;
+    } else {
+      this.toolNote.hidden = true;
+    }
+    const key = `${cols.map((c) => c.id).join(',')}|${zw}`;
     if (key !== this.colKey || modeChanged) {
       this.colKey = key;
       this.cols = cols;
-      const tpl = cols.map((c) => (c.fr ? `minmax(${c.w}px, ${c.fr}fr)` : `${c.w}px`)).join(' ');
-      const min = cols.reduce((n, c) => n + c.w, 0);
+      const tpl = cols.map((c) => (c.fr ? `minmax(${widthOf(c)}px, ${c.fr}fr)` : `${widthOf(c)}px`)).join(' ');
+      const min = cols.reduce((n, c) => n + widthOf(c), 0);
       this.grid.style.setProperty('--sx-cols', tpl);
       this.grid.style.setProperty('--sx-min', `${mobile ? 0 : min}px`);
       this.grid.setAttribute('aria-colcount', String(mobile ? 1 : cols.length));
       this.renderHeader();
       if (modeChanged) this.list.setRowHeight(this.rowHeight());
-      this.list.refresh();
+      this.list.reset();
+      this.list.sync(true);
+      this.renderSkeleton();
     }
   }
 
@@ -652,7 +1017,7 @@ class SessionsView {
     this.order.clear();
     this.saveRoute(false);
     this.renderHeader();
-    this.recompute();
+    this.recompute({ facets: false });
   }
 
   // ---- query -----------------------------------------------------------------------------------
@@ -662,18 +1027,19 @@ class SessionsView {
     if (!this.q) return;
     const parsed = this.q.parse(this.text, { view: 'sessions' });
     if (parsed.error) {
+      // The table keeps the last good filter: keep its chips visible (marked "still applied") and
+      // keep the hash on it, so a reload or a shared link shows what the table shows.
       this.queryError = parsed.error;
-      if (this.bar) this.bar.setPlan(null);
-      if (!fromRoute) this.saveRoute(push);
+      this.renderPlan();
       this.renderNotices();
       return;
     }
     this.queryError = null;
     this.serverError = null;
     if (this.bar) this.bar.setError(null);
+    this.goodText = this.text;
     this.ast = parsed.ast;
     this.plan = this.q.plan(parsed.ast, 'sessions');
-    if (this.bar) this.bar.setPlan(parsed.ast ? this.plan : null);
     this.compileBrowser();
     const key = JSON.stringify(this.plan.device || {});
     if (!fromRoute) this.saveRoute(push);
@@ -690,11 +1056,98 @@ class SessionsView {
     if (!this.q) return;
     const c = { policyIndex: this.ctx.store.policyIndex(), inventory: this.ctx.store.lastInventory };
     const F = this.q.FIELDS.sessions;
-    this.matchBrowser = this.plan && this.plan.browser ? this.q.compile(this.plan.browser, F, c) : () => true;
+    // Zone keys read the policy -> zone map of the inventory. Without it every zone is unknown, so
+    // zone terms are not evaluated at all (a negated one would otherwise keep every session).
+    let browser = this.plan ? this.plan.browser : null;
+    let all = this.ast || null;
+    this.zoneIgnored = [];
+    this.zoneIgnoredTop = new Set();
+    if (this.zoneState().ok !== true && (this.hasZoneTerm(browser) || this.hasZoneTerm(all))) {
+      const items = browser ? (browser.type === 'and' ? browser.items : [browser]) : [];
+      const keptItems = [];
+      for (const it of items) {
+        const pruned = this.pruneZones(it);
+        if (pruned === it) keptItems.push(it);
+        else {
+          const text = this.q.toQueryString(it);
+          if (pruned === null) {
+            this.zoneIgnored.push(text);
+            this.zoneIgnoredTop.add(text);
+          } else {
+            keptItems.push(pruned);
+            this.zoneIgnored.push(...this.zoneTerms(it));
+          }
+        }
+      }
+      browser = keptItems.length === 0 ? null : keptItems.length === 1 ? keptItems[0] : { type: 'and', items: keptItems };
+      all = all ? this.pruneZones(all) : null;
+    }
+    this.matchBrowser = browser ? this.q.compile(browser, F, c) : () => true;
+    this.browserActive = Boolean(browser);
     // While the device re-reads for a new device filter, the old rows are shown through the whole
     // query (device terms included), dimmed, so the table answers at once and never lies.
-    this.matchAll = this.ast ? this.q.compile(this.ast, F, c) : () => true;
+    this.matchAll = all ? this.q.compile(all, F, c) : () => true;
     this.match = this.stale ? this.matchAll : this.matchBrowser;
+    this.renderPlan();
+  }
+
+  hasZoneTerm(node) {
+    if (!node) return false;
+    if (node.type === 'and' || node.type === 'or') return node.items.some((n) => this.hasZoneTerm(n));
+    if (node.type === 'not') return this.hasZoneTerm(node.item);
+    return node.type === 'term' && Boolean(node.key) && ZONE_KEYS.has(this.keyName(node.key));
+  }
+
+  /** The AST without zone terms (null when nothing is left to evaluate). Unknown inside OR or NOT is unknown. */
+  pruneZones(node) {
+    if (!node || !this.hasZoneTerm(node)) return node;
+    if (node.type === 'term') return null;
+    if (node.type === 'not') return null;
+    if (node.type === 'or') return null;
+    const kept = node.items.map((n) => this.pruneZones(n)).filter(Boolean);
+    return kept.length === 0 ? null : kept.length === 1 ? kept[0] : { ...node, items: kept };
+  }
+
+  /** The zone parts of an item, as typed: "zone:dmz", "-from:trust", "(zone:a OR zone:b)". */
+  zoneTerms(node) {
+    if (!node || !this.hasZoneTerm(node)) return [];
+    if (node.type === 'and') return node.items.flatMap((n) => this.zoneTerms(n));
+    return [this.q.toQueryString(node)];
+  }
+
+  /** Chips and the explain sentence under the bar: the applied plan, its zone terms marked when they cannot be evaluated. */
+  renderPlan() {
+    if (!this.bar) return;
+    this.qbHost.classList.toggle('sx-qb-stale', Boolean(this.queryError));
+    if (!this.plan || !this.ast) {
+      this.bar.setPlan(null);
+      return;
+    }
+    const ignored = this.zoneIgnoredTop || new Set();
+    const explain = this.plan.explain.map((e) => {
+      const out = { ...e };
+      if (ignored.has(e.text)) out.where = 'ignored'; // neither device nor browser: not applied
+      if (this.queryError) {
+        // Positions point into the last good text, not the one in the bar: no remove buttons.
+        delete out.pos;
+        delete out.end;
+      }
+      return out;
+    });
+    this.bar.setPlan({ ...this.plan, explain });
+    // QueryBar draws chips for "device" and "browser" only: label the other ones here.
+    for (const chip of this.bar.el.querySelectorAll('.qb-chip')) {
+      const t = chip.querySelector('.qb-chip-text');
+      const w = chip.querySelector('.qb-chip-where');
+      const off = t && ignored.has(t.textContent);
+      chip.classList.toggle('sx-chip-off', Boolean(off));
+      if (off && w) {
+        w.textContent = 'not applied';
+        chip.title = 'Zone filters need the policy configuration (zones come from the policy each session matched); it is not available, so this term is not evaluated.';
+      }
+      chip.classList.toggle('sx-chip-still', Boolean(this.queryError));
+      if (this.queryError) chip.title = `Still applied: the query in the bar has an error, so the table keeps this filter. ${chip.title || ''}`.trim();
+    }
   }
 
   /** Add key:value (or -key:value) to the query, as clicking a value does. */
@@ -702,7 +1155,8 @@ class SessionsView {
     if (!this.q || value === null || value === undefined || value === '') return;
     const term = `${exclude ? '-' : ''}${key}:${qv(value)}`;
     const opposite = `${exclude ? '' : '-'}${key}:${qv(value)}`;
-    let text = this.text.trim();
+    // While the bar holds a query with an error, a click builds on the filter actually applied.
+    let text = (this.queryError ? this.goodText : this.text).trim();
     const parsed = this.q.parse(text, { view: 'sessions' });
     if (parsed.ast) {
       const items = parsed.ast.type === 'and' ? parsed.ast.items : [parsed.ast];
@@ -867,6 +1321,7 @@ class SessionsView {
       const reliable = complete && this.prevComplete && this.prevIds !== null;
       const ids = new Set();
       const rows = [];
+      let hasLocation = false;
       for (const raw of table.rows || []) {
         if (!raw || raw.id === null || raw.id === undefined) continue;
         const id = String(raw.id);
@@ -894,6 +1349,7 @@ class SessionsView {
         k.lastBytes = Number.isFinite(bytes) ? bytes : k.lastBytes;
         k.lastAt = now;
         k.polls += 1;
+        if (raw.location) hasLocation = true;
         rows.push(this.viewModel(raw, { id, bytes, pkts, rate, live, k, idx }));
       }
       // Ended: in the previous poll, gone now (only when both lists were complete).
@@ -919,13 +1375,17 @@ class SessionsView {
       this.current = rows;
       this.prevIds = ids;
       this.prevComplete = complete;
+      if (hasLocation !== Boolean(this.hasLocation)) {
+        this.hasLocation = hasLocation;
+        this.colKey = null; // the node column appears only when rows carry a location
+      }
     }
     const matching = Number.isFinite(data.matching) ? data.matching : table.status === 'ok' ? (table.rows || []).length : null;
     if (matching !== null) {
       this.history.push(matching);
       if (this.history.length > POLL_HISTORY) this.history.shift();
     }
-    this.fitColumns(); // the node column appears only when rows carry a location
+    if (this.colKey === null) this.fitColumns();
     this.recompute();
     this.renderAll();
     this.tryOpenWanted();
@@ -934,6 +1394,18 @@ class SessionsView {
 
   zonesOf(policy, idx) {
     if (!policy || !idx) return null;
+    // One shared object per policy and inventory (rows of the same policy have the same zones).
+    if (this.zoneCacheFor !== idx) {
+      this.zoneCacheFor = idx;
+      this.zoneCache = new Map();
+    }
+    if (this.zoneCache.has(policy)) return this.zoneCache.get(policy);
+    const z = this.zonesFromIndex(policy, idx);
+    this.zoneCache.set(policy, z);
+    return z;
+  }
+
+  zonesFromIndex(policy, idx) {
     const p = idx.get(policy);
     if (!p) return null;
     const from = p.from || [];
@@ -952,20 +1424,20 @@ class SessionsView {
     };
   }
 
+  /** The row as the table uses it: the API row itself (fresh from this poll), annotated in place. */
   viewModel(raw, { id, bytes, pkts, rate, live, k, idx }) {
-    return {
-      ...raw,
-      id,
-      rate,
-      _live: live,
-      _bytes: bytes,
-      _pkts: pkts,
-      _newAt: k.newAt,
-      _firstAt: k.firstAt,
-      _zones: this.zonesOf(raw.policy, idx),
-      _role: haRole(raw),
-      _backup: false,
-    };
+    const r = raw;
+    r.id = id;
+    r.rate = rate;
+    r._live = live;
+    r._bytes = bytes;
+    r._pkts = pkts;
+    r._newAt = k.newAt;
+    r._firstAt = k.firstAt;
+    r._zones = this.zonesOf(raw.policy, idx);
+    r._role = haRole(raw);
+    r._backup = false;
+    return r;
   }
 
   /** On a chassis cluster each session is listed by both nodes; mark the backup copies. */
@@ -1003,64 +1475,111 @@ class SessionsView {
 
   // ---- filtering, sorting, facets --------------------------------------------------------------
 
-  recompute() {
+  recompute({ facets = true } = {}) {
     if (!this.list) return;
-    const all = [...this.current, ...this.ended.values()];
-    const visible = this.showBackups ? all : all.filter((r) => !r._backup);
-    let rows;
-    try {
-      rows = visible.filter((r) => this.match(r));
-    } catch (_err) {
-      rows = visible;
-    }
+    const keepBackups = this.showBackups;
+    const rows = [];
+    let listed = 0;
+    let shown = 0;
+    let maxRate = 0;
+    const match = this.match;
+    const take = (r) => {
+      if (!keepBackups && r._backup) return;
+      if (!r._ended) listed += 1;
+      let ok = true;
+      try {
+        ok = match(r);
+      } catch (_err) {
+        ok = true;
+      }
+      if (!ok) return;
+      rows.push(r);
+      if (!r._ended) shown += 1;
+      if (Number.isFinite(r.rate) && r.rate > maxRate) maxRate = r.rate;
+    };
+    for (const r of this.current) take(r);
+    for (const r of this.ended.values()) take(r);
     const key = this.sort.replace(/^-/, '');
     const desc = this.sort.startsWith('-');
     const get = SORTS[key] || SORTS.dur;
+    // Sort keys once per row, not once per comparison.
+    for (const r of rows) {
+      r._sk = get(r);
+      r._tk = Number(r.session_id) || r.id;
+    }
     const by = (a, b) => {
-      const c = cmp(get(a), get(b));
-      const d = desc ? -c : c;
-      return d || cmp(Number(a.session_id) || a.id, Number(b.session_id) || b.id);
+      const c = cmp(a._sk, b._sk);
+      return (desc ? -c : c) || cmp(a._tk, b._tk);
     };
+    let ordered = rows;
     if (this.hold && this.order.size) {
-      const fresh = rows.filter((r) => !this.order.has(r.id)).sort(by);
-      const kept = rows.filter((r) => this.order.has(r.id)).sort((a, b) => this.order.get(a.id) - this.order.get(b.id));
-      rows = [...fresh, ...kept];
+      const fresh = [];
+      const kept = [];
+      for (const r of rows) (this.order.has(r.id) ? kept : fresh).push(r);
+      fresh.sort(by);
+      kept.sort((a, b) => this.order.get(a.id) - this.order.get(b.id));
+      ordered = fresh.concat(kept);
     } else {
       rows.sort(by);
     }
-    this.order = new Map(rows.map((r, i) => [r.id, i]));
-    this.rows = rows;
-    this.listedCount = this.current.filter((r) => this.showBackups || !r._backup).length;
-    this.shownCount = rows.filter((r) => !r._ended).length;
-    this.maxRate = rows.reduce((m, r) => (Number.isFinite(r.rate) && r.rate > m ? r.rate : m), 0);
-    this.grid.setAttribute('aria-rowcount', String(rows.length + 1));
-    this.list.setCount(rows.length);
-    this.list.refresh();
+    this.order = new Map();
+    this.indexById = this.order;
+    for (let i = 0; i < ordered.length; i += 1) this.order.set(ordered[i].id, i);
+    this.rows = ordered;
+    this.listedCount = listed;
+    this.shownCount = shown;
+    this.maxRate = maxRate;
+    this.grid.setAttribute('aria-rowcount', String(ordered.length + 1));
+    this.list.setCount(ordered.length);
+    this.list.sync(true);
     this.reshowHover();
     if (this.bar) {
-      const browserFiltered = this.plan && this.plan.browser;
       const ok = this.payload && this.payload.sessions && this.payload.sessions.status === 'ok';
-      this.bar.setStatus(browserFiltered && ok ? `${this.fmt.num(this.shownCount)} of ${this.fmt.num(this.listedCount)}` : '');
+      this.bar.setStatus(this.browserActive && ok ? `${this.fmt.num(this.shownCount)} of ${this.fmt.num(this.listedCount)}` : '');
     }
-    this.renderFacets();
+    if (facets) this.renderFacets();
     this.renderStats();
     this.renderGridState();
   }
 
+  /** Facets are recomputed after the rows are painted (a separate, short task), and only when shown. */
+  scheduleFacets() {
+    if (!this.facetsOpen) return;
+    clearTimeout(this.facetTimer);
+    this.facetTimer = setTimeout(() => {
+      this.facetTimer = 0;
+      if (!this.dead) this.renderFacets();
+    }, 30);
+  }
+
   facetData() {
-    const rows = this.rows.filter((r) => !r._ended);
     const metric = this.metric;
-    return FACETS.map((f) => {
-      const agg = new Map();
-      let missing = 0;
-      for (const r of rows) {
-        const vals = f.get(r).filter((v) => v !== null && v !== undefined && v !== '');
-        if (!vals.length) missing += 1;
-        const w = metric === 'bytes' ? r._bytes || 0 : metric === 'rate' ? (r._live ? r.rate || 0 : 0) : 1;
-        for (const v of vals) agg.set(v, (agg.get(v) || 0) + w);
+    const aggs = FACETS.map(() => new Map());
+    const missing = FACETS.map(() => 0);
+    let total = 0;
+    for (const r of this.rows) {
+      if (r._ended) continue;
+      total += 1;
+      const w = metric === 'bytes' ? r._bytes || 0 : metric === 'rate' ? (r._live ? r.rate || 0 : 0) : 1;
+      for (let fi = 0; fi < FACETS.length; fi += 1) {
+        const f = FACETS[fi];
+        const agg = aggs[fi];
+        const v = f.get(r);
+        const has = v !== null && v !== undefined && v !== '';
+        if (has) agg.set(v, (agg.get(v) || 0) + w);
+        if (f.get2) {
+          const v2 = f.get2(r);
+          if (v2 !== null && v2 !== undefined && v2 !== '' && v2 !== v) agg.set(v2, (agg.get(v2) || 0) + w);
+          else if (!has && (v2 === null || v2 === undefined || v2 === '')) missing[fi] += 1;
+        } else if (!has) {
+          missing[fi] += 1;
+        }
       }
+    }
+    return FACETS.map((f, fi) => {
+      const agg = aggs[fi];
       const top = [...agg.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0])).slice(0, 8);
-      return { ...f, top, distinct: agg.size, missing, total: rows.length };
+      return { ...f, top, distinct: agg.size, missing: missing[fi], total };
     });
   }
 
@@ -1069,6 +1588,9 @@ class SessionsView {
   renderAll() {
     this.el.classList.toggle('sx-offscope', this.ctx.store.scope !== 'root');
     this.grid.classList.toggle('stale', Boolean(this.stale || this.failure));
+    const staleSince = this.failure && this.payload && this.payload.meta ? this.payload.meta.read_at : null;
+    this.staleChip.hidden = !staleSince;
+    this.staleChip.textContent = staleSince ? `stale since ${this.fmt.time(staleSince)} UTC` : '';
     this.renderSub();
     this.renderStrip();
     this.renderNotices();
@@ -1091,17 +1613,29 @@ class SessionsView {
     const { h } = this;
     const scopeOk = this.ctx.store.scope === 'root';
     const stopped = Boolean(this.halted) || !scopeOk || Boolean(this.serverError);
-    const live = !this.paused && !stopped;
-    this.livePill.className = `live-pill${live ? '' : ' paused'}`;
-    this.livePill.replaceChildren(
-      h('span', { class: 'dot', 'aria-hidden': 'true' }),
-      live ? 'LIVE' : stopped ? 'STOPPED' : 'PAUSED',
-      h('span', { class: 'sub' }, live ? `${this.intervalS()} s` : stopped ? (this.halted || (scopeOk ? 'filter' : 'scope')) : 'space'),
-    );
-    this.livePill.setAttribute('aria-pressed', live ? 'false' : 'true');
-    this.livePill.setAttribute('aria-label', live ? `Live: the session table is read every ${this.intervalS()} s. Pause (space).` : 'Paused. Resume live updates (space).');
-    this.livePill.title = live ? 'Pause live updates (space)' : stopped ? 'Not reading: see the message below. Refresh (r) reads once more.' : 'Resume live updates (space)';
-    this.ctx.ui.setLive('sessions', live);
+    const running = !this.paused && !stopped;
+    // What the pill says is what the view is doing: reading for the first time, retrying after a
+    // failed read (every 15 s), live, paused or stopped.
+    const mode = !running ? (stopped ? 'stopped' : 'paused') : this.failure ? 'retry' : !this.payload ? 'reading' : 'live';
+    const s = this.intervalS();
+    const sig = `${mode}|${s}|${this.halted}|${scopeOk}`;
+    if (sig === this.liveSig) return;
+    this.liveSig = sig;
+    const text = { live: 'LIVE', reading: 'READING…', retry: 'RETRY', paused: 'PAUSED', stopped: 'STOPPED' }[mode];
+    const sub = { live: `${s} s`, reading: '', retry: `${Math.max(RETRY_S, s)} s`, paused: 'space', stopped: this.halted || (scopeOk ? 'filter' : 'scope') }[mode];
+    this.livePill.className = ['live-pill', mode !== 'live' && 'paused', mode === 'retry' && 'sx-retry', mode === 'reading' && 'sx-first'].filter(Boolean).join(' ');
+    this.livePill.replaceChildren(...[h('span', { class: 'dot', 'aria-hidden': 'true' }), text, sub ? h('span', { class: 'sub' }, sub) : null].filter(Boolean));
+    const label = {
+      live: `Live: the session table is read every ${s} s. Pause (space).`,
+      reading: 'Reading the session table for the first time. Pause (space).',
+      retry: `The last read failed; J-Wicket tries again every ${Math.max(RETRY_S, s)} s. Pause (space).`,
+      paused: 'Paused. Resume live updates (space).',
+      stopped: 'Not reading: see the message below. Refresh (r) reads once more.',
+    }[mode];
+    this.livePill.setAttribute('aria-pressed', running ? 'false' : 'true');
+    this.livePill.setAttribute('aria-label', label);
+    this.livePill.title = label;
+    this.ctx.ui.setLive('sessions', mode === 'live' || mode === 'reading');
   }
 
   renderInterval() {
@@ -1171,11 +1705,16 @@ class SessionsView {
     const set = (el, text) => tick(el, text);
     set(this.statNew, st.added === null ? DASH : st.added ? `+${fmt.num(st.added)}` : '0');
     set(this.statEnded, st.ended === null ? DASH : st.ended ? `−${fmt.num(st.ended)}` : '0');
+    // Gold is an event: only a real count of new sessions is gold, not a zero or an unknown.
+    this.statNew.closest('.sx-stat').classList.toggle('hot', Boolean(st.added));
     const table = this.payload && this.payload.sessions;
     const ok = table && table.status === 'ok';
-    set(this.statListed, ok ? fmt.num(this.listedCount ?? (table.rows || []).length) : DASH);
-    set(this.statShown, ok ? fmt.num(this.shownCount ?? 0) : DASH);
-    this.statShown.parentElement.classList.toggle('filtered', Boolean(ok && this.plan && this.plan.browser));
+    const listed = ok ? this.listedCount ?? (table.rows || []).length : null;
+    set(this.statListed, listed === null ? DASH : fmt.num(listed));
+    const differs = ok && this.browserActive && this.shownCount !== listed;
+    if (differs) set(this.statShown, `· ${fmt.num(this.shownCount)} shown`);
+    this.statShown.hidden = !differs;
+    this.statListed.closest('.sx-stat').classList.toggle('filtered', Boolean(differs));
   }
 
   renderAge() {
@@ -1191,14 +1730,29 @@ class SessionsView {
     const { icon } = this.ctx.dom;
     const fmt = this.fmt;
     const out = [];
-    const note = (cls, iconName, text, ...actions) => h('div', { class: ['sx-note', cls] }, icon(iconName), h('span', { class: 'sx-note-t' }, text), ...actions);
-    const btn = (label, fn) => h('button', { class: 'btn sm', type: 'button', on: { click: fn } }, label);
+    const sig = [];
+    const note = (cls, iconName, text, ...actions) => {
+      sig.push(cls, text, actions.filter(Boolean).length);
+      return h('div', { class: ['sx-note', cls] }, icon(iconName), h('span', { class: 'sx-note-t' }, text), ...actions);
+    };
+    const btn = (label, fn, fk) => h('button', { class: 'btn sm', type: 'button', dataset: { fk: fk || label }, on: { click: fn } }, label);
     if (this.queryError) {
-      out.push(note('warn', 'alert', `The query has an error, so the filter shown is the last good one: ${this.queryError.message}.`));
+      const still = this.goodText ? `Still showing: ${this.goodText}.` : 'Still showing every session.';
+      out.push(note('warn', 'alert', `The query has an error (${String(this.queryError.message).replace(/\.$/, '')}). ${still}`));
     }
-    if (this.failure) {
-      const when = this.lastOkAt ? ` Showing the read from ${fmt.time(this.payload && this.payload.meta && this.payload.meta.read_at)} UTC.` : '';
-      out.push(note('bad', this.failure.status === 'offline' ? 'wifi' : 'alert', `${this.failure.message}${when} Retrying every 15 s.`, btn('Retry now', () => this.poll(true))));
+    if (this.zoneIgnored && this.zoneIgnored.length) {
+      const zs = this.zoneState();
+      const terms = this.zoneIgnored.join(', ');
+      const text = zs.why === 'loading'
+        ? `Reading the policy configuration: ${terms} ${this.zoneIgnored.length === 1 ? 'is' : 'are'} applied once it arrives (zones come from the policy each session matched).`
+        : `Zone filters need the policy configuration, which ${zs.why === 'denied' ? 'your login class cannot read' : 'could not be read'}, so ${terms} ${this.zoneIgnored.length === 1 ? 'is' : 'are'} not applied. An interface filter (iface:…) narrows by zone on the device instead.`;
+      out.push(note(zs.why === 'loading' ? 'info' : 'warn', 'zone', text));
+    }
+    // A failed read with an earlier one on screen: this banner (the table stays, dimmed). With
+    // nothing read yet, the state card in place of the table says it once.
+    if (this.failure && this.payload) {
+      const when = ` Showing the read from ${fmt.time(this.payload.meta && this.payload.meta.read_at)} UTC.`;
+      out.push(note('bad', this.failure.status === 'offline' ? 'wifi' : 'alert', `${this.failure.message}${when} Retrying every ${RETRY_S} s.`, btn('Retry now', () => this.poll(true), 'retry')));
     }
     const table = this.payload && this.payload.sessions;
     if (table && table.status === 'ok' && table.truncated) {
@@ -1214,11 +1768,15 @@ class SessionsView {
       out.push(note('warn', 'filter', `The device returned ${fmt.num(total)} sessions; J-Wicket kept the first ${fmt.num((table.rows || []).length)} (limit ${fmt.num(this.limit)}). New and ended are not tracked while the list is cut; narrow the query with a device filter.`, more));
     }
     if (this.backupCount && !this.showBackups) {
-      out.push(note('info', 'cluster', `Chassis cluster: ${fmt.plural(this.backupCount, 'backup copy', 'backup copies')} hidden (every session is listed by both nodes).`, btn('Show backup copies', () => this.setBackups(true))));
+      out.push(note('info', 'cluster', `Chassis cluster: ${fmt.plural(this.backupCount, 'backup copy', 'backup copies')} hidden (every session is listed by both nodes).`, btn('Show backup copies', () => this.setBackups(true), 'backups')));
     } else if (this.backupCount && this.showBackups) {
-      out.push(note('info', 'cluster', `Showing ${fmt.plural(this.backupCount, 'backup copy', 'backup copies')} next to the active ones.`, btn('Hide backup copies', () => this.setBackups(false))));
+      out.push(note('info', 'cluster', `Showing ${fmt.plural(this.backupCount, 'backup copy', 'backup copies')} next to the active ones.`, btn('Hide backup copies', () => this.setBackups(false), 'backups')));
     }
-    this.ctx.dom.put(this.notices, ...out);
+    // Rebuilt only when the text changes (a focused button inside survives every poll).
+    const key = JSON.stringify(sig);
+    if (key === this.sigs.notices) return;
+    this.sigs.notices = key;
+    swapKeepFocus(this.ctx.dom.put, this.notices, ...out);
     this.notices.hidden = !out.length;
   }
 
@@ -1234,51 +1792,76 @@ class SessionsView {
     this.holdBtn.setAttribute('aria-pressed', this.hold ? 'true' : 'false');
     this.ctx.ui.announce(this.hold ? 'Row order held: rows stay where they are; new rows go on top.' : 'Rows re-sort on every poll.');
     this.renderHeader();
-    if (!this.hold) this.recompute();
+    if (!this.hold) this.recompute({ facets: false });
   }
 
   // ---- rendering: explicit states in place of the grid -----------------------------------------
 
   renderGridState() {
     const { h } = this;
-    const { stateCard, skeleton } = this.ctx.dom;
+    const { stateCard } = this.ctx.dom;
     const fmt = this.fmt;
-    const btn = (label, fn, cls = 'btn sm') => h('button', { class: cls, type: 'button', on: { click: fn } }, label);
+    const btn = (label, fn, cls = 'btn sm') => h('button', { class: cls, type: 'button', dataset: { fk: label }, on: { click: fn } }, label);
     let card = null;
+    let sig = null;
+    // solo: no table to show, so no table chrome (toolbar, facets, frame); hard: nothing on this
+    // view can be read at all, so the strip and the query bar go too and the card leads the view.
+    let solo = false;
+    let hard = false;
+    let loading = false;
     const table = this.payload && this.payload.sessions;
+    const history = btn('Session history: Logs → on-box report', () => this.ctx.navigate('logs', { source: 'report' }), 'btn sm ghost');
+    history.title = 'Sessions that closed are in the traffic log (RT_FLOW) or the on-box report, in Logs';
     if (!this.q || !this.ctx.QueryBar) {
-      card = stateCard({ status: 'failed', title: 'The query engine did not load', message: 'Reload the page. If it keeps failing, the J-Wicket build on this device may be incomplete.', hint: null });
+      sig = 'engine';
+      solo = hard = true;
+      card = () => stateCard({ status: 'failed', title: 'The query engine did not load', message: 'Reload the page. If it keeps failing, the J-Wicket build on this device may be incomplete.', hint: null });
     } else if (this.ctx.store.scope !== 'root') {
-      card = stateCard({
+      sig = 'scope';
+      solo = hard = true;
+      card = () => stateCard({
         status: 'unsupported',
         title: 'Sessions are listed for the root system only',
         message: 'This release reads the session table of the whole device (Spec 004); logical and tenant systems are not separated yet.',
         hint: null,
         // The shell's scope switcher is the one control that changes scope (a hash without
         // scope=... does not return to root), so the button opens it.
-        actions: [btn('Choose the root system', () => this.openScopeSwitcher())],
+        actions: [btn('Choose the root system', () => this.openScopeSwitcher()), history],
       });
     } else if (this.serverError) {
-      card = stateCard({ status: 'failed', title: 'The device filter was not accepted', message: this.serverError, hint: 'Fix the value in the query; nothing is read until then.' });
+      sig = `server|${this.serverError}`;
+      solo = true;
+      card = () => stateCard({ status: 'failed', title: 'The device filter was not accepted', message: this.serverError, hint: 'Fix the value in the query; nothing is read until then.' });
     } else if (!this.payload || (table && table.status === 'loading')) {
-      card = this.failure
-        ? stateCard({ status: this.failure.status, message: this.failure.message, actions: [btn('Retry now', () => this.poll(true))] })
-        : h('div', { class: 'sx-loading' }, skeleton(5));
+      if (this.failure) {
+        sig = `fail|${this.failure.status}|${this.failure.message}`;
+        solo = true;
+        card = () => stateCard({ status: this.failure.status, message: this.failure.message, hint: `J-Wicket tries again every ${RETRY_S} s.`, actions: [btn('Retry now', () => this.poll(true))] });
+      } else {
+        loading = true;
+      }
     } else if (!table || table.status !== 'ok') {
-      card = this.stateFor(table || { status: 'failed' });
+      const st = (table && table.status) || 'failed';
+      sig = `table|${st}|${table && table.message}|${st === 'refused' ? JSON.stringify([this.payload.matching, this.narrowing().map((s) => s.term), this.plan && this.plan.explain.map((e) => e.text)]) : ''}`;
+      solo = true;
+      hard = st === 'denied' || st === 'unsupported';
+      card = () => this.stateFor(table || { status: 'failed' }, hard ? [history] : null);
     } else if (!this.rows.length) {
       const listed = this.listedCount || 0;
-      if (listed && this.plan && this.plan.browser) {
-        card = stateCard({
+      if (listed && this.browserActive) {
+        sig = `empty-browser|${listed}|${this.deviceSentence()}|${this.q.toQueryString(this.plan.browser)}`;
+        card = () => stateCard({
           status: 'empty',
           title: 'No session matches the browser filter',
           message: `The device listed ${fmt.plural(listed, 'session')} for ${this.deviceSentence()}; none match ${this.q.toQueryString(this.plan.browser)}.`,
           actions: [btn('Clear the browser filter', () => this.clearBrowserPart())],
         });
       } else if (this.backupCount && !this.showBackups && this.current.length) {
-        card = stateCard({ status: 'empty', title: 'Only backup copies', message: 'Every listed row is a backup copy on the other cluster node.', actions: [btn('Show backup copies', () => this.setBackups(true))] });
+        sig = 'empty-backups';
+        card = () => stateCard({ status: 'empty', title: 'Only backup copies', message: 'Every listed row is a backup copy on the other cluster node.', actions: [btn('Show backup copies', () => this.setBackups(true))] });
       } else {
-        card = stateCard({
+        sig = `empty|${this.deviceSentence()}`;
+        card = () => stateCard({
           status: 'empty',
           title: Object.keys(this.device).length ? 'No session matches the device filter' : 'No active sessions',
           message: Object.keys(this.device).length ? `The device has no session for ${this.deviceSentence()}.` : 'The device listed no flow sessions in this poll.',
@@ -1286,10 +1869,57 @@ class SessionsView {
         });
       }
     }
-    this.gridState.replaceChildren(...(card ? [card] : []));
+    this.el.classList.toggle('sx-solo', solo);
+    this.el.classList.toggle('sx-solo-hard', hard);
+    this.el.classList.toggle('sx-nodata', !this.payload && !loading);
+    if (sig !== this.sigs.state) {
+      // Rebuilt only when what it says changes: a focused button inside survives every poll.
+      this.sigs.state = sig;
+      swapKeepFocus(this.ctx.dom.put, this.gridState, card ? card() : null);
+    }
     this.gridState.hidden = !card;
     this.grid.hidden = Boolean(card);
+    this.skel.hidden = !loading;
+    if (loading && !this.skel.firstChild) this.renderSkeleton();
     this.exportBtn.disabled = !this.rows.length;
+  }
+
+  /** While nothing has been read: the real header and twelve rows shaped like the columns. */
+  renderSkeleton() {
+    if (!this.skel || this.skel.hidden) {
+      if (this.skel) this.skel.replaceChildren();
+      return;
+    }
+    const { h } = this;
+    const widths = [70, 55, 85, 60, 75, 50, 90, 65];
+    const rows = [];
+    const rh = this.rowHeight();
+    for (let i = 0; i < 12; i += 1) {
+      const row = h('div', { class: ['sx-row', 'sx-skrow', this.mobile && 'm', i % 2 && 'odd'] });
+      row.style.height = `${rh}px`;
+      if (this.mobile) {
+        const cell = h('div', { class: 'sx-c sx-mcell' });
+        for (const [j, cls] of ['m-src', 'm-dst', 'm-meta'].entries()) {
+          const b = h('span', { class: ['sk-line', cls] });
+          b.style.width = `${widths[(i + j) % widths.length]}%`;
+          cell.append(b);
+        }
+        row.append(cell);
+      } else {
+        for (const [ci, c] of this.cols.entries()) {
+          const cell = h('div', { class: ['sx-c', `c-${c.id}`, c.num && 'num-col'] });
+          if (c.id === 'status') cell.append(h('span', { class: 'sx-dot sk' }));
+          else {
+            const b = h('span', { class: 'sk-line' });
+            b.style.width = `${widths[(i + ci) % widths.length]}%`;
+            cell.append(b);
+          }
+          row.append(cell);
+        }
+      }
+      rows.push(row);
+    }
+    this.skel.replaceChildren(...rows);
   }
 
   openScopeSwitcher() {
@@ -1311,7 +1941,7 @@ class SessionsView {
     this.applyQuery(text, { push: true });
   }
 
-  stateFor(table) {
+  stateFor(table, extra = null) {
     const { h } = this;
     const { stateCard } = this.ctx.dom;
     const fmt = this.fmt;
@@ -1322,7 +1952,7 @@ class SessionsView {
       const chips = sugg.map((s) =>
         h(
           'button',
-          { class: 'sx-sugg', type: 'button', title: `${s.why}. Adds ${s.term} to the query (filtered on the device).`, on: { click: () => this.addTerm(s.key, s.value, false) } },
+          { class: 'sx-sugg', type: 'button', dataset: { fk: s.term }, title: `${s.why}. Adds ${s.term} to the query (filtered on the device).`, on: { click: () => this.addTerm(s.key, s.value, false) } },
           h('span', { class: 'sx-sugg-t' }, s.term),
           h('span', { class: 'sx-sugg-w' }, s.why),
         ),
@@ -1343,12 +1973,12 @@ class SessionsView {
       );
     }
     if (status === 'denied') {
-      return stateCard({ status: 'denied', message: table.message, hint: 'Listing flow sessions needs the Junos view permission for security operational commands. J-Wicket reads as you and adds no rights.' });
+      return stateCard({ status: 'denied', message: table.message, hint: 'Listing flow sessions needs the Junos view permission for security operational commands. J-Wicket reads as you and adds no rights.', actions: extra });
     }
     if (status === 'unsupported') {
-      return stateCard({ status: 'unsupported', message: table.message, title: 'This device does not list flow sessions here' });
+      return stateCard({ status: 'unsupported', message: table.message, title: 'This device does not list flow sessions here', actions: extra });
     }
-    return stateCard({ status: status === 'session-lost' ? 'session-lost' : 'failed', message: table.message, actions: [h('button', { class: 'btn sm', type: 'button', on: { click: () => this.poll(true) } }, 'Try again')] });
+    return stateCard({ status: status === 'session-lost' ? 'session-lost' : 'failed', message: table.message, actions: [h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'try' }, on: { click: () => this.poll(true) } }, 'Try again')] });
   }
 
   /** The canonical sessions key for a typed key or alias ("pol" -> "policy"). */
@@ -1396,9 +2026,56 @@ class SessionsView {
 
   // ---- rendering: rows -------------------------------------------------------------------------
 
+  /** A clickable value (filter by it; Alt excludes). Focusable with the arrow keys inside a row. */
   fx(key, value, display, cls) {
     if (value === null || value === undefined || value === '') return this.h('span', { class: ['faint', cls] }, display ?? DASH);
-    return this.h('span', { class: ['fx', cls], dataset: { k: key, v: String(value) } }, display ?? String(value));
+    return this.h('span', { class: ['fx', cls], tabindex: '-1', dataset: { k: key, v: String(value), fk: `${key}=${value}` } }, display ?? String(value));
+  }
+
+  /** An address whose middle is cut (never its last group) when the column is too narrow. */
+  addr(text) {
+    const [head, tail] = splitTail(text);
+    return [this.h('span', { class: 'ip-h' }, head), this.h('span', { class: 'ip-t' }, tail)];
+  }
+
+  /** What a cell shows depends only on this string: equal signatures, no DOM work. */
+  cellSig(c, r) {
+    const a = r.in || {};
+    const b = r.out || {};
+    switch (c.id) {
+      case 'status': return `${this.statusOf(r).cls}|${r.state}|${r.status}|${r._backupWhy || ''}`;
+      case 'id': return r.session_id || r.id;
+      case 'policy': return r.policy || '';
+      case 'zones': {
+        const z = r._zones;
+        return z ? `${z.fromText}|${z.toText}|${z.from}|${z.to}|${z.global}|${z.ambiguous}` : `-|${r.policy || ''}`;
+      }
+      case 'proto': return a.proto || '';
+      case 'src': return `${a.src}|${a.sport}`;
+      case 'dst': return `${a.dst}|${a.dport}`;
+      case 'nat': {
+        const n = r.nat || {};
+        return `${n.source}|${n.destination}|${b.dst}|${b.dport}|${b.src}|${b.sport}|${a.src}|${a.sport}|${a.dst}|${a.dport}`;
+      }
+      case 'app': return r.application || '';
+      case 'iface': return `${a.iface}|${b.iface}`;
+      case 'bytes': return `${a.bytes}|${b.bytes}`;
+      case 'pkts': return `${a.packets}|${b.packets}`;
+      case 'rate': {
+        const w = this.maxRate > 0 && Number.isFinite(r.rate) ? Math.round(Math.sqrt(r.rate / this.maxRate) * 100) : 0;
+        return `${Boolean(r._ended)}|${r._live}|${rateShort(r.rate, this.fmt)}|${w}`;
+      }
+      case 'dur': return String(r.duration);
+      case 'timeout': return `${r.timeout}|${r.configured_timeout}`;
+      case 'node': return `${r.location}|${r._backup}`;
+      default: return '';
+    }
+  }
+
+  statusOf(r) {
+    const cls = r._ended ? 'ended' : r._backup ? 'backup' : r._newAt && Date.now() - r._newAt < FLASH_MS * 2 ? 'new' : /^valid$/i.test(r.state || 'valid') ? 'ok' : 'warn';
+    const label = r._ended ? 'ended since the last poll' : r._backup ? `backup copy (${r._backupWhy})` : `${r.state || 'state unknown'}${r.status ? `, ${r.status}` : ''}`;
+    return { cls, label };
   }
 
   cellContent(c, r) {
@@ -1408,8 +2085,7 @@ class SessionsView {
     const b = r.out || {};
     switch (c.id) {
       case 'status': {
-        const cls = r._ended ? 'ended' : r._backup ? 'backup' : r._newAt && Date.now() - r._newAt < FLASH_MS * 2 ? 'new' : /^valid$/i.test(r.state || 'valid') ? 'ok' : 'warn';
-        const label = r._ended ? 'ended since the last poll' : r._backup ? `backup copy (${r._backupWhy})` : `${r.state || 'state unknown'}${r.status ? `, ${r.status}` : ''}`;
+        const { cls, label } = this.statusOf(r);
         return h('span', { class: ['sx-dot', cls], title: label }, h('span', { class: 'sr-only' }, label));
       }
       case 'id':
@@ -1453,10 +2129,11 @@ class SessionsView {
         const w = this.maxRate > 0 && Number.isFinite(r.rate) ? Math.sqrt(r.rate / this.maxRate) : 0;
         const bar = h('i', null);
         bar.style.setProperty('--w', `${Math.round(w * 100)}%`);
+        // A live rate (from two polls) is bright; the average since the start is dim, no glyph.
         return h(
           'span',
-          { class: ['sx-rate', r._live ? 'live' : 'avg'], title: r._ended ? 'ended' : r._live ? 'bytes per second between the last two polls' : 'average since the session started; the live rate appears after the next poll' },
-          h('span', { class: 'sx-rate-v num' }, r._ended || !Number.isFinite(r.rate) ? DASH : `${r._live ? '' : '≈'}${fmt.rate(r.rate)}`),
+          { class: ['sx-rate', r._live ? 'live' : 'avg'], title: r._ended ? 'ended' : `${fmt.rate(r.rate)}: ${r._live ? 'bytes per second between the last two polls' : 'dim, the average since the session started; the live rate appears after the next poll'}` },
+          h('span', { class: 'sx-rate-v num' }, r._ended || !Number.isFinite(r.rate) ? DASH : rateShort(r.rate, fmt)),
           h('span', { class: 'sx-rbar', 'aria-hidden': 'true' }, bar),
         );
       }
@@ -1470,7 +2147,7 @@ class SessionsView {
         if (frac !== null) bar.style.setProperty('--w', `${Math.round(frac * 100)}%`);
         return h(
           'span',
-          { class: ['sx-to', frac !== null && frac < 0.1 && 'low'], title: Number.isFinite(left) ? `${fmt.duration(left)} left of ${Number.isFinite(cfg) ? fmt.duration(cfg) : '?'} configured` : 'timeout not reported' },
+          { class: ['sx-to', frac !== null && frac < 0.2 && 'low'], title: Number.isFinite(left) ? `${secs(left, fmt)} left of ${Number.isFinite(cfg) ? secs(cfg, fmt) : '?'}` : 'timeout not reported' },
           h('span', { class: 'num' }, Number.isFinite(left) ? fmt.duration(left) : DASH),
           frac !== null ? h('span', { class: 'sx-tbar', 'aria-hidden': 'true' }, bar) : null,
         );
@@ -1486,12 +2163,23 @@ class SessionsView {
     const { h } = this;
     if (!ip) return h('span', { class: 'faint' }, DASH);
     const v6 = String(ip).includes(':');
+    const ipEl = this.fx(ipKey, ip, this.addr(v6 ? `[${ip}]` : ip), 'ip');
     return h(
       'span',
       { class: 'sx-ep', title: hp(ip, port) },
-      this.fx(ipKey, ip, v6 ? `[${ip}]` : ip, 'ip'),
+      ipEl,
       port !== null && port !== undefined ? [h('span', { class: 'sx-colon' }, ':'), this.fx(portKey, port, String(port), 'port')] : null,
     );
+  }
+
+  /** A translated address:port (violet); the port is never cut, the address only in the middle. */
+  natEp(key, ip, port) {
+    const { h } = this;
+    if (!ip) return h('span', { class: 'faint' }, DASH);
+    const v6 = String(ip).includes(':');
+    const kids = [...this.addr(v6 ? `[${ip}]` : ip)];
+    if (port !== null && port !== undefined && port !== '') kids.push(h('span', { class: 'ip-p' }, `:${port}`));
+    return this.fx(key, ip, kids, 'nat');
   }
 
   natCell(r) {
@@ -1509,67 +2197,132 @@ class SessionsView {
       parts.push(this.fx('nat', 'dst', 'DNAT', 'sx-natb'));
       tips.push(`destination NAT: ${hp((r.in || {}).dst, (r.in || {}).dport)} → ${hp(b.src, b.sport)}`);
     }
-    if (n.source && !n.destination) parts.push(this.fx('natsrc', b.dst, hp(b.dst, b.dport), 'nat'));
-    else if (n.destination) parts.push(h('span', { class: 'sx-arr' }, ARROW), this.fx('natdst', b.src, hp(b.src, b.sport), 'nat'));
+    if (n.source && !n.destination) parts.push(this.natEp('natsrc', b.dst, b.dport));
+    else if (n.destination) parts.push(h('span', { class: 'sx-arr' }, ARROW), this.natEp('natdst', b.src, b.sport));
     return h('span', { class: 'sx-nat', title: tips.join('; ') }, parts);
   }
 
-  renderRow(i) {
-    const r = this.rows[i];
-    if (!r) return null;
-    const { h } = this;
-    const sel = this.selId === r.id;
-    const fresh = r._newAt && Date.now() - r._newAt < FLASH_MS;
-    const row = h('div', {
-      class: ['sx-row', fresh && 'sx-new', r._ended && 'sx-ended', r._backup && 'sx-backup', i % 2 && 'odd'],
-      role: 'row',
-      'aria-rowindex': String(i + 2),
-      'aria-selected': sel ? 'true' : 'false',
-      tabindex: sel ? '0' : '-1',
-      dataset: { id: r.id },
-    });
-    if (fresh) row.style.animationDelay = `-${Date.now() - r._newAt}ms`;
-    if (this.mobile) {
-      this.mobileRow(row, r);
-      return row;
-    }
-    this.cols.forEach((c, ci) => {
-      row.append(h('div', { class: ['sx-c', `c-${c.id}`, c.num && 'num-col'], role: 'gridcell', 'aria-colindex': String(ci + 1) }, this.cellContent(c, r)));
-    });
-    return row;
+  /** Which row takes Tab: the selected one when it is rendered, else the first visible one. */
+  chooseTabRow(w) {
+    const sel = this.selId && this.indexById.has(this.selId) ? this.indexById.get(this.selId) : -1;
+    const next = sel >= w.start && sel <= w.end ? this.selId : this.rows[w.first] ? this.rows[w.first].id : null;
+    if (next === this.tabId) return;
+    const prev = this.tabId;
+    this.tabId = next;
+    // The row that held the Tab stop gives it up now (it may not be patched in this sync).
+    const old = prev ? this.list.nodeFor(prev) : null;
+    if (old) old.tabIndex = -1;
+    const cur = next ? this.list.nodeFor(next) : null;
+    if (cur) cur.tabIndex = 0;
   }
 
-  mobileRow(row, r) {
+  createRow(i) {
+    const node = this.h('div', { class: 'sx-row', role: 'row' });
+    node._sigs = [];
+    node._cells = [];
+    if (this.mobile) {
+      const cell = this.h('div', { class: 'sx-c sx-mcell', role: 'gridcell', 'aria-colindex': '1' });
+      node.append(cell);
+      node._cells.push(cell);
+    } else {
+      this.cols.forEach((c, ci) => {
+        const cell = this.h('div', { class: ['sx-c', `c-${c.id}`, c.num && 'num-col'], role: 'gridcell', 'aria-colindex': String(ci + 1) });
+        node.append(cell);
+        node._cells.push(cell);
+      });
+    }
+    this.patchRow(node, i, true);
+    return node;
+  }
+
+  /** Bring a row node up to date for rows[i]: attributes, then only the cells whose signature changed. */
+  patchRow(node, i, created = false) {
+    const r = this.rows[i];
+    if (!r) return;
+    const sel = this.selId === r.id;
+    const age = r._newAt ? Date.now() - r._newAt : Infinity;
+    const fresh = age < FLASH_MS;
+    const cls = ['sx-row', 'vlist-row', fresh && 'sx-new', r._ended && 'sx-ended', r._backup && 'sx-backup', i % 2 && 'odd'].filter(Boolean).join(' ');
+    if (node._cls !== cls) {
+      // A row that becomes fresh while already on screen does not restart its wash.
+      if (fresh && created) node.style.animationDelay = `-${Math.round(age)}ms`;
+      node.className = cls;
+      node._cls = cls;
+    }
+    const attrs = `${i}|${sel}|${this.tabId === r.id}`;
+    if (node._attrs !== attrs) {
+      node._attrs = attrs;
+      node.setAttribute('aria-rowindex', String(i + 2));
+      node.setAttribute('aria-selected', sel ? 'true' : 'false');
+      node.tabIndex = this.tabId === r.id ? 0 : -1;
+      node.dataset.id = r.id;
+    }
+    if (this.mobile) {
+      const sig = this.mobileSig(r);
+      if (node._sigs[0] !== sig) {
+        node._sigs[0] = sig;
+        const cell = node._cells[0];
+        const fk = focusKeyIn(cell);
+        cell.replaceChildren(...this.mobileCell(r));
+        if (fk) refocus(cell, fk);
+      }
+      return;
+    }
+    for (let ci = 0; ci < this.cols.length; ci += 1) {
+      const c = this.cols[ci];
+      const sig = this.cellSig(c, r);
+      if (node._sigs[ci] === sig) continue;
+      node._sigs[ci] = sig;
+      const cell = node._cells[ci];
+      const fk = focusKeyIn(cell);
+      const content = this.cellContent(c, r);
+      if (content) cell.replaceChildren(content);
+      else cell.replaceChildren();
+      if (fk) refocus(cell, fk);
+    }
+  }
+
+  mobileSig(r) {
+    const a = r.in || {};
+    const n = r.nat || {};
+    const b = r.out || {};
+    return [this.statusOf(r).cls, a.src, a.sport, a.dst, a.dport, a.proto, r.policy, r.application, n.source, n.destination, b.src, b.sport, b.dst, b.dport,
+      r._ended, r._live, rateShort(r.rate, this.fmt), b.bytes, r.duration].join('|');
+  }
+
+  /**
+   * Phone card, three 12 px lines:  ● source:port            ↓bytes · age
+   *                                   → destination:port            rate
+   *                                   policy · proto · NAT (the whole line)
+   */
+  mobileCell(r) {
     const { h } = this;
     const fmt = this.fmt;
     const a = r.in || {};
     const cell = (cls, ...kids) => h('div', { class: ['sx-m', cls] }, ...kids);
-    row.append(
-      h(
-        'div',
-        { class: 'sx-c sx-mcell', role: 'gridcell', 'aria-colindex': '1' },
-        cell('m-dot', this.cellContent(COL_BY_ID.get('status'), r)),
-        cell('m-flow', this.endpoint(a.src, a.sport, 'src', 'sport'), h('span', { class: 'sx-arr' }, ARROW), this.endpoint(a.dst, a.dport, 'dst', 'dport')),
-        cell('m-rate', h('span', { class: 'num' }, r._ended ? 'ended' : !Number.isFinite(r.rate) ? DASH : `${r._live ? '' : '≈'}${fmt.rate(r.rate)}`)),
-        cell(
-          'm-meta',
-          this.fx('policy', r.policy, r.policy || DASH, 'sx-pol'),
-          a.proto ? [h('span', { class: 'sep' }, SEP), this.fx('proto', a.proto, a.proto, 'sx-proto')] : null,
-          r.nat && (r.nat.source || r.nat.destination) ? [h('span', { class: 'sep' }, SEP), this.natCell(r)] : null,
-          r.application ? [h('span', { class: 'sep' }, SEP), this.fx('app', r.application, r.application, 'sx-app')] : null,
-        ),
-        cell('m-size', h('span', { class: 'num' }, `↓${fmt.bytes((r.out || {}).bytes)} · ${fmt.duration(r.duration)}`)),
+    const rate = r._ended ? 'ended' : rateShort(r.rate, fmt);
+    return [
+      cell('m-dot', this.cellContent(COL_BY_ID.get('status'), r)),
+      cell('m-src', this.endpoint(a.src, a.sport, 'src', 'sport')),
+      cell('m-size', h('span', { class: 'num' }, `↓${fmt.bytes((r.out || {}).bytes)} · ${fmt.duration(r.duration)}`)),
+      cell('m-dst', h('span', { class: 'sx-arr' }, ARROW), this.endpoint(a.dst, a.dport, 'dst', 'dport')),
+      cell(
+        'm-meta',
+        this.fx('policy', r.policy, r.policy || DASH, 'sx-pol'),
+        a.proto ? [h('span', { class: 'sep' }, SEP), this.fx('proto', a.proto, a.proto, 'sx-proto')] : null,
+        r.nat && (r.nat.source || r.nat.destination) ? [h('span', { class: 'sep' }, SEP), this.natCell(r)] : null,
+        r.application ? [h('span', { class: 'sep' }, SEP), this.fx('app', r.application, r.application, 'sx-app')] : null,
       ),
-    );
+      cell('m-rate', h('span', { class: ['num', r._live ? 'live' : 'avg'] }, rate)),
+    ];
   }
 
   // ---- grid interaction ------------------------------------------------------------------------
 
   rowIndexOf(el) {
     const row = el instanceof Element ? el.closest('.sx-row') : null;
-    if (!row) return -1;
-    const i = this.rows.findIndex((r) => r.id === row.dataset.id);
-    return i;
+    if (!row || !row.dataset.id) return -1;
+    return this.indexById.has(row.dataset.id) ? this.indexById.get(row.dataset.id) : -1;
   }
 
   onGridClick(e) {
@@ -1592,10 +2345,56 @@ class SessionsView {
     if (i >= 0) this.select(i, { open: true });
   }
 
+  /**
+   * Keyboard in the table (role=grid, row focus): Up/Down, Page Up/Down, Home/End move the
+   * selection with the focus; Enter opens the session. Right/Left walk the values of the focused
+   * row; on a value, Enter filters by it and Alt+Enter excludes it; Escape returns to the row.
+   */
   onGridKey(e) {
-    if (e.target instanceof Element && e.target.classList.contains('sx-row') && e.key === 'Enter') {
+    const t = e.target instanceof Element ? e.target : null;
+    if (!t || e.metaKey || e.ctrlKey) return;
+    const value = t.classList.contains('fx') ? t : null;
+    const row = t.closest('.sx-row');
+    const onScroller = t === this.scroller;
+    if (!row && !onScroller) return;
+    const i = row ? this.rowIndexOf(row) : this.rows.findIndex((r) => r.id === this.selId);
+    const page = Math.max(1, Math.floor((this.list.viewH - this.list.offset) / this.list.rowHeight) - 1);
+    const move = (to) => {
       e.preventDefault();
-      const i = this.rowIndexOf(e.target);
+      if (!this.rows.length) return;
+      this.select(Math.max(0, Math.min(this.rows.length - 1, to)), { focus: true });
+    };
+    switch (e.key) {
+      case 'ArrowDown': return move(i < 0 ? 0 : i + 1);
+      case 'ArrowUp': return move(i < 0 ? 0 : i - 1);
+      case 'PageDown': return move((i < 0 ? 0 : i) + page);
+      case 'PageUp': return move((i < 0 ? 0 : i) - page);
+      case 'Home': return move(0);
+      case 'End': return move(this.rows.length - 1);
+      default: break;
+    }
+    if (!row) return;
+    const values = [...row.querySelectorAll('.fx')].filter((el) => el.getClientRects().length);
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const at = value ? values.indexOf(value) : -1;
+      const next = e.key === 'ArrowRight' ? at + 1 : at - 1;
+      if (next >= 0 && next < values.length) values[next].focus({ preventScroll: false });
+      else if (next < 0 && value) row.focus({ preventScroll: true });
+      return;
+    }
+    if (e.key === 'Escape' && value) {
+      e.preventDefault();
+      e.stopPropagation();
+      row.focus({ preventScroll: true });
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (value) {
+        this.addTerm(value.dataset.k, value.dataset.v, e.altKey);
+        return;
+      }
       if (i >= 0) this.select(i, { open: true });
     }
   }
@@ -1605,13 +2404,12 @@ class SessionsView {
     if (!r) return;
     const prev = this.selId;
     this.selId = r.id;
-    if (prev !== r.id) {
-      const oldI = this.rows.findIndex((x) => x.id === prev);
-      if (oldI >= 0) this.list.refresh(oldI);
-      this.list.refresh(i);
-    }
     if (scroll) this.list.scrollToIndex(i, 'nearest');
-    const node = this.list.rowAt(i);
+    // The selection moves by patching the two rows' attributes: no node is replaced.
+    if (prev && prev !== r.id) this.list.patchKey(prev);
+    this.chooseTabRow(this.list.range);
+    this.list.patchKey(r.id);
+    const node = this.list.nodeFor(r.id);
     if (focus && node) node.focus({ preventScroll: true });
     if (open) this.openDetail(r.id);
     else if (this.detail) this.openDetail(r.id);
@@ -1711,6 +2509,25 @@ class SessionsView {
     this.openPolicy(v);
   }
 
+  /**
+   * Where a policy sits in Junos evaluation order, from the inventory: {n, of, where}. The device's
+   * policy index is an internal ID, so the position comes from the configuration order (seq).
+   */
+  policyPosition(name) {
+    if (!name) return null;
+    const p = this.ctx.store.policyIndex().get(name);
+    if (!p || p.ambiguous || !Number.isFinite(Number(p.seq))) return null;
+    const pol = this.ctx.store.lastInventory && this.ctx.store.lastInventory.scope && this.ctx.store.lastInventory.scope.policies;
+    if (!pol) return null;
+    if (p.kind === 'global') {
+      const of = Number(pol.global_count);
+      return Number.isFinite(of) && of > 0 ? { n: Number(p.seq), of, where: 'the global policies' } : null;
+    }
+    if ((p.from || []).length !== 1 || (p.to || []).length !== 1) return null;
+    const pair = (pol.zone_pairs || []).find((zp) => zp.from === p.from[0] && zp.to === p.to[0]);
+    return pair && pair.count ? { n: Number(p.seq), of: Number(pair.count), where: `${p.from[0]} ${ARROW} ${p.to[0]}` } : null;
+  }
+
   openPolicy(name) {
     const idx = this.ctx.store.policyIndex();
     const p = idx.get(name);
@@ -1733,22 +2550,41 @@ class SessionsView {
     this.facets.hidden = !this.facetsOpen;
   }
 
+  /** Positive top-level key:value terms of the applied query ("dport:443"): those facet bars are gold. */
+  activeTerms() {
+    const out = new Set();
+    if (!this.ast || !this.q) return out;
+    const items = this.ast.type === 'and' ? this.ast.items : [this.ast];
+    for (const it of items) {
+      if (it.type !== 'term' || !it.key || (it.op !== ':' && it.op !== '=')) continue;
+      for (const v of it.values) out.add(`${this.keyName(it.key)}:${v.text}`);
+    }
+    return out;
+  }
+
   renderFacets() {
     if (!this.facetsOpen || !this.facets) return;
     const { h } = this;
     const fmt = this.fmt;
     const table = this.payload && this.payload.sessions;
     if (!table || table.status !== 'ok') {
+      if (this.sigs.facets === 'none') return;
+      this.sigs.facets = 'none';
       this.ctx.dom.put(this.facets, h('div', { class: 'fc-head' }, h('h2', { class: 'fc-title' }, 'Facets')), h('p', { class: 'fc-empty' }, 'Facets appear when the device lists sessions.'));
       return;
     }
     const data = this.facetData();
+    const active = this.activeTerms();
+    // Rebuilt only when the bars would change: a focused facet button survives the poll.
+    const sig = JSON.stringify([this.metric, [...active], data.map((f) => [f.top, f.distinct, f.missing, f.total])]);
+    if (sig === this.sigs.facets) return;
+    this.sigs.facets = sig;
     const val = (n) => (this.metric === 'bytes' ? fmt.bytes(n) : this.metric === 'rate' ? fmt.rate(n) : fmt.num(n));
     const seg = h(
       'div',
       { class: 'seg fc-metric', role: 'group', 'aria-label': 'Rank facets by' },
       METRICS.map((m) =>
-        h('button', { type: 'button', 'aria-pressed': m.id === this.metric ? 'true' : 'false', title: m.title, on: { click: () => this.setMetric(m.id) } }, m.label),
+        h('button', { type: 'button', 'aria-pressed': m.id === this.metric ? 'true' : 'false', title: m.title, dataset: { fk: `metric:${m.id}` }, on: { click: () => this.setMetric(m.id) } }, m.label),
       ),
     );
     const groups = data.map((f) => {
@@ -1757,26 +2593,29 @@ class SessionsView {
         const bar = h('i', null);
         bar.style.setProperty('--w', `${max > 0 ? Math.max(2, Math.round((n / max) * 100)) : 0}%`);
         const label = String(v);
+        const on = active.has(`${f.key}:${label}`);
         return h(
           'li',
-          { class: 'fc-item' },
+          { class: ['fc-item', on && 'on'] },
           h(
             'button',
             {
               class: 'fc-btn',
               type: 'button',
-              title: `Filter by ${f.key}:${label} (Alt-click: exclude)`,
+              'aria-pressed': on ? 'true' : null,
+              title: on ? `Already filtering by ${f.key}:${label}` : `Filter by ${f.key}:${label} (Alt-click: exclude)`,
+              dataset: { fk: `${f.key}=${label}` },
               on: { click: (e) => this.addTerm(f.key, v, e.altKey) },
             },
             h('span', { class: 'fc-label' }, label),
             h('span', { class: 'fc-n num' }, val(n)),
             h('span', { class: ['fc-bar', f.cls], 'aria-hidden': 'true' }, bar),
           ),
-          h('button', { class: 'fc-x', type: 'button', title: `Exclude ${f.key}:${label}`, 'aria-label': `Exclude ${f.key} ${label}`, on: { click: () => this.addTerm(f.key, v, true) } }, '≠'),
+          h('button', { class: 'fc-x', type: 'button', title: `Exclude ${f.key}:${label}`, 'aria-label': `Exclude ${f.key} ${label}`, dataset: { fk: `${f.key}!=${label}` }, on: { click: () => this.addTerm(f.key, v, true) } }, '≠'),
         );
       });
       const empty = !f.top.length
-        ? h('p', { class: 'fc-empty' }, f.missing && f.total ? `Not reported for these ${fmt.plural(f.total, 'session')}.` : 'No sessions.')
+        ? h('p', { class: 'fc-empty' }, f.missing && f.total ? `Not reported for ${f.total === 1 ? 'this session' : `these ${fmt.plural(f.total, 'session')}`}.` : 'No sessions.')
         : null;
       return h(
         'section',
@@ -1786,10 +2625,11 @@ class SessionsView {
         f.top.length ? h('ul', { class: 'fc-list' }, items) : null,
       );
     });
-    this.ctx.dom.put(this.facets, 
+    const total = data[0] ? data[0].total : 0;
+    swapKeepFocus(this.ctx.dom.put, this.facets,
       h('div', { class: 'fc-head' }, h('h2', { class: 'fc-title' }, 'Top 8'), seg),
       h('div', { class: 'fc-groups' }, groups),
-      h('p', { class: 'fc-foot' }, `Over the ${fmt.plural(data[0] ? data[0].total : 0, 'session')} shown. Click: filter${SEP}Alt-click: exclude.`),
+      h('p', { class: 'fc-foot' }, `Over the ${total === 1 ? 'session' : fmt.plural(total, 'session')} shown. Click: filter${SEP}Alt-click: exclude.`),
     );
   }
 
@@ -1931,7 +2771,7 @@ class SessionsView {
       this.order.clear();
       this.saveRoute(false);
       this.renderHeader();
-      this.recompute();
+      this.recompute({ facets: false });
     }, { checked: this.sort === key })));
   }
 
@@ -2087,13 +2927,23 @@ class SessionsView {
       content: this.detailHost,
       wide: true,
       onClose: () => {
+        const closedId = this.detail ? this.detail.id : id;
         if (this.detail) this.detail.destroy();
         this.detail = null;
         this.panelHandle = null;
         if (!this.dead) {
+          const prev = this.selId;
           this.selId = null;
           this.saveRoute(false);
-          this.list.refresh();
+          if (prev) this.list.patchKey(prev);
+          // The shell has put focus back on the opener if it still exists; when the opener was the
+          // row (or a value in it) and the table has moved on, the session's row takes it.
+          const a = document.activeElement;
+          if (!a || a === document.body || !a.isConnected) {
+            const node = this.list.nodeFor(closedId);
+            if (node) node.focus({ preventScroll: true });
+            else if (this.scroller.isConnected) this.scroller.focus({ preventScroll: true });
+          }
         }
       },
     }) || null;
@@ -2112,11 +2962,20 @@ class SessionDetail {
     this.fmt = view.fmt;
     this.row = view.byId(id);
     this.lastSeen = this.row;
+    this.sigs = {};
     this.build();
   }
 
   destroy() {
     if (this.flow) this.flow.destroy();
+  }
+
+  /** Rebuild a section only when sig changed; the focused control in it is focused again. */
+  section(name, el, sig, build) {
+    if (this.sigs[name] === sig) return false;
+    this.sigs[name] = sig;
+    swapKeepFocus(this.ctx.dom.put, el, ...[].concat(build()));
+    return true;
   }
 
   filterBtn(key, value, label, cls) {
@@ -2125,14 +2984,18 @@ class SessionDetail {
     return h(
       'span',
       { class: 'sx-dvw' },
-      h('button', { class: ['sx-dv', cls], type: 'button', title: `Filter sessions by ${key}:${value} (Alt-click: exclude)`, on: { click: (e) => this.v.addTerm(key, value, e.altKey) } }, label ?? String(value)),
-      h('span', { class: 'sx-dvacts' }, h('button', { class: 'sx-dvx', type: 'button', title: `Exclude ${key}:${value}`, 'aria-label': `Exclude ${key} ${value}`, on: { click: () => this.v.addTerm(key, value, true) } }, '≠')),
+      h('button', { class: ['sx-dv', cls], type: 'button', dataset: { fk: `${key}=${value}` }, title: `Filter sessions by ${key}:${value} (Alt-click: exclude)`, on: { click: (e) => this.v.addTerm(key, value, e.altKey) } }, label ?? String(value)),
+      h('span', { class: 'sx-dvacts' }, h('button', { class: 'sx-dvx', type: 'button', dataset: { fk: `${key}!=${value}` }, title: `Exclude ${key}:${value}`, 'aria-label': `Exclude ${key} ${value}`, on: { click: () => this.v.addTerm(key, value, true) } }, '≠')),
     );
   }
 
   build() {
     const { h } = this;
-    this.headEl = h('div', { class: 'sx-d-head' });
+    this.pillsEl = h('div', { class: 'sx-d-pills' });
+    this.seenEl = h('p', { class: 'xsmall faint' }, '');
+    this.msgEl = h('p', { class: 'sx-d-msg', hidden: true }, '');
+    this.headEl = h('div', { class: 'sx-d-head' }, this.pillsEl, this.seenEl, this.msgEl);
+    this.goneEl = h('div', { class: 'sx-d-gone', hidden: true });
     this.flow = new FlowDiagram({
       onFilter: (k, v, ex) => this.v.addTerm(k, v, ex),
       onPolicy: (name) => this.v.openPolicy(name),
@@ -2140,11 +3003,25 @@ class SessionDetail {
     this.rateEl = h('span', { class: 'sx-d-rate num' }, DASH);
     this.rateSub = h('span', { class: 'sx-d-ratesub' }, '');
     this.spark = new Sparkline({ height: 42, label: 'Bytes per second of this session, per poll', className: 'gold', area: false });
+    // Until two polls have given a rate: a dashed baseline and how many polls so far.
+    this.sparkPh = h('span', { class: 'sx-d-sparkph', 'aria-hidden': 'true' });
     this.sparkNote = h('p', { class: 'xsmall faint' }, '');
     this.upEl = h('b', { class: 'num' }, DASH);
     this.downEl = h('b', { class: 'num' }, DASH);
     this.wingsEl = h('div', { class: 'sx-d-wings' });
-    this.timeoutEl = h('div', { class: 'sx-d-timeout' });
+    // Timeout: text and bar updated in place.
+    this.toLeft = h('span', { class: 'num strong' }, DASH);
+    this.toOf = h('span', { class: 'muted' }, '');
+    this.toAge = h('span', { class: 'muted' }, '');
+    this.toBarI = h('i', null);
+    this.toBar = h('span', { class: 'bar sx-d-tobar' }, this.toBarI);
+    this.timeoutEl = h(
+      'div',
+      { class: 'sx-d-timeout' },
+      h('div', { class: 'sx-d-tline' }, this.toLeft, this.toOf, h('span', { class: 'spacer' }), this.toAge),
+      this.toBar,
+      h('p', { class: 'xsmall faint' }, 'Idle timeout: the session expires when no packet arrives for this long. Traffic resets it.'),
+    );
     this.kvEl = h('dl', { class: 'kv sx-d-kv' });
     this.extraEl = h('div', null);
     this.cliEl = h('div', { class: 'sx-d-cli' });
@@ -2153,6 +3030,7 @@ class SessionDetail {
       'div',
       { class: 'sx-detail' },
       this.headEl,
+      this.goneEl,
       h('figure', { class: 'sx-d-flow', 'aria-label': 'Flow diagram' }, this.flow.el, h('figcaption', { class: 'xsmall faint' }, 'Click an address, zone or interface to filter by it (Alt-click excludes); the policy opens in Policies. Violet: changed by NAT.')),
       h(
         'section',
@@ -2162,8 +3040,8 @@ class SessionDetail {
           'div',
           { class: 'sx-d-traffic' },
           h('div', { class: 'sx-d-ratebox' }, h('span', { class: 'sx-cap' }, 'Live rate'), this.rateEl, this.rateSub),
-          h('div', { class: 'sx-d-spark' }, this.spark.el, this.sparkNote),
-          h('div', { class: 'sx-d-totals' }, h('div', { class: 'sx-stat up' }, this.upEl, h('span', null, '↑ from client')), h('div', { class: 'sx-stat' }, this.downEl, h('span', null, '↓ from server'))),
+          h('div', { class: 'sx-d-spark' }, this.spark.el, this.sparkPh, this.sparkNote),
+          h('div', { class: 'sx-d-totals' }, h('div', { class: 'sx-stat' }, this.upEl, h('span', null, '↑ from client')), h('div', { class: 'sx-stat' }, this.downEl, h('span', null, '↓ from server'))),
         ),
       ),
       h('section', { class: 'panel-section' }, h('h3', null, 'Both wings'), this.wingsEl),
@@ -2172,10 +3050,14 @@ class SessionDetail {
       this.extraEl,
       h('section', { class: 'panel-section' }, h('h3', null, 'Next steps'), this.actions, this.cliEl),
     );
-    this.actionsBuilt = false;
+    this.actionsFor = null;
   }
 
-  /** Refresh from the view's latest data (called after every poll while the panel is open). */
+  /**
+   * Refresh from the view's latest data (after every poll while the panel is open). Numbers are
+   * updated in place; a section is rebuilt only when what it shows changed, so the focused control
+   * (a filter button, the policy link) keeps the focus and the panel's focus trap holds.
+   */
   update() {
     const v = this.v;
     const r = v.byId(this.id);
@@ -2183,57 +3065,66 @@ class SessionDetail {
     if (r) this.lastSeen = r;
     const shown = r || this.lastSeen;
     if (!shown) {
-      this.ctx.dom.put(this.headEl, this.ctx.dom.stateCard({ status: 'empty', title: `Session ${this.id} is not in the current list`, message: 'It ended, or the device filter excludes it.', compact: true }));
+      this.goneEl.hidden = false;
+      this.section('gone', this.goneEl, 'gone', () => this.ctx.dom.stateCard({ status: 'empty', title: `Session ${this.id} is not in the current list`, message: 'It ended, or the device filter excludes it.', compact: true }));
       return;
     }
+    this.goneEl.hidden = true;
     const state = r ? (r._ended ? 'ended' : 'live') : 'gone';
     this.renderHead(shown, state);
     const z = shown._zones || {};
-    this.flow.update(flowModel({ ...shown, _ended: state !== 'live' }, { from: z.from, to: z.to }));
+    this.flow.update(flowModel({ ...shown, _ended: state !== 'live' }, { from: z.from, to: z.to, position: v.policyPosition(shown.policy) }));
     this.renderTraffic(shown, state);
     this.renderWings(shown);
     this.renderTimeout(shown);
     this.renderKv(shown);
     this.renderExtra(shown);
-    if (!this.actionsBuilt || this.actionsFor !== shown.id) this.renderActions(shown);
+    if (this.actionsFor !== shown.id) this.renderActions(shown);
   }
 
   renderHead(r, state) {
     const { h } = this;
     const fmt = this.fmt;
-    const pills = [];
-    if (state === 'live') pills.push(h('span', { class: 'live-badge' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), this.v.paused ? 'PAUSED' : 'LIVE'));
-    else if (state === 'ended') pills.push(h('span', { class: 'pill deny' }, 'ENDED'));
-    else pills.push(h('span', { class: 'pill muted' }, 'NOT LISTED'));
-    if (r.state) pills.push(h('span', { class: ['pill', /^valid$/i.test(r.state) ? 'permit' : 'amber'] }, r.state));
-    if (r.status) pills.push(h('span', { class: ['pill', /^normal$/i.test(r.status) ? 'muted' : 'amber'], title: 'Session status: Normal, or a NAT flag (Auth, Transparent, Expired)' }, r.status));
-    if (r._role) pills.push(h('span', { class: ['pill', r._role === 'backup' ? 'muted' : 'sky'] }, `HA ${r._role}`));
-    else if (r._backup) pills.push(h('span', { class: 'pill muted', title: r._backupWhy }, 'backup copy'));
-    if (r.location) pills.push(h('span', { class: 'pill teal' }, r.location));
+    const sig = JSON.stringify([state, this.v.paused, r.state, r.status, r._role, r._backup, r._backupWhy, r.location]);
+    this.section('pills', this.pillsEl, sig, () => {
+      const pills = [];
+      if (state === 'live') pills.push(h('span', { class: 'live-badge' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), this.v.paused ? 'PAUSED' : 'LIVE'));
+      // Ended is closed, not denied: muted grey, never the deny red.
+      else if (state === 'ended') pills.push(h('span', { class: 'pill muted' }, 'ENDED'));
+      else pills.push(h('span', { class: 'pill muted' }, 'NOT LISTED'));
+      if (r.state) pills.push(h('span', { class: ['pill', /^valid$/i.test(r.state) ? 'permit' : 'amber'] }, r.state));
+      if (r.status) pills.push(h('span', { class: ['pill', /^normal$/i.test(r.status) ? 'muted' : 'amber'], title: 'Session status: Normal, or a NAT flag (Auth, Transparent, Expired)' }, r.status));
+      if (r._role) pills.push(h('span', { class: ['pill', r._role === 'backup' ? 'muted' : 'sky'] }, `HA ${r._role}`));
+      else if (r._backup) pills.push(h('span', { class: 'pill muted', title: r._backupWhy }, 'backup copy'));
+      if (r.location) pills.push(h('span', { class: 'pill teal' }, r.location));
+      return pills;
+    });
     const k = this.v.known.get(r.id);
-    const seen = r._firstAt ? `first seen in this tab ${fmt.time(new Date(r._firstAt))} UTC${k ? ` · ${fmt.plural(k.polls, 'poll')}` : ''}` : '';
+    this.seenEl.textContent = r._firstAt ? `first seen in this tab ${fmt.time(new Date(r._firstAt))} UTC${k ? ` · ${fmt.plural(k.polls, 'poll')}` : ''}` : '';
     const msg = state === 'ended'
       ? 'Gone from the table since the last poll: it closed or timed out. The values are the last ones read.'
       : state === 'gone'
         ? 'Not in the current list: it ended, or the device filter now excludes it. The values are the last ones read.'
         : '';
-    this.ctx.dom.put(this.headEl, 
-      h('div', { class: 'sx-d-pills' }, pills),
-      h('p', { class: 'xsmall faint' }, seen),
-      msg ? h('p', { class: 'sx-d-msg' }, msg) : null,
-    );
+    this.msgEl.textContent = msg;
+    this.msgEl.hidden = !msg;
   }
 
   renderTraffic(r, state) {
     const fmt = this.fmt;
     const k = this.v.known.get(r.id);
     const hist = k ? k.hist.slice() : [];
-    this.rateEl.textContent = state !== 'live' ? DASH : `${r._live ? '' : '≈'}${fmt.rate(r.rate)}`;
+    this.rateEl.textContent = state !== 'live' || !Number.isFinite(r.rate) ? DASH : fmt.rate(r.rate);
+    this.rateEl.classList.toggle('avg', state === 'live' && !r._live);
     this.rateSub.textContent = state !== 'live' ? (state === 'ended' ? 'ended' : 'not listed') : r._live ? 'between the last two polls' : 'average since start (live rate after the next poll)';
-    this.spark.update(hist, { min: 0 });
-    this.sparkNote.textContent = hist.length > 1
+    const enough = hist.length >= 3; // the sparkline draws from three points
+    this.spark.el.hidden = !enough;
+    this.sparkPh.hidden = enough;
+    if (enough) this.spark.update(hist, { min: 0 });
+    const polls = k ? k.polls : 1;
+    this.sparkNote.textContent = enough
       ? `${fmt.plural(hist.length, 'poll')} in this tab · peak ${fmt.rate(Math.max(...hist))}`
-      : 'The sparkline fills as polls arrive (kept in this tab only, for the session’s lifetime).';
+      : `collecting · ${fmt.plural(polls, 'poll')}${hist.length ? ` · peak ${fmt.rate(Math.max(...hist))}` : ''}`;
     tick(this.upEl, fmt.bytes((r.in || {}).bytes));
     tick(this.downEl, fmt.bytes((r.out || {}).bytes));
   }
@@ -2241,110 +3132,129 @@ class SessionDetail {
   renderWings(r) {
     const { h } = this;
     const fmt = this.fmt;
-    const head = h('tr', null, ['Wing', 'Source', 'Destination', 'Interface', 'Packets', 'Bytes'].map((t, i) => h('th', { class: i >= 4 ? 'num-col' : null, scope: 'col' }, t)));
-    const row = (label, w, srcKey, dstKey) => {
-      if (!w) return h('tr', null, h('td', null, label), h('td', { colspan: '5', class: 'faint' }, 'no reverse wing (one-winged session)'));
-      return h(
-        'tr',
-        null,
-        h('td', null, h('span', { class: 'sx-wing' }, label), w.direction ? h('span', { class: 'faint xsmall' }, ` ${w.direction}`) : null),
-        h('td', { class: 'mono' }, this.filterBtn(srcKey, w.src, hp(w.src, w.sport), 'ip')),
-        h('td', { class: 'mono' }, this.filterBtn(dstKey, w.dst, hp(w.dst, w.dport), 'ip')),
-        h('td', { class: 'mono' }, this.filterBtn('iface', w.iface, w.iface, 'iface'), w.tunnel && w.tunnel !== '0' ? h('span', { class: 'faint xsmall' }, ` tunnel ${w.tunnel}`) : null),
-        h('td', { class: 'num num-col' }, fmt.num(w.packets)),
-        h('td', { class: 'num num-col' }, fmt.bytes(w.bytes)),
-      );
-    };
     const n = r.nat || {};
-    this.ctx.dom.put(this.wingsEl, 
-      h(
-        'table',
-        { class: 'table sx-d-table' },
-        h('thead', null, head),
-        h('tbody', null, row('→ request', r.in, 'src', 'dst'), row('← reply', r.out, n.destination ? 'natdst' : 'dst', n.source ? 'natsrc' : 'src')),
-      ),
-      h('p', { class: 'xsmall faint' }, 'The reply wing carries the translated addresses: under source NAT its destination is the translated source; under destination NAT its source is the real server.'),
-    );
+    const w = (x) => (x ? [x.direction, x.src, x.sport, x.dst, x.dport, x.iface, x.tunnel] : null);
+    const sig = JSON.stringify([w(r.in), w(r.out), n.source, n.destination]);
+    const rebuilt = this.section('wings', this.wingsEl, sig, () => {
+      this.wingNums = [];
+      const head = h('tr', null, ['Wing', 'Source', 'Destination', 'Interface', 'Packets', 'Bytes'].map((t, i) => h('th', { class: i >= 4 ? 'num-col' : null, scope: 'col' }, t)));
+      const row = (label, wing, srcKey, dstKey) => {
+        if (!wing) return h('tr', null, h('td', null, label), h('td', { colspan: '5', class: 'faint' }, 'no reverse wing (one-winged session)'));
+        const pk = h('td', { class: 'num num-col' }, '');
+        const by = h('td', { class: 'num num-col' }, '');
+        this.wingNums.push([pk, by, label === '→ request' ? 'in' : 'out']);
+        return h(
+          'tr',
+          null,
+          h('td', null, h('span', { class: 'sx-wing' }, label), wing.direction ? h('span', { class: 'faint xsmall' }, ` ${wing.direction}`) : null),
+          h('td', { class: 'mono' }, this.filterBtn(srcKey, wing.src, hp(wing.src, wing.sport), 'ip')),
+          h('td', { class: 'mono' }, this.filterBtn(dstKey, wing.dst, hp(wing.dst, wing.dport), 'ip')),
+          h('td', { class: 'mono' }, this.filterBtn('iface', wing.iface, wing.iface, 'iface'), wing.tunnel && wing.tunnel !== '0' ? h('span', { class: 'faint xsmall' }, ` tunnel ${wing.tunnel}`) : null),
+          pk,
+          by,
+        );
+      };
+      return [
+        h(
+          'table',
+          { class: 'table sx-d-table' },
+          h('thead', null, head),
+          h('tbody', null, row('→ request', r.in, 'src', 'dst'), row('← reply', r.out, n.destination ? 'natdst' : 'dst', n.source ? 'natsrc' : 'src')),
+        ),
+        h('p', { class: 'xsmall faint' }, 'The reply wing carries the translated addresses: under source NAT its destination is the translated source; under destination NAT its source is the real server.'),
+      ];
+    });
+    for (const [pk, by, side] of this.wingNums || []) {
+      const wing = r[side] || {};
+      const p = fmt.num(wing.packets);
+      const b = fmt.bytes(wing.bytes);
+      if (rebuilt || pk.textContent !== p) pk.textContent = p;
+      if (rebuilt || by.textContent !== b) by.textContent = b;
+    }
   }
 
   renderTimeout(r) {
-    const { h } = this;
     const fmt = this.fmt;
     const cfg = Number(r.configured_timeout);
     const left = Number(r.timeout);
     const frac = cfg > 0 && Number.isFinite(left) ? Math.max(0, Math.min(1, left / cfg)) : null;
-    const bar = h('i', null);
-    if (frac !== null) bar.style.setProperty('--w', `${Math.round(frac * 100)}%`);
-    this.ctx.dom.put(this.timeoutEl, 
-      h(
-        'div',
-        { class: 'sx-d-tline' },
-        h('span', { class: 'num strong' }, Number.isFinite(left) ? fmt.duration(left) : DASH),
-        h('span', { class: 'muted' }, Number.isFinite(cfg) ? ` left of ${fmt.duration(cfg)} configured` : ' left'),
-        h('span', { class: 'spacer' }),
-        h('span', { class: 'muted' }, `age ${fmt.duration(r.duration)}`),
-      ),
-      frac !== null ? h('span', { class: ['bar', frac < 0.1 ? 'deny' : 'teal'] }, bar) : null,
-      h('p', { class: 'xsmall faint' }, 'Idle timeout: the session expires when no packet arrives for this long. Traffic resets it.'),
-    );
+    this.toLeft.textContent = Number.isFinite(left) ? secs(left, fmt) : DASH;
+    this.toOf.textContent = Number.isFinite(cfg) && cfg > 0 ? ` left of ${secs(cfg, fmt)}` : ' left';
+    this.toAge.textContent = `age ${fmt.duration(r.duration)}`;
+    this.toBar.hidden = frac === null;
+    if (frac !== null) this.toBarI.style.setProperty('--w', `${Math.round(frac * 100)}%`);
+    // Muted while there is time; amber when under a fifth of the configured timeout is left.
+    this.toBar.classList.toggle('low', frac !== null && frac < 0.2);
   }
 
   renderKv(r) {
     const { h } = this;
+    const fmt = this.fmt;
     const z = r._zones;
-    const pol = r.policy
-      ? h(
-        'span',
-        { class: 'sx-dvw' },
-        h('button', { class: 'policy-link', type: 'button', title: `Open ${r.policy} in Policies`, on: { click: () => this.v.openPolicy(r.policy) } }, r.policy),
-        h(
+    const pos = this.v.policyPosition(r.policy);
+    const sig = JSON.stringify([r.session_id || r.id, r.policy, r.policy_index, z && [z.from, z.to, z.fromText, z.toText], (r.in || {}).proto, r.application, r.state, r.status, r.location, pos]);
+    const rebuilt = this.section('kv', this.kvEl, sig, () => {
+      const pol = r.policy
+        ? h(
           'span',
-          { class: 'sx-dvacts' },
-          h('button', { class: 'sx-dvx eq', type: 'button', title: `Filter sessions by policy:${r.policy}`, 'aria-label': `Filter by policy ${r.policy}`, on: { click: () => this.v.addTerm('policy', r.policy, false) } }, '='),
-          h('button', { class: 'sx-dvx', type: 'button', title: `Exclude policy:${r.policy}`, 'aria-label': `Exclude policy ${r.policy}`, on: { click: () => this.v.addTerm('policy', r.policy, true) } }, '≠'),
-        ),
-      )
-      : h('span', { class: 'faint' }, DASH);
-    const zones = z
-      ? h('span', null, z.from ? this.filterBtn('from', z.from, z.from, 'zone') : h('span', { class: 'faint' }, z.fromText), h('span', { class: 'sx-arr' }, ` ${ARROW} `), z.to ? this.filterBtn('to', z.to, z.to, 'zone') : h('span', { class: 'faint' }, z.toText))
-      : h('span', { class: 'faint' }, r.policy ? 'not known (the policy is not in this scope’s inventory)' : DASH);
-    const pairs = [
-      ['Session ID', h('span', { class: 'mono' }, r.session_id || r.id)],
-      ['Policy', pol],
-      ['Policy index', h('span', { class: 'mono' }, r.policy_index || DASH)],
-      ['Zones', zones],
-      ['Protocol', this.filterBtn('proto', (r.in || {}).proto, (r.in || {}).proto, 'mono')],
-      ['Application', this.filterBtn('app', r.application, r.application, 'mono')],
-      ['State', h('span', null, r.state || DASH)],
-      ['Status', h('span', null, r.status || DASH)],
-      ['Location', r.location ? this.filterBtn('node', r.location, r.location, 'mono') : h('span', { class: 'faint' }, 'not reported (single node)')],
-      ['Start time', h('span', { class: 'mono', title: 'As the device reports it: seconds since boot on some releases, epoch seconds on others' }, r.start_time || DASH)],
-    ];
-    this.kvEl.replaceChildren(...pairs.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]));
+          { class: 'sx-dvw' },
+          h('button', { class: 'policy-link', type: 'button', dataset: { fk: 'policy-open' }, title: `Open ${r.policy} in Policies`, on: { click: () => this.v.openPolicy(r.policy) } }, r.policy),
+          h(
+            'span',
+            { class: 'sx-dvacts' },
+            h('button', { class: 'sx-dvx eq', type: 'button', dataset: { fk: 'policy=' }, title: `Filter sessions by policy:${r.policy}`, 'aria-label': `Filter by policy ${r.policy}`, on: { click: () => this.v.addTerm('policy', r.policy, false) } }, '='),
+            h('button', { class: 'sx-dvx', type: 'button', dataset: { fk: 'policy!=' }, title: `Exclude policy:${r.policy}`, 'aria-label': `Exclude policy ${r.policy}`, on: { click: () => this.v.addTerm('policy', r.policy, true) } }, '≠'),
+          ),
+        )
+        : h('span', { class: 'faint' }, DASH);
+      const zones = z
+        ? h('span', null, z.from ? this.filterBtn('from', z.from, z.from, 'zone') : h('span', { class: 'faint' }, z.fromText), h('span', { class: 'sx-arr' }, ` ${ARROW} `), z.to ? this.filterBtn('to', z.to, z.to, 'zone') : h('span', { class: 'faint' }, z.toText))
+        : h('span', { class: 'faint' }, r.policy ? 'not known (the policy is not in this scope’s inventory, or the inventory cannot be read)' : DASH);
+      // The policy index is Junos' internal ID; the rule position (evaluation order) is separate.
+      const idx = r.policy_index
+        ? h('span', null, h('span', { class: 'mono', title: 'Junos policy index: an internal ID, not the position of the rule' }, `id ${r.policy_index}`),
+          pos ? h('span', { class: 'faint' }, ` · rule ${pos.n} of ${pos.of} in ${pos.where}`) : null)
+        : h('span', { class: 'faint' }, DASH);
+      this.startEl = h('span', { class: 'mono' }, DASH);
+      const pairs = [
+        ['Session ID', h('span', { class: 'mono' }, r.session_id || r.id)],
+        ['Policy', pol],
+        ['Policy index', idx],
+        ['Zones', zones],
+        ['Protocol', this.filterBtn('proto', (r.in || {}).proto, (r.in || {}).proto, 'mono')],
+        ['Application', this.filterBtn('app', r.application, r.application, 'mono')],
+        ['State', h('span', null, r.state || DASH)],
+        ['Status', h('span', null, r.status || DASH)],
+        ['Location', r.location ? this.filterBtn('node', r.location, r.location, 'mono') : h('span', { class: 'faint' }, 'not reported (single node)')],
+        ['Started', this.startEl],
+      ];
+      return pairs.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]);
+    });
+    // Start: the read time minus the session's age, in UTC; the device's own number in the tooltip.
+    const readAt = this.v.payload && this.v.payload.meta ? Date.parse(this.v.payload.meta.read_at) : NaN;
+    const start = Number.isFinite(readAt) && Number.isFinite(Number(r.duration)) ? new Date(readAt - Number(r.duration) * 1000) : null;
+    const text = start ? fmt.stamp(start) : DASH;
+    if (rebuilt || this.startEl.textContent !== text) this.startEl.textContent = text;
+    this.startEl.title = `The read time minus the session's age.${r.start_time ? ` The device reports start time ${r.start_time} (seconds since boot on some releases, epoch seconds on others).` : ''}`;
   }
 
   renderExtra(r) {
     const { h } = this;
     const extra = Object.entries(r.extra || {});
-    if (!extra.length) {
-      this.ctx.dom.put(this.extraEl);
-      return;
-    }
-    this.ctx.dom.put(this.extraEl, 
-      h(
+    this.section('extra', this.extraEl, JSON.stringify(extra), () => (extra.length
+      ? h(
         'section',
         { class: 'panel-section' },
         h('h3', null, 'More from the device'),
         h('dl', { class: 'kv sx-d-kv' }, extra.flatMap(([k, val]) => [h('dt', { class: 'mono' }, k), h('dd', { class: 'mono' }, val)])),
         h('p', { class: 'xsmall faint' }, 'Fields J-Wicket does not model yet, shown as the device sent them.'),
-      ),
-    );
+      )
+      : []));
   }
 
   renderActions(r) {
     const { h } = this;
     const { icon } = this.ctx.dom;
-    this.actionsBuilt = true;
     this.actionsFor = r.id;
     const sid = r.session_id || r.id;
     const node = nodeOf(r.location);
@@ -2360,17 +3270,17 @@ class SessionDetail {
     const match = z && z.from && z.to && a.src && dstIp
       ? `show security match-policies from-zone ${z.from} to-zone ${z.to} source-ip ${a.src} destination-ip ${dstIp}${a.sport !== null && a.sport !== undefined ? ` source-port ${a.sport}` : ''}${dstPort !== null && dstPort !== undefined ? ` destination-port ${dstPort}` : ''}${proto ? ` protocol ${proto}` : ''}`
       : null;
-    const copyBtn = (text, label) => h('button', { class: 'btn ghost sm icon', type: 'button', title: label, 'aria-label': label, on: { click: () => this.ctx.ui.copy(text, 'CLI command copied.') } }, icon('copy'));
-    this.ctx.dom.put(this.actions, 
-      r.policy ? h('button', { class: 'btn sm', type: 'button', on: { click: () => this.v.openPolicy(r.policy) } }, icon('policies'), 'Open policy') : null,
-      h('button', { class: 'btn sm', type: 'button', title: `Logs with session id ${sid} (RT_FLOW create, close, deny)`, on: { click: () => this.ctx.navigate('logs', { q: `session:${sid}` }) } }, icon('logs'), 'Show logs for this session'),
-      h('button', { class: 'btn sm primary', type: 'button', on: { click: () => this.ctx.ui.copy(cli, 'CLI command copied.') } }, icon('terminal'), 'Copy as CLI'),
+    const copyBtn = (text, label, fk) => h('button', { class: 'btn ghost sm icon', type: 'button', title: label, 'aria-label': label, dataset: { fk }, on: { click: () => this.ctx.ui.copy(text, 'CLI command copied.') } }, icon('copy'));
+    swapKeepFocus(this.ctx.dom.put, this.actions,
+      r.policy ? h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'act-policy' }, on: { click: () => this.v.openPolicy(r.policy) } }, icon('policies'), 'Open policy') : null,
+      h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'act-logs' }, title: `Logs with session id ${sid} (RT_FLOW create, close, deny)`, on: { click: () => this.ctx.navigate('logs', { q: `session:${sid}` }) } }, icon('logs'), 'Show logs for this session'),
+      h('button', { class: 'btn sm primary', type: 'button', dataset: { fk: 'act-cli' }, on: { click: () => this.ctx.ui.copy(cli, 'CLI command copied.') } }, icon('terminal'), 'Copy as CLI'),
     );
-    this.ctx.dom.put(this.cliEl, 
+    swapKeepFocus(this.ctx.dom.put, this.cliEl,
       h('p', { class: 'xsmall faint' }, 'This session on the device:'),
-      h('code', { class: 'cli' }, cli, copyBtn(cli, 'Copy this command')),
+      h('code', { class: 'cli' }, cli, copyBtn(cli, 'Copy this command', 'cli-1')),
       match ? h('p', { class: 'xsmall faint' }, 'Which policy matches this flow (Junos evaluates; J-Wicket does not guess):') : null,
-      match ? h('code', { class: 'cli' }, match, copyBtn(match, 'Copy this command')) : null,
+      match ? h('code', { class: 'cli' }, match, copyBtn(match, 'Copy this command', 'cli-2')) : null,
     );
   }
 }

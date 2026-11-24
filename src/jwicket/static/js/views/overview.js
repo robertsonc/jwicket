@@ -1,22 +1,33 @@
 // views/overview.js: the console's front page (UI brief, section 6).
 //
-// Device card, session gauge and sparkline (polls /api/sessions every 10 s), recent denies (tail of the
-// syslog file that takes RT_FLOW, or on-box reporting, or the security log buffer), top policies by
-// live sessions, a mini zone-pair matrix, warnings, the "managed from" card and quick links with
-// filters pre-filled. Every tile is device data or an explicit state; nothing is decorative.
+// Incident tiles first: flow sessions (gauge and trend), recent denies (tail of the syslog file that
+// takes RT_FLOW, or on-box reporting, or the security log buffer), warnings; then top policies by
+// live sessions and a mini zone-pair matrix; then the device card (identity, HA, scope, read-as,
+// source, central management) and quick links with filters pre-filled. Every tile is device data or
+// an explicit state; nothing is decorative.
+//
+// Polling cost: /api/sessions has no summary-only mode yet, so every read also pulls the session list
+// through the routing engine (two NETCONF RPCs, two UI_NETCONF_CMD lines). The overview therefore
+// reads it every 30 s, not every 10 s, and starts from the last Sessions poll when that is fresh.
 
-import { h, icon, put, stateCard, skeleton, setTicking } from '../dom.js';
+import { h, icon, put, stateCard, skeleton, setTicking, viewSub } from '../dom.js';
 import * as fmt from '../format.js';
 import { Gauge } from '../widgets/gauge.js';
 import { Sparkline } from '../widgets/sparkline.js';
 
-const SESSIONS_EVERY_S = 10;
+const SESSIONS_EVERY_S = 30;
 const DENIES_EVERY_S = 15;
-const HISTORY = 60; // sparkline points: 10 minutes at 10 s
+const RETRY_S = 30;
+const HISTORY = 20; // sparkline points: 10 minutes at 30 s
 const DENY_TAG = 'RT_FLOW_SESSION_DENY';
-const TICKER_ROWS = 5;
+const TICKER_ROWS = 10;
+const TOP_ROWS = 8;
+const MATRIX_ZONES = 7;
 const SEP = ' \u00b7 ';
 const ARROW = '\u2192';
+const DASH = '\u2014';
+// A read that failed for a reason that will not change by itself: no retry, no RETRYING pill.
+const FINAL = new Set(['denied', 'unsupported']);
 
 export const view = {
   id: 'overview',
@@ -64,6 +75,17 @@ function errorState(res, what) {
   if (res.status === 0) return { status: 'offline', message: res.data.error };
   if (res.status === 429) return { status: 'failed', message: `${what}: reading too often; J-Wicket will try again.` };
   return { status: 'failed', message: res.data.error || `${what} failed (HTTP ${res.status}).` };
+}
+
+function isFixtureNote(text) {
+  return /^fixture data\b/i.test(String(text || ''));
+}
+
+/** A global policy applies to a zone pair when its from/to are empty (any) or name the zone. */
+function globalApplies(row, from, to) {
+  const f = row.from || [];
+  const t = row.to || [];
+  return (!f.length || f.includes(from)) && (!t.length || t.includes(to));
 }
 
 /** Extract the fields of one RT_FLOW_SESSION_DENY line (structured-data, BSD text or buffer form). */
@@ -127,11 +149,9 @@ class Overview {
     this.dead = false;
     this.paused = false;
     this.history = [];
-    this.prevIds = null;
     this.sess = null; // last /api/sessions payload
     this.sessError = null;
     this.sessAt = 0;
-    this.sessStats = { added: null, ended: null };
     this.denySource = null; // { kind: 'file'|'report'|'buffer', id, label, params }
     this.denySources = null;
     this.denyCursor = null;
@@ -160,7 +180,16 @@ class Overview {
     await this.ctx.store.inventory();
     if (this.dead) return;
     this.renderInventory();
-    this.pollSessions();
+    // The Sessions view may just have read the table: start from that read instead of a new one.
+    const last = this.ctx.store.sessionsLast;
+    const at = last && last.meta && last.meta.read_at ? Date.parse(last.meta.read_at) : NaN;
+    const age = Number.isFinite(at) ? Date.now() - at : Infinity;
+    if (this.ctx.store.scope === 'root' && last && age >= 0 && age < SESSIONS_EVERY_S * 1000) {
+      this.applySessions(last, { fromStore: true });
+      this.timers.sess = setTimeout(() => this.pollSessions(), SESSIONS_EVERY_S * 1000 - age);
+    } else {
+      this.pollSessions();
+    }
     setTimeout(() => this.pollDenies(), 700);
   }
 
@@ -194,17 +223,17 @@ class Overview {
     this.head = h(
       'div',
       { class: 'view-head' },
-      h('div', null, this.title, this.sub),
+      h('div', { class: 'view-titles' }, this.title, this.sub),
       h('div', { class: 'view-actions' }, this.livePill, refresh),
     );
+    // Incident first: sessions and denies, then what explains them, then who and what the device is.
     this.t = {
-      device: tile('device', 'Device', 'server'),
+      warnings: tile('warnings', 'Warnings', 'alert'),
       sessions: tile('sessions', 'Flow sessions', 'sessions'),
-      managed: tile('managed', 'Managed from', 'broadcast'),
       denies: tile('denies', 'Recent denies', 'ban'),
       top: tile('top', 'Top policies by live sessions', 'policies'),
       matrix: tile('matrix', 'Zone pairs', 'grid'),
-      warnings: tile('warnings', 'Warnings', 'alert'),
+      device: tile('device', 'Device', 'server'),
       links: tile('links', 'Jump to', 'arrow'),
     };
     this.grid = h('div', { class: 'ov-grid' }, Object.values(this.t).map((t) => t.el));
@@ -215,16 +244,13 @@ class Overview {
 
   buildSessionsTile() {
     const t = this.t.sessions;
-    this.gauge = new Gauge({ size: 116, stroke: 9, label: 'Active sessions of the device maximum' });
-    this.spark = new Sparkline({ height: 34, label: 'Active sessions per poll' });
-    this.sessActive = h('span', { class: 'big-num' }, '\u2014');
-    this.sessOf = h('span', { class: 'of' }, '');
-    this.sparkLo = h('span', null, '');
-    this.sparkHi = h('span', null, '');
-    this.statNew = h('b', null, '\u2014');
-    this.statEnded = h('b', null, '\u2014');
-    this.statRows = h('b', null, '\u2014');
-    this.sessNote = h('div', null);
+    this.gauge = new Gauge({ size: 80, stroke: 7, label: 'Active sessions of the device maximum' });
+    // Zero-based: a few sessions more or less is a flat line, a flood is not.
+    this.spark = new Sparkline({ height: 34, label: 'Active sessions per poll', min: 0 });
+    this.sessBig = h('span', { class: 'big-num', hidden: true }, DASH);
+    this.sessOf = h('span', { class: 'sess-of' }, '');
+    this.sparkRange = h('span', { class: 'sess-range' }, '');
+    this.sessNote = h('div', { class: 'sess-note' });
     this.sessContent = h(
       'div',
       null,
@@ -235,22 +261,11 @@ class Overview {
         h(
           'div',
           { class: 'sess-figs' },
-          this.sessActive,
+          this.sessBig,
+          h('div', { class: 'sess-spark-head' }, h('span', null, 'active, last 10 min'), this.sparkRange),
+          this.spark.el,
           this.sessOf,
-          h(
-            'div',
-            { class: 'sess-spark' },
-            h('div', { class: 'sess-spark-head' }, h('span', null, 'active, last 10 min'), h('span', null, this.sparkLo, ' \u2013 ', this.sparkHi)),
-            this.spark.el,
-          ),
         ),
-      ),
-      h(
-        'div',
-        { class: 'sess-stats' },
-        h('div', { class: 'stat up', title: 'Sessions in this poll that were not in the previous one' }, this.statNew, h('span', null, 'new')),
-        h('div', { class: 'stat down', title: 'Sessions in the previous poll that are gone now' }, this.statEnded, h('span', null, 'ended')),
-        h('div', { class: 'stat', title: 'Rows the device listed (J-Wicket lists at most 500 here)' }, this.statRows, h('span', null, 'listed')),
       ),
       this.sessNote,
     );
@@ -265,16 +280,31 @@ class Overview {
     t.foot.hidden = false;
   }
 
+  /** A live read is failing for a reason that may pass (not denied, not unsupported). */
+  retrying() {
+    const failing = (e) => e && !FINAL.has(e.status);
+    return failing(this.sessError) || failing(this.denyError);
+  }
+
   renderLivePill() {
     const live = !this.paused;
-    this.livePill.className = `live-pill${live ? '' : ' paused'}`;
-    put(this.livePill, 
+    const retrying = live && this.retrying();
+    this.livePill.className = `live-pill${live ? '' : ' paused'}${retrying ? ' retrying' : ''}`;
+    put(
+      this.livePill,
       h('span', { class: 'dot', 'aria-hidden': 'true' }),
-      live ? 'LIVE' : 'PAUSED',
-      h('span', { class: 'sub' }, live ? `${SESSIONS_EVERY_S} s` : 'space'),
+      !live ? 'PAUSED' : retrying ? 'RETRYING' : 'LIVE',
+      h('span', { class: 'sub' }, live ? `${retrying ? RETRY_S : SESSIONS_EVERY_S} s` : 'space'),
     );
     this.livePill.setAttribute('aria-pressed', live ? 'false' : 'true');
-    this.livePill.setAttribute('aria-label', live ? `Live: sessions every ${SESSIONS_EVERY_S} s, denies every ${DENIES_EVERY_S} s. Pause (space).` : 'Paused. Resume live updates (space).');
+    this.livePill.setAttribute(
+      'aria-label',
+      !live
+        ? 'Paused. Resume live updates (space).'
+        : retrying
+          ? `Live, but a read is failing; trying again every ${RETRY_S} s. Pause (space).`
+          : `Live: sessions every ${SESSIONS_EVERY_S} s, denies every ${DENIES_EVERY_S} s. Pause (space).`,
+    );
     this.livePill.title = live ? 'Pause live updates (space)' : 'Resume live updates (space)';
     this.ctx.ui.setLive('overview', live);
   }
@@ -282,6 +312,7 @@ class Overview {
   togglePause() {
     this.paused = !this.paused;
     this.renderLivePill();
+    if (this.denyLive) this.renderDenies();
     this.ctx.ui.announce(this.paused ? 'Overview paused.' : 'Overview live.');
     if (!this.paused) {
       this.pollSessions();
@@ -301,7 +332,7 @@ class Overview {
   }
 
   onScope() {
-    for (const k of ['device', 'matrix', 'managed', 'warnings', 'links']) put(this.t[k].body, skeleton(3));
+    for (const k of ['device', 'matrix', 'warnings', 'links']) put(this.t[k].body, skeleton(3));
     this.renderLivePill();
     this.renderSessions();
     this.renderTop();
@@ -324,22 +355,20 @@ class Overview {
     const err = this.ctx.store.inventoryError;
     if (!snap) {
       const card = err ? stateCard(err.status === 0 ? { status: 'offline', message: err.message } : { status: 'failed', message: err.message }) : skeleton(3);
-      for (const k of ['device', 'matrix', 'managed', 'warnings']) put(this.t[k].body, card.cloneNode(true));
+      for (const k of ['device', 'matrix', 'warnings']) put(this.t[k].body, card.cloneNode(true));
       this.sub.textContent = err ? 'The device could not be read.' : 'Reading the device\u2026';
       this.renderLinks();
       return;
     }
     const dev = snap.device || {};
-    this.sub.textContent = [
-      dev.status === 'ok' ? dev.hostname : null,
-      (snap.meta.scopes || []).find((s) => s.id === snap.meta.scope)?.label || scopeKindLabel(snap.meta.scope || 'root'),
-      `read ${fmt.time(snap.meta.read_at)} UTC`,
-      `as ${(snap.meta.read_as || {}).user || '?'}`,
-    ]
-      .filter(Boolean)
-      .join(SEP);
+    const scopeId = snap.meta.scope || 'root';
+    viewSub(this.sub, {
+      host: dev.status === 'ok' ? dev.hostname : null,
+      scope: this.ctx.ui.scopeLabel ? this.ctx.ui.scopeLabel(scopeId) : scopeKindLabel(scopeId),
+      readAt: snap.meta.read_at,
+      user: (snap.meta.read_as || {}).user || '?',
+    });
     this.renderDevice(snap);
-    this.renderManaged(snap);
     this.renderMatrix(snap);
     this.renderWarnings();
     this.renderTop();
@@ -356,10 +385,10 @@ class Overview {
     const parts = [];
     if (dev.status === 'ok') {
       parts.push(
-        h('div', { class: 'dev-id' }, h('span', { class: 'dev-host' }, dev.hostname || 'unnamed device')),
         h(
           'div',
-          { class: 'dev-sub' },
+          { class: 'dev-id' },
+          h('span', { class: 'dev-host' }, dev.hostname || 'unnamed device'),
           dev.model ? h('span', { class: 'pill muted' }, modelName(dev.model)) : null,
           h('span', { class: 'pill sky' }, `Junos ${dev.version || 'release not reported'}`),
           this.haBadge(ha),
@@ -376,6 +405,8 @@ class Overview {
     const scopeInfo = scopes.find((s) => s.id === meta.scope);
     const ra = meta.read_as || {};
     const src = meta.source || {};
+    const cfg = snap.config || {};
+    const configRead = !cfg.status || cfg.status === 'ok';
     parts.push(
       h(
         'dl',
@@ -407,11 +438,45 @@ class Overview {
         h(
           'dd',
           null,
-          `${src.database === 'committed' ? 'committed configuration' : `${src.database || 'unknown'} configuration`}${SEP}${src.inheritance ? 'inheritance expanded' : 'inheritance not expanded'}`,
+          configRead
+            ? `${src.database === 'committed' ? 'committed configuration' : `${src.database || 'unknown'} configuration`}${SEP}${src.inheritance ? 'inheritance expanded' : 'inheritance not expanded'}`
+            : h('span', { class: 'faint' }, `configuration not read (${cfg.status})`),
         ),
+        h('dt', null, 'Managed from'),
+        h('dd', null, this.managedFacts(snap)),
       ),
     );
     put(t.body, ...parts);
+  }
+
+  /** Central management (outbound SSH): who else may change this configuration. */
+  managedFacts(snap) {
+    const mg = snap.management || {};
+    const cfg = snap.config || {};
+    if (mg.status !== 'ok') {
+      return h(
+        'span',
+        { class: 'faint', title: 'Another system may also manage this device.' },
+        cfg.status && cfg.status !== 'ok' ? `not known: the configuration was not read (${cfg.status})` : `not known (${mg.status || 'failed'})${mg.message ? `: ${mg.message}` : ''}`,
+      );
+    }
+    if (!mg.managed) {
+      return h('span', { class: 'faint', title: 'Security Director, Mist and similar managers connect this way. Operators and scripts using the CLI or NETCONF are not listed here.' }, 'no outbound-SSH client configured');
+    }
+    return h(
+      'div',
+      { class: 'mg-list' },
+      (mg.clients || []).map((c) =>
+        h(
+          'div',
+          { class: 'mg-client' },
+          h('span', { class: 'mg-name' }, icon('broadcast'), c.client),
+          (c.targets || []).map((x) => h('span', { class: 'mono faint' }, x)),
+          (c.services || []).map((s) => h('span', { class: 'pill' }, s)),
+        ),
+      ),
+      h('span', { class: 'mg-note' }, 'Changes made there can overwrite this configuration without J-Wicket knowing.'),
+    );
   }
 
   haBadge(ha) {
@@ -474,7 +539,7 @@ class Overview {
       return h(
         'a',
         { class: 'inv-count', href: this.ctx.href(viewId, params), on: { click: go(viewId, params) }, title: ok ? `${label}: ${sub}` : `${label}: ${section ? section.status : 'not read'}` },
-        h('b', null, ok ? fmt.num(value) : '\u2014'),
+        h('b', null, ok ? fmt.num(value) : DASH),
         h('span', null, ok ? label : `${label}: ${section ? section.status : 'not read'}`),
         ok && meter ? meter : null,
       );
@@ -507,118 +572,88 @@ class Overview {
     );
   }
 
-  renderManaged(snap) {
-    const t = this.t.managed;
-    const mg = snap.management || {};
-    const cfg = snap.config || {};
-    put(t.meta, mg.status === 'ok' ? h('span', null, mg.managed ? fmt.plural((mg.clients || []).length, 'client') : 'none') : null);
-    if (mg.status !== 'ok') {
-      put(t.body, 
-        stateCard({
-          status: mg.status || 'failed',
-          title: 'Not known',
-          message: cfg.status && cfg.status !== 'ok' ? 'Central management is read from the configuration, which could not be read.' : mg.message,
-          hint: 'Another system may also manage this device.',
-          compact: true,
-        }),
-      );
-      return;
-    }
-    if (!mg.managed) {
-      put(t.body, 
-        h(
-          'div',
-          { class: 'mg-none' },
-          icon('check-circle'),
-          h(
-            'div',
-            null,
-            h('p', null, 'No outbound-SSH management client is configured.'),
-            h('p', { class: 'small faint' }, 'Security Director, Mist and similar managers connect this way. Operators and scripts using the CLI or NETCONF are not listed here.'),
-          ),
-        ),
-      );
-      return;
-    }
-    put(t.body, 
-      ...(mg.clients || []).map((c) =>
-        h(
-          'div',
-          { class: 'mg-client' },
-          h('span', { class: 'mg-name' }, icon('broadcast'), c.client),
-          (c.targets || []).length ? h('span', { class: 'mg-targets' }, c.targets.map((x) => h('span', { class: 'zone' }, x))) : null,
-          (c.services || []).length ? h('span', { class: 'mg-targets' }, c.services.map((s) => h('span', { class: 'pill gold' }, s))) : null,
-        ),
-      ),
-      h('p', { class: 'mg-note' }, 'Another system holds a management connection (outbound SSH). Changes made there can overwrite this configuration without J-Wicket knowing.'),
-    );
-  }
+  // -- zone-pair matrix: the same zone order, axes, cell anatomy and legend as the Policies view --
 
   renderMatrix(snap) {
     const t = this.t.matrix;
     const scope = snap.scope;
+    put(t.meta, h('span', { title: 'Rows: from-zone. Columns: to-zone.' }, 'from \u2193  to \u2192'));
     if (!scope) {
-      t.meta.replaceChildren();
       put(t.body, stateCard({ status: (snap.config || {}).status || 'failed', message: (snap.config || {}).message, compact: true }));
+      t.foot.hidden = true;
       return;
     }
     const pol = scope.policies || {};
     if (pol.status !== 'ok') {
       put(t.body, stateCard({ status: pol.status, message: pol.message, compact: true }));
+      t.foot.hidden = true;
       return;
     }
     const pairs = pol.zone_pairs || [];
-    const zoneNames = new Set(((scope.zones && scope.zones.rows) || []).map((z) => z.name));
-    for (const p of pairs) {
-      zoneNames.add(p.from);
-      zoneNames.add(p.to);
+    const rows = pol.rows || [];
+    // Configuration order: the zones as configured, then any zone only a policy names.
+    const all = [];
+    const add = (z) => {
+      if (z && z !== '?' && !all.includes(z)) all.push(z);
+    };
+    for (const z of (scope.zones && scope.zones.status === 'ok' && scope.zones.rows) || []) add(z.name);
+    for (const r of rows) {
+      if (r.kind === 'global') continue;
+      (r.from || []).forEach(add);
+      (r.to || []).forEach(add);
     }
-    const weight = new Map();
     for (const p of pairs) {
-      weight.set(p.from, (weight.get(p.from) || 0) + p.count);
-      weight.set(p.to, (weight.get(p.to) || 0) + p.count);
+      add(p.from);
+      add(p.to);
     }
-    const all = [...zoneNames];
-    const zones = all.sort((a, b) => (weight.get(b) || 0) - (weight.get(a) || 0) || a.localeCompare(b)).slice(0, 7);
+    const zones = all.slice(0, MATRIX_ZONES);
     const byPair = new Map(pairs.map((p) => [`${p.from}\u0000${p.to}`, p]));
+    const globals = rows.filter((r) => r.kind === 'global' && !r.inactive);
     const live = this.liveByPair();
-    put(t.meta, h('span', null, `${fmt.plural((pol.rows || []).length, 'policy')}${SEP}${pol.global_count || 0} global`));
     if (!zones.length) {
       put(t.body, stateCard({ status: 'empty', message: 'No security zones are configured in this scope.', compact: true }));
+      t.foot.hidden = true;
       return;
     }
-    const cells = [h('div', { class: 'mx-corner', title: 'Rows: from-zone. Columns: to-zone.' }, h('span', null, `from ${ARROW}`))];
+    const cells = [h('div', { class: 'mx-corner', 'aria-hidden': 'true' })];
     for (const z of zones) cells.push(h('div', { class: 'mx-col', title: `to ${z}` }, h('span', null, z)));
     for (const from of zones) {
       cells.push(h('div', { class: 'mx-rowh', title: `from ${from}` }, h('span', null, from)));
       for (const to of zones) {
         const p = byPair.get(`${from}\u0000${to}`);
+        const has = Boolean(p && p.count);
         const sessions = live ? live.get(`${from}\u0000${to}`) || 0 : null;
+        const globalsHere = globals.filter((g) => globalApplies(g, from, to)).length;
         const params = { q: `from:${quote(from)} to:${quote(to)}` };
-        const label = p
-          ? `${from} to ${to}: ${fmt.plural(p.count, 'policy')} (${p.permit} permit, ${p.deny} deny, ${p.reject} reject, ${p.inactive} inactive)${sessions !== null ? `, ${fmt.plural(sessions, 'live session')}` : ''}`
-          : `${from} to ${to}: no zone-pair policy, so global policies and then the default policy apply`;
-        const total = p ? Math.max(1, p.count) : 1;
-        const mix = p
-          ? h(
-              'span',
-              { class: 'mx-mix', 'aria-hidden': 'true' },
-              ['permit', 'deny', 'reject', 'inactive'].map((k) => (p[k] ? h('i', { class: k, style: { '--w': `${(p[k] / total) * 100}%` } }) : null)),
-            )
-          : null;
+        const liveText = sessions ? `, ${fmt.plural(sessions, 'live session')}` : '';
+        const label = has
+          ? `${from} ${ARROW} ${to}: ${fmt.plural(p.count, 'policy')} (${p.permit} permit, ${p.deny} deny, ${p.reject} reject, ${p.inactive} inactive)${liveText}`
+          : `${from} ${ARROW} ${to}: no zone-pair policy, so Junos checks ${globalsHere ? fmt.plural(globalsHere, 'global policy', 'global policies') : 'the global policies (none apply)'} and then the default policy${liveText}`;
+        const children = [];
+        if (has) {
+          const bar = h('span', { class: 'mx-bar', 'aria-hidden': 'true' });
+          for (const k of ['permit', 'deny', 'reject', 'inactive']) {
+            if (!p[k]) continue;
+            const segEl = h('i', { class: k });
+            segEl.style.flexGrow = String(p[k]);
+            bar.append(segEl);
+          }
+          children.push(h('b', { class: 'mx-n' }, String(p.count)), bar);
+        } else {
+          children.push(h('span', { class: 'mx-g' }, globalsHere ? `${globalsHere} global` : 'default'));
+        }
+        if (sessions) children.push(h('span', { class: 'mx-live', title: `${fmt.plural(sessions, 'live session')} in the last poll` }, fmt.compact(sessions)));
         cells.push(
           h(
             'a',
             {
-              class: ['mx-cell', !p && 'empty', from === to && 'self'],
+              class: ['mx-cell', has ? 'has' : 'empty'],
               href: this.ctx.href('policies', params),
               title: label,
               'aria-label': label,
               on: { click: (e) => { e.preventDefault(); this.ctx.navigate('policies', params); } },
             },
-            p ? h('b', null, String(p.count)) : h('span', { 'aria-hidden': 'true' }, '\u00b7'),
-            sessions ? h('span', { class: 'live' }, fmt.compact(sessions)) : null,
-            mix,
+            children,
           ),
         );
       }
@@ -632,6 +667,7 @@ class Overview {
       h('span', null, h('i', { class: 'permit' }), 'permit'),
       h('span', null, h('i', { class: 'deny' }), 'deny'),
       h('span', null, h('i', { class: 'reject' }), 'reject'),
+      h('span', null, h('i', { class: 'inactive' }), 'inactive'),
       live ? h('span', null, h('i', { class: 'live' }), 'live sessions') : null,
     );
     put(t.body, grid, more, legend);
@@ -670,24 +706,31 @@ class Overview {
     const snap = this.ctx.store.lastInventory;
     const items = [];
     if (snap) {
-      for (const w of snap.warnings || []) items.push({ text: w, src: 'device', cls: /fixture/i.test(w) ? 'fixture' : '' });
-      for (const w of (snap.scope && snap.scope.warnings) || []) items.push({ text: w, src: 'scope', cls: '' });
+      // The fixture banner already says this on every screen; the tile keeps real warnings.
+      const bannerShown = Boolean(snap.meta && snap.meta.fixture);
+      for (const w of snap.warnings || []) if (!(bannerShown && isFixtureNote(w))) items.push({ text: w, src: 'device', cls: isFixtureNote(w) ? 'fixture' : '' });
+      for (const w of (snap.scope && snap.scope.warnings) || []) if (!(bannerShown && isFixtureNote(w))) items.push({ text: w, src: 'scope', cls: '' });
       const cfg = snap.config || {};
-      if (cfg.status && cfg.status !== 'ok') items.push({ text: `Configuration: ${cfg.message || cfg.status}`, src: cfg.status, cls: 'bad' });
+      if (cfg.status && cfg.status !== 'ok') items.push({ text: `Configuration: ${cfg.message || cfg.status}`, src: cfg.status, cls: cfg.status === 'denied' ? 'info' : 'bad' });
       const dev = snap.device || {};
       if (dev.status && dev.status !== 'ok') items.push({ text: `Device facts: ${dev.message || dev.status}`, src: dev.status, cls: 'bad' });
       const saysInactive = ((snap.scope && snap.scope.warnings) || []).some((w) => /deactivated|inactive/i.test(w));
       if (snap.scope && snap.scope.inactive && !saysInactive) items.push({ text: 'This scope is deactivated in the configuration: nothing in it is in effect.', src: 'scope', cls: 'bad' });
     }
-    if (this.sessError && this.sessError.status !== 'unsupported') items.push({ text: `Sessions: ${this.sessError.message || this.sessError.status}`, src: this.sessError.status, cls: 'bad' });
-    if (this.denyError) items.push({ text: `Recent denies: ${this.denyError.message || this.denyError.status}`, src: this.denyError.status, cls: this.denyError.status === 'denied' ? 'info' : 'bad' });
+    // Failing live reads have their own state card in their tile; here they are one line.
+    const failing = [];
+    if (this.sessError && !FINAL.has(this.sessError.status)) failing.push('Flow sessions');
+    if (this.denyError && !FINAL.has(this.denyError.status)) failing.push('Recent denies');
+    if (failing.length) items.push({ text: `${fmt.plural(failing.length, 'live read')} failing (${failing.join(', ')}); each tile says why. J-Wicket tries again every ${RETRY_S} s.`, src: 'live', cls: 'bad' });
+    this.t.warnings.el.classList.toggle('is-empty', Boolean(snap) && !items.length);
     put(t.meta, items.length ? h('span', { class: ['badge', items.some((i) => i.cls === 'bad') ? 'deny' : 'amber'] }, String(items.length)) : null);
     if (!snap && !items.length) return;
     if (!items.length) {
       put(t.body, h('div', { class: 'mg-none' }, icon('check-circle'), h('p', null, 'No warnings from the last read.')));
       return;
     }
-    put(t.body, 
+    put(
+      t.body,
       h(
         'ul',
         { class: 'warn-list' },
@@ -721,40 +764,30 @@ class Overview {
     } else {
       this.sessError = res.status === 400 ? { status: 'unsupported', message: res.data.error } : errorState(res, 'Sessions');
       this.renderSessions();
+      this.renderTop();
+      this.renderLinks();
       this.renderWarnings();
-      next = 30000;
+      this.renderLivePill();
+      if (FINAL.has(this.sessError.status)) return;
+      next = RETRY_S * 1000;
     }
     if (!this.paused && !this.dead && this.ctx.store.scope === 'root') this.timers.sess = setTimeout(() => this.pollSessions(), next);
   }
 
-  applySessions(data) {
+  applySessions(data, { fromStore = false } = {}) {
+    const hadError = Boolean(this.sessError);
     this.sessError = null;
     this.ctx.ui.noteFixture(data.meta);
-    const table = data.sessions || {};
     const summary = data.summary || {};
-    const complete = table.status === 'ok' && !table.truncated;
-    if (complete) {
-      const ids = new Set((table.rows || []).map((r) => r.id));
-      if (this.prevIds) {
-        let added = 0;
-        let ended = 0;
-        for (const id of ids) if (!this.prevIds.has(id)) added += 1;
-        for (const id of this.prevIds) if (!ids.has(id)) ended += 1;
-        this.sessStats = { added, ended };
-        if (added) this.ctx.ui.announce(`${fmt.plural(added, 'new session')} since the last poll.`);
-      }
-      this.prevIds = ids;
-    } else {
-      this.prevIds = null;
-      this.sessStats = { added: null, ended: null };
-    }
+    const filtered = Boolean(data.meta && data.meta.device_filters && Object.keys(data.meta.device_filters).length);
     if (summary.status === 'ok' && Number.isFinite(summary.active)) {
       this.history.push(summary.active);
       if (this.history.length > HISTORY) this.history.shift();
     }
-    this.sess = data;
-    this.sessAt = Date.now();
-    this.ctx.store.setSessionsLast(data);
+    // A Sessions poll with device filters lists only part of the table: keep its gauge, not its rows.
+    this.sess = filtered ? { ...data, sessions: { status: 'filtered', rows: [] } } : data;
+    this.sessAt = fromStore && data.meta && data.meta.read_at ? Date.parse(data.meta.read_at) : Date.now();
+    if (!fromStore) this.ctx.store.setSessionsLast(data);
     this.renderSessions();
     this.renderTop();
     const snap = this.ctx.store.lastInventory;
@@ -763,13 +796,14 @@ class Overview {
       this.renderLinks();
     }
     this.renderWarnings();
+    if (hadError) this.renderLivePill();
   }
 
   renderSessions() {
     const t = this.t.sessions;
     if (this.ctx.store.scope !== 'root') {
       t.meta.replaceChildren();
-      put(t.body, 
+      put(t.body,
         stateCard({
           status: 'unsupported',
           title: 'Sessions are read for the whole device',
@@ -792,7 +826,7 @@ class Overview {
     if (!data) return;
     const summary = data.summary || {};
     const table = data.sessions || {};
-    if (summary.status !== 'ok' && table.status !== 'ok' && table.status !== 'refused') {
+    if (summary.status !== 'ok' && table.status !== 'ok' && table.status !== 'refused' && table.status !== 'filtered') {
       t.meta.replaceChildren();
       put(t.body, stateCard({ status: table.status || summary.status || 'failed', message: table.message || summary.message, compact: true }));
       return;
@@ -800,29 +834,37 @@ class Overview {
     if (t.body.firstChild !== this.sessContent) put(t.body, this.sessContent);
     const active = summary.status === 'ok' ? summary.active : table.status === 'ok' ? (table.rows || []).length : null;
     const max = summary.status === 'ok' ? summary.max : null;
+    const frac = max && Number.isFinite(active) ? active / max : null;
+    // Under 10 % a percentage says nothing ("<0.1%"): the ring carries the count itself.
+    const small = frac !== null && frac < 0.1;
     this.gauge.update(active, max, {
-      text: max ? fmt.pct(active, max) : '\u2014',
-      sub: max ? 'of maximum' : 'max unknown',
+      text: frac === null ? fmt.compact(active) : small ? fmt.compact(active) : fmt.pct(active, max),
+      sub: max ? `of ${fmt.compact(max)}` : 'max ?',
     });
-    setTicking(this.sessActive, fmt.num(active));
-    this.sessOf.textContent = max ? `active of ${fmt.num(max)} maximum` : summary.status === 'ok' ? 'active (maximum not reported)' : `summary ${summary.status}: ${summary.message || ''}`;
+    this.sessBig.hidden = small || frac === null;
+    if (!this.sessBig.hidden) setTicking(this.sessBig, fmt.num(active));
+    this.sessOf.textContent = max
+      ? `${fmt.num(active)} active of ${fmt.num(max)} maximum (${fmt.pct(active, max)})`
+      : summary.status === 'ok'
+        ? `${fmt.num(active)} active (maximum not reported)`
+        : `summary ${summary.status}: ${summary.message || ''}`;
     this.spark.update(this.history);
-    this.sparkLo.textContent = this.history.length ? fmt.num(Math.min(...this.history)) : '\u2014';
-    this.sparkHi.textContent = this.history.length ? fmt.num(Math.max(...this.history)) : '\u2014';
-    const { added, ended } = this.sessStats;
-    setTicking(this.statNew, added === null ? '\u2014' : `+${fmt.num(added)}`);
-    setTicking(this.statEnded, ended === null ? '\u2014' : `\u2212${fmt.num(ended)}`);
-    this.statRows.textContent = table.status === 'ok' ? fmt.num((table.rows || []).length) : table.status === 'refused' ? 'none' : '\u2014';
+    if (this.history.length) {
+      const lo = Math.min(...this.history);
+      const hi = Math.max(...this.history);
+      this.sparkRange.textContent = lo === hi ? fmt.num(lo) : `${fmt.num(lo)}\u2013${fmt.num(hi)}`;
+    } else {
+      this.sparkRange.textContent = '';
+    }
     let note = null;
     if (table.status === 'refused') {
       note = stateCard({ status: 'refused', message: table.message, hint: 'The gauge still counts every session; Sessions lists them with a filter.', compact: true });
-    } else if (table.status !== 'ok') {
+    } else if (table.status !== 'ok' && table.status !== 'filtered') {
       note = stateCard({ status: table.status || 'failed', message: table.message, compact: true });
     } else if (table.truncated) {
-      note = h('p', { class: 'xsmall faint' }, `The device listed ${fmt.num(table.returned)} sessions; the first ${fmt.num((table.rows || []).length)} are counted here, so new and ended are not shown.`);
+      note = h('p', { class: 'xsmall faint' }, `The device listed ${fmt.num(table.returned)} sessions; the first ${fmt.num((table.rows || []).length)} are counted by policy here.`);
     }
     put(this.sessNote, ...(note ? [note] : []));
-    if (note) this.sessNote.style.marginTop = '12px';
     put(t.meta, h('span', null, data.meta && data.meta.read_at ? `${fmt.time(data.meta.read_at)} UTC` : ''));
     this.sessAgo.textContent = `updated ${fmt.ago(this.sessAt)}`;
   }
@@ -836,15 +878,29 @@ class Overview {
     }
     if (this.sessError) {
       t.meta.replaceChildren();
-      put(t.body, stateCard({ ...this.sessError, compact: true }));
+      put(t.body,
+        stateCard({
+          status: this.sessError.status,
+          title: FINAL.has(this.sessError.status) ? undefined : 'Needs the session list, which failed',
+          message: FINAL.has(this.sessError.status) ? this.sessError.message : 'Live sessions cannot be counted by policy until the sessions read works again. The Flow sessions tile says why.',
+          hint: null,
+          compact: true,
+        }),
+      );
       return;
     }
     const data = this.sess;
     if (!data) return;
     const table = data.sessions || {};
+    if (table.status === 'filtered') {
+      // Only from a filtered Sessions poll so far; the next overview read lists the whole table.
+      put(t.meta, h('span', null, 'waiting for the next read'));
+      put(t.body, skeleton(3));
+      return;
+    }
     if (table.status !== 'ok') {
       t.meta.replaceChildren();
-      put(t.body, 
+      put(t.body,
         stateCard(
           table.status === 'refused'
             ? { status: 'refused', title: 'Too many sessions to count by policy', message: 'The device has more sessions than J-Wicket lists at once. Open Sessions and filter by zone, port or address.', hint: null, compact: true }
@@ -862,17 +918,17 @@ class Overview {
       e.bytes += ((r.in && r.in.bytes) || 0) + ((r.out && r.out.bytes) || 0);
       by.set(name, e);
     }
-    const top = [...by.values()].sort((a, b) => b.count - a.count || b.bytes - a.bytes).slice(0, 7);
+    const top = [...by.values()].sort((a, b) => b.count - a.count || b.bytes - a.bytes).slice(0, TOP_ROWS);
     put(t.meta, h('span', null, table.truncated ? `first ${fmt.num(rows.length)} of ${fmt.num(table.returned)}` : `of ${fmt.plural(rows.length, 'session')}`));
     if (!top.length) {
-      put(t.body, stateCard({ status: 'empty', title: 'No active sessions', message: 'The device listed no flow sessions in this poll.', compact: true }));
+      put(t.body, stateCard({ status: 'empty', title: 'No active sessions', message: 'The device listed no flow sessions in this read.', compact: true }));
       return;
     }
     const idx = this.ctx.store.policyIndex();
     const snapNow = this.ctx.store.lastInventory;
     const known = Boolean(snapNow && snapNow.scope && snapNow.scope.policies && snapNow.scope.policies.status === 'ok');
     const max = top[0].count;
-    put(t.body, 
+    put(t.body,
       h(
         'ol',
         { class: 'top-list' },
@@ -938,6 +994,7 @@ class Overview {
     clearTimeout(this.timers.deny);
     if (this.dead || (this.paused && !now) || this.inflightDeny) return;
     this.inflightDeny = true;
+    const hadError = Boolean(this.denyError);
     try {
       await this.readDenies();
     } finally {
@@ -947,7 +1004,14 @@ class Overview {
     this.renderDenies();
     this.renderWarnings();
     this.renderLinks();
-    if (!this.paused && this.denySource && !this.denyError) this.timers.deny = setTimeout(() => this.pollDenies(), DENIES_EVERY_S * 1000);
+    if (hadError !== Boolean(this.denyError)) this.renderLivePill();
+    if (this.paused) return;
+    if (this.denyError) {
+      // Denied or unsupported will not change by itself; anything else is tried again.
+      if (!FINAL.has(this.denyError.status)) this.timers.deny = setTimeout(() => this.pollDenies(), RETRY_S * 1000);
+      return;
+    }
+    if (this.denySource) this.timers.deny = setTimeout(() => this.pollDenies(), DENIES_EVERY_S * 1000);
   }
 
   async readDenies() {
@@ -963,6 +1027,7 @@ class Overview {
         this.denyError = { status: src.status || 'failed', message: src.message };
         return;
       }
+      this.denyError = null;
       this.denySources = src;
       this.denySource = this.chooseDenySource(src);
       if (!this.denySource) {
@@ -1034,6 +1099,8 @@ class Overview {
   renderDenies() {
     const t = this.t.denies;
     const s = this.denySource;
+    // A short list keeps its own height instead of filling two rows with empty tile.
+    t.el.classList.toggle('is-short', Boolean(this.denyError) || !s || this.denies.length < 5);
     if (this.denyError) {
       t.meta.replaceChildren();
       put(t.body, stateCard({ ...this.denyError, compact: true }));
@@ -1043,7 +1110,7 @@ class Overview {
     if (!s) {
       const tr = (this.denySources && this.denySources.traffic) || {};
       put(t.meta, tr.effective_mode ? h('span', null, `log mode ${tr.effective_mode}`) : null);
-      put(t.body, 
+      put(t.body,
         stateCard({
           status: 'info',
           title: tr.effective_mode === 'stream' ? 'Traffic logs leave the device' : 'No on-box source for denies',
@@ -1072,7 +1139,7 @@ class Overview {
           : s.kind === 'report'
             ? 'in on-box reporting'
             : 'in the routing engine buffer',
-        this.denyNew ? h('span', { class: 'pill gold' }, `+${fmt.num(this.denyNew)} while open`) : null,
+        this.denyNew ? h('span', { class: 'pill' }, `+${fmt.num(this.denyNew)} while open`) : null,
       ),
     );
     if (!this.denies.length) {
@@ -1092,12 +1159,13 @@ class Overview {
         byKey.set(key, entry);
         groups.push(entry);
       }
+      t.el.classList.toggle('is-short', groups.length < 5);
       put(t.body, head, h('div', { class: 'ticker', role: 'list' }, groups.slice(0, TICKER_ROWS).map((d) => this.denyRow(d))));
     }
     this.denyAgo = this.denyAgo || h('span', null, '');
     this.denyAgo.textContent = this.denyAt ? `updated ${fmt.ago(this.denyAt)}` : '';
-    const params = { source: s.kind === 'file' ? s.id : s.id, q: `tag:${DENY_TAG}` };
-    put(t.foot, 
+    const params = { source: s.id, q: `tag:${DENY_TAG}` };
+    put(t.foot,
       this.denyAgo,
       h('span', { class: 'spacer' }),
       h('a', { href: this.ctx.href('logs', params), on: { click: (e) => { e.preventDefault(); this.ctx.navigate('logs', params); } } }, 'Open in Logs', icon('arrow-right')),
@@ -1121,14 +1189,14 @@ class Overview {
     return h(
       'div',
       { class: ['tick-row', d.fresh && 'row-new'], role: 'listitem' },
-      h('span', { class: 'tick-time' }, d.time || '\u2014'),
+      h('span', { class: 'tick-time' }, d.time || DASH),
       h(
         'a',
         { class: 'tick-flow', href: this.ctx.href('logs', { source, q }), title: `Show these denies in Logs: ${q}`, 'aria-label': label, on: { click: open } },
         h('span', { class: 'ip' }, d.src || '?'),
         h('span', { class: 'arrow' }, ARROW),
-        h('span', { class: 'ip' }, d.dst || '?'),
-        d.dport ? h('span', { class: 'port' }, `:${d.dport}`) : null,
+        // Address and port in one run: "203.0.113.2:22", never "203.0.113.2 :22".
+        h('span', { class: 'ip' }, d.dst || '?', d.dport ? h('span', { class: 'port' }, `:${d.dport}`) : null),
         proto ? h('span', { class: 'pill sky' }, proto) : null,
       ),
       h('span', { class: 'tick-meta' }, d.count > 1 ? h('span', { class: 'badge deny', title: `${d.count} denies of this flow in the window` }, `\u00d7${d.count}`) : null),
@@ -1147,6 +1215,11 @@ class Overview {
 
   // -- quick links --
 
+  /** Whether a link into Logs would land on a source this login class cannot read. */
+  logsDenied() {
+    return Boolean(this.denyError && this.denyError.status === 'denied');
+  }
+
   renderLinks() {
     const t = this.t.links;
     const snap = this.ctx.store.lastInventory;
@@ -1164,7 +1237,7 @@ class Overview {
       add('policies', `${fmt.plural(g.policies, 'policy')} from group ${g.name}`, `group:${quote(g.name)}`);
     }
     const s = this.sess;
-    const table = s && s.sessions && s.sessions.status === 'ok' ? s.sessions.rows || [] : [];
+    const table = !this.sessError && s && s.sessions && s.sessions.status === 'ok' ? s.sessions.rows || [] : [];
     if (table.length && this.ctx.store.scope === 'root') {
       const top = (key) => {
         const m = new Map();
@@ -1181,13 +1254,18 @@ class Overview {
       const natted = table.filter((r) => r.nat && (r.nat.source || r.nat.destination)).length;
       if (natted) add('sessions', `${fmt.plural(natted, 'session')} with NAT`, 'nat!=none');
     }
-    if (this.denySource) add('logs', 'Session denies', `tag:${DENY_TAG}`, { source: this.denySource.id });
-    add('logs', 'Commits and configuration changes', 'tag:UI_COMMIT*', { source: 'file:messages' });
+    // Links into Logs only where this login class can read logs, and only to sources that exist.
+    if (!this.logsDenied()) {
+      if (this.denySource) add('logs', 'Session denies', `tag:${DENY_TAG}`, { source: this.denySource.id });
+      const files = (this.denySources && this.denySources.files) || null;
+      const messages = files ? files.find((f) => f.name === 'messages') : null;
+      if (!files || messages) add('logs', 'Commits and configuration changes', 'tag:UI_COMMIT*', { source: messages ? messages.id : 'file:messages' });
+    }
     if (!links.length) {
-      put(t.body, skeleton(2));
+      put(t.body, snap ? stateCard({ status: 'empty', message: 'Nothing to jump to from what this login class can read.', compact: true }) : skeleton(2));
       return;
     }
-    put(t.body, 
+    put(t.body,
       h(
         'div',
         { class: 'links' },

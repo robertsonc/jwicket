@@ -25,7 +25,7 @@ const VIEWS = [
 ];
 const VIEW_BY_ID = new Map(VIEWS.map((v) => [v.id, v]));
 const SCOPE_RE = /^(root|lsys:[A-Za-z0-9._-]{1,63}|tenant:[A-Za-z0-9._-]{1,63})$/;
-const PREF = { theme: 'jwicket.theme', density: 'jwicket.density', rail: 'jwicket.rail' };
+const PREF = { theme: 'jwicket.theme', density: 'jwicket.density', rail: 'jwicket.rail', announce: 'jwicket.announce' };
 const ANNOUNCE_GAP_MS = 10000;
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
 const SEP = ' · ';
@@ -151,29 +151,82 @@ function say(text, assertive = false) {
 }
 
 let lastAnnounce = 0;
-let pendingAnnounce = '';
+let pendingText = '';
+const pendingCounted = new Map(); // key -> { counts, render }
 let announceTimer = 0;
-/** Polite and throttled: at most one announcement every 10 s; the latest text wins. */
-function announce(text) {
-  const msg = String(text || '');
-  if (!msg) return;
+
+function announcementsMuted() {
+  return prefGet(PREF.announce) === 'off';
+}
+
+function composeAnnouncement() {
+  const parts = [];
+  if (pendingText) parts.push(pendingText);
+  for (const p of pendingCounted.values()) {
+    let text = '';
+    try {
+      text = p.render ? String(p.render({ ...p.counts }) || '') : '';
+    } catch (err) {
+      console.error(err);
+    }
+    if (text) parts.push(text);
+  }
+  pendingText = '';
+  pendingCounted.clear();
+  return parts.join(' ');
+}
+
+function flushAnnouncement() {
+  clearTimeout(announceTimer);
+  announceTimer = 0;
+  const text = composeAnnouncement();
+  if (!text || announcementsMuted()) return;
+  lastAnnounce = Date.now();
+  say(text);
+}
+
+/** Forget what was queued (a view unmounted: its news must not be spoken in the next view). */
+function clearAnnouncements() {
+  clearTimeout(announceTimer);
+  announceTimer = 0;
+  pendingText = '';
+  pendingCounted.clear();
+}
+
+/**
+ * Polite and throttled: at most one announcement every 10 s.
+ *   announce('Overview paused.')                      plain text: the latest one wins
+ *   announce({ key: 'sessions', counts: { added: 3, ended: 1 },
+ *              render: (c) => `${c.added} new sessions, ${c.ended} ended.` })
+ * Counted announcements with the same key add up over the window, so what is said is the total since
+ * the last announcement, not the last poll's change. Nothing is said while muted (palette action).
+ */
+function announce(msg) {
+  if (announcementsMuted()) return;
+  if (msg && typeof msg === 'object') {
+    const key = String(msg.key || 'live');
+    const entry = pendingCounted.get(key) || { counts: {}, render: null };
+    for (const [k, v] of Object.entries(msg.counts || {})) entry.counts[k] = (entry.counts[k] || 0) + (Number(v) || 0);
+    if (typeof msg.render === 'function') entry.render = msg.render;
+    pendingCounted.set(key, entry);
+  } else {
+    const text = String(msg || '');
+    if (!text) return;
+    pendingText = text;
+  }
   const wait = lastAnnounce + ANNOUNCE_GAP_MS - Date.now();
   if (wait <= 0) {
-    lastAnnounce = Date.now();
-    say(msg);
+    flushAnnouncement();
     return;
   }
-  pendingAnnounce = msg;
-  if (!announceTimer) {
-    announceTimer = setTimeout(() => {
-      announceTimer = 0;
-      if (pendingAnnounce) {
-        lastAnnounce = Date.now();
-        say(pendingAnnounce);
-        pendingAnnounce = '';
-      }
-    }, wait);
-  }
+  if (!announceTimer) announceTimer = setTimeout(flushAnnouncement, wait);
+}
+
+function toggleAnnouncements() {
+  const muted = !announcementsMuted();
+  if (muted) clearAnnouncements();
+  prefSet(PREF.announce, muted ? 'off' : null);
+  say(muted ? 'Live announcements muted. Toggle them again from the command palette.' : 'Live announcements on.');
 }
 
 const TOAST_ICON = { info: 'info', ok: 'check-circle', warn: 'alert', error: 'alert' };
@@ -251,7 +304,22 @@ function noteFixture(meta) {
 
 // ---- right-hand detail panel ---------------------------------------------------------------------
 
-const P = { open: false, onClose: null, opener: null };
+const P = { open: false, onClose: null, opener: null, modal: false };
+
+// Phone width: the panel is a full-screen sheet over a scrim, so it is modal (the page behind it is
+// inert and Tab stays inside). Wider: a side panel next to the page, not modal, no focus trap.
+const NARROW = '(max-width: 640px)';
+
+function narrow() {
+  return Boolean(window.matchMedia && window.matchMedia(NARROW).matches);
+}
+
+function syncPanelModal() {
+  const modal = P.open && narrow();
+  P.modal = modal;
+  $('panel').setAttribute('aria-modal', modal ? 'true' : 'false');
+  $('app').inert = modal;
+}
 
 function positionPanel() {
   const bar = $('topbar');
@@ -288,6 +356,7 @@ function openPanel({ title = '', content = null, onClose = null, wide = false, a
   $('panel-scrim').classList.add('show');
   requestAnimationFrame(() => panel.classList.add('open'));
   P.open = true;
+  syncPanelModal();
   $('panel-title').focus({ preventScroll: true });
   return {
     el: body,
@@ -306,6 +375,7 @@ function finishPanelClose(restoreFocus) {
   $('panel-body').replaceChildren();
   $('panel-actions').replaceChildren();
   P.open = false;
+  syncPanelModal();
   const cb = P.onClose;
   P.onClose = null;
   if (restoreFocus) {
@@ -332,7 +402,7 @@ function wirePanel() {
   $('panel-close').addEventListener('click', closePanel);
   $('panel-scrim').addEventListener('click', closePanel);
   panel.addEventListener('keydown', (e) => {
-    if (e.key !== 'Tab') return;
+    if (e.key !== 'Tab' || !P.modal) return;
     const items = focusables(panel);
     if (!items.length) return;
     const first = items[0];
@@ -666,6 +736,8 @@ function makeCtx(record) {
       panel: openPanel,
       closePanel,
       announce,
+      /** The shared label for a scope id: "Root system", "Logical system LS-A", "Tenant system T-1". */
+      scopeLabel: (id) => scopeLabel(id || S.scope),
       setLive: (viewId, on) => setLive(viewId, Boolean(on), record),
       noteFixture,
       copy,
@@ -691,6 +763,7 @@ function unmountCurrent() {
   }
   for (const off of rec.offs) off();
   rec.offs.clear();
+  clearAnnouncements();
   for (const id of rec.live) S.live.delete(id);
   rec.live.clear();
   renderRailMeta();
@@ -762,6 +835,26 @@ function scopeLabel(id) {
   if (id === 'root') return 'Root system';
   const [kind, name] = id.split(':');
   return `${kind === 'lsys' ? 'Logical system' : 'Tenant system'} ${name}`;
+}
+
+function scopeShort(id) {
+  if (id === 'root') return 'Root';
+  return id.split(':')[1] || id;
+}
+
+/** A non-root scope is visible everywhere: tinted scope chip, a line under the top bar, and the scope
+    name before every view title ("LS-A / Policies"), set as a CSS string the stylesheet shows. */
+function markScope() {
+  const root = document.documentElement;
+  const kind = S.session ? scopeKind(S.scope) : 'root';
+  if (kind === 'root') {
+    delete root.dataset.scopeKind;
+    root.style.removeProperty('--scope-crumb');
+  } else {
+    root.dataset.scopeKind = kind;
+    // SCOPE_RE allows only [A-Za-z0-9._-] in the name, so it needs no escaping inside the quotes.
+    root.style.setProperty('--scope-crumb', `"${scopeShort(S.scope)}"`);
+  }
 }
 
 function scopeDidChange() {
@@ -851,6 +944,7 @@ function buildTopbar() {
   TB.scopeWrap = h('div', { class: 'scope-switch' }, TB.scopeBtn);
   TB.readAs = h('span', { id: 'chip-readas', class: 'chip chip-readas' });
   TB.managed = h('button', { id: 'chip-managed', class: 'chip chip-managed', type: 'button', hidden: true, on: { click: openManagedPanel } });
+  TB.ctx = h('div', { class: 'tb-ctx', role: 'group', 'aria-label': 'Scope, read-as user and central management' }, TB.scopeWrap, TB.readAs, TB.managed);
   TB.theme = h('button', { id: 'btn-theme', class: 'btn ghost icon', type: 'button', on: { click: toggleTheme } });
   TB.search = h(
     'button',
@@ -874,7 +968,8 @@ function buildTopbar() {
       h('span', { class: 'ro-badge', title: 'This build has no code path that changes the device configuration.' }, icon('lock'), 'READ-ONLY'),
     ),
     h('span', { class: 'tb-divider', 'aria-hidden': 'true' }),
-    h('div', { class: 'tb-ctx', role: 'group', 'aria-label': 'What you are looking at' }, TB.device, TB.scopeWrap, TB.readAs, TB.managed),
+    h('div', { class: 'tb-dev' }, TB.device),
+    TB.ctx,
     h('div', { class: 'tb-actions' }, TB.search, TB.theme, TB.signout),
   );
   renderTopbar();
@@ -925,13 +1020,16 @@ function renderTopbar() {
   const scopes = (snap && snap.meta && snap.meta.scopes) || [];
   const current = scopes.find((s) => s.id === S.scope);
   const kind = scopeKind(S.scope);
-  put(TB.scopeBtn, 
+  TB.scopeBtn.className = `chip chip-scope scope-${kind}`;
+  put(TB.scopeBtn,
     icon(kind === 'root' ? 'server' : kind === 'lsys' ? 'layers' : 'tenant'),
-    h('span', { class: 'ellipsis' }, scopeLabel(S.scope)),
+    h('span', { class: 'ellipsis scope-long' }, scopeLabel(S.scope)),
+    h('span', { class: 'ellipsis scope-short', 'aria-hidden': 'true' }, scopeShort(S.scope)),
     current && current.inactive ? h('span', { class: 'pill reject' }, 'deactivated') : null,
     icon('chevron-down', { class: 'chev' }),
   );
   TB.scopeBtn.setAttribute('aria-label', `Scope: ${scopeLabel(S.scope)}. Change scope.`);
+  markScope();
   // read as
   const ra = (snap && snap.meta && snap.meta.read_as) || (S.session ? { user: S.session.user, backend: S.session.backend } : {});
   const lab = ra.backend === 'lab-token';
@@ -951,18 +1049,21 @@ function renderTopbar() {
   if (mg && mg.status === 'ok' && mg.managed) {
     const names = (mg.clients || []).map((c) => c.client);
     TB.managed.hidden = false;
-    TB.managed.className = 'chip chip-managed gold';
-    put(TB.managed, 
+    TB.managed.className = 'chip chip-managed is-managed';
+    put(TB.managed,
       icon('broadcast'),
       h('span', { class: 'muted shrink first' }, 'managed from'),
       h('b', { class: 'mono shrink' }, names[0] || 'outbound SSH'),
-      names.length > 1 ? h('span', { class: 'pill gold' }, `+${names.length - 1}`) : null,
+      names.length > 1 ? h('span', { class: 'pill' }, `+${names.length - 1}`) : null,
     );
+    TB.managed.setAttribute('aria-label', `Managed from ${names.join(', ') || 'an outbound-SSH client'}. Details.`);
+
     TB.managed.title = 'Another system holds a management connection to this device. Changes made there may overwrite this configuration.';
   } else if (mg && mg.status !== 'ok') {
     TB.managed.hidden = false;
     TB.managed.className = 'chip chip-managed';
     put(TB.managed, icon('broadcast'), h('span', { class: 'muted shrink' }, 'managed from: unknown'));
+    TB.managed.setAttribute('aria-label', 'Central management: not known. Details.');
     TB.managed.title = `Central management is read from the configuration, which could not be read (${mg.status}). Another system may also manage this device.`;
   } else {
     TB.managed.hidden = true;
@@ -1169,14 +1270,19 @@ function deviceFacts(snap) {
     ),
   );
   const src = meta.source || {};
+  const cfg = snap.config || {};
+  const configRead = !cfg.status || cfg.status === 'ok';
   out.push(
     ...fact(
       'Source',
-      h('span', null, `${src.database === 'committed' ? 'Committed configuration' : `${src.database || 'Unknown'} configuration`}${SEP}${src.inheritance ? 'inheritance expanded' : 'inheritance not expanded'}`),
+      configRead
+        ? h('span', null, `${src.database === 'committed' ? 'Committed configuration' : `${src.database || 'Unknown'} configuration`}${SEP}${src.inheritance ? 'inheritance expanded' : 'inheritance not expanded'}`)
+        : h('span', null, `Configuration not read (${cfg.status})`),
       h('span', { class: 'note' }, `Read ${format.stamp(meta.read_at)} (${format.ago(meta.read_at)})`),
-      src.groups_annotated ? h('span', { class: 'note' }, 'Each object says which configuration group it came from.') : null,
+      configRead && src.groups_annotated ? h('span', { class: 'note' }, 'Each object says which configuration group it came from.') : null,
     ),
   );
+
   const mg = snap.management || {};
   out.push(...fact('Central management', managementSummary(mg, snap.config || {})));
   if (S.session && S.session.idle_timeout_s) {
@@ -1383,9 +1489,18 @@ function paletteItems() {
     { group: 'Actions', label: 'Show keyboard shortcuts', hint: ['?'], icon: 'keyboard', keywords: 'help keys', run: showKeys },
     { group: 'Actions', label: 'What you are looking at (device details)', icon: 'server', keywords: 'device identity ha cluster release read as source', run: openDevicePanel },
     { group: 'Actions', label: 'Copy a link to this view', icon: 'link', keywords: 'share url', run: () => copy(location.href, 'Link copied. It holds the view and its filters, not device data.') },
+    { group: 'Actions', label: announcementsMuted() ? 'Turn live announcements back on' : 'Mute live announcements (screen reader)', icon: 'info', keywords: 'screen reader aria live region speak quiet mute unmute', run: toggleAnnouncements },
     { group: 'Actions', label: 'Export the policy inventory as JSON', icon: 'download', keywords: 'download snapshot', run: () => exportInventory('json') },
     { group: 'Actions', label: 'Export the policy inventory as CSV', icon: 'download', keywords: 'download spreadsheet', run: () => exportInventory('csv') },
     { group: 'Actions', label: 'Sign out', icon: 'signout', keywords: 'logout log out exit', run: signOut },
+  );
+  // Common incident filters, so typing "deny" or "commit" finds the logs as well as the policies.
+  items.push(
+    { group: 'Filters', label: 'Logs: session denies', detail: 'tag:RT_FLOW_SESSION_DENY', icon: 'logs', keywords: 'deny denied blocked drop rt_flow', run: () => navigate('logs', { q: 'tag:RT_FLOW_SESSION_DENY' }) },
+    { group: 'Filters', label: 'Logs: commits and configuration changes', detail: 'tag:UI_COMMIT*', icon: 'logs', keywords: 'commit change config who changed', run: () => navigate('logs', { q: 'tag:UI_COMMIT*' }) },
+    { group: 'Filters', label: 'Policies: deny and reject', detail: 'action:deny|reject', icon: 'policies', keywords: 'deny denied reject blocked', run: () => navigate('policies', { q: 'action:deny|reject' }) },
+    { group: 'Filters', label: 'Policies: inactive', detail: 'inactive:true', icon: 'policies', keywords: 'inactive deactivated disabled', run: () => navigate('policies', { q: 'inactive:true' }) },
+    { group: 'Filters', label: 'Sessions with NAT', detail: 'nat!=none', icon: 'sessions', keywords: 'nat snat dnat translated', run: () => navigate('sessions', { q: 'nat!=none' }) },
   );
   const snap = S.lastInventory;
   for (const s of (snap && snap.meta && snap.meta.scopes) || []) {
@@ -1440,7 +1555,62 @@ function paletteItems() {
   return items;
 }
 
-const palette = new Palette({ getItems: paletteItems });
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/;
+const IPV6 = /^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*(?:\/(\d{1,3}))?$/;
+
+function addressOf(text) {
+  const m4 = IPV4.exec(text);
+  if (m4) {
+    if (m4.slice(1, 5).some((o) => Number(o) > 255)) return null;
+    if (m4[5] !== undefined && Number(m4[5]) > 32) return null;
+    return { value: text, cidr: m4[5] !== undefined };
+  }
+  const m6 = IPV6.exec(text);
+  if (m6 && text.length <= 49 && !/:::/.test(text)) {
+    if (m6[1] !== undefined && Number(m6[1]) > 128) return null;
+    return { value: text, cidr: m6[1] !== undefined };
+  }
+  return null;
+}
+
+/** What the palette offers for a pasted address, CIDR, port or session id (computed as you type). */
+function lookupItems(text) {
+  const q = String(text || '').trim();
+  if (!q || q.startsWith('>') || q.length > 49 || /\s/.test(q)) return [];
+  const items = [];
+  const addr = addressOf(q);
+  if (addr) {
+    const v = addr.value;
+    const either = `src:${v} or dst:${v}`;
+    items.push(
+      { group: 'Look up', label: `Sessions with ${v} as source or destination`, detail: either, icon: 'sessions', run: () => navigate('sessions', { q: either }) },
+      { group: 'Look up', label: `Sessions from ${v}`, detail: `src:${v} (filtered on the device)`, icon: 'sessions', run: () => navigate('sessions', { q: `src:${v}` }) },
+      { group: 'Look up', label: `Logs with ${v}`, detail: addr.cidr ? either : v, icon: 'logs', run: () => navigate('logs', { q: addr.cidr ? either : v }) },
+      { group: 'Look up', label: `Policies that match ${v}`, detail: `addr:${v}`, icon: 'policies', run: () => navigate('policies', { q: `addr:${v}` }) },
+    );
+    return items;
+  }
+  if (/^\d{1,12}$/.test(q)) {
+    const n = Number(q);
+    if (n >= 1 && n <= 65535) {
+      items.push(
+        { group: 'Look up', label: `Sessions to port ${n}`, detail: `dport:${n} (filtered on the device)`, icon: 'sessions', run: () => navigate('sessions', { q: `dport:${n}` }) },
+        { group: 'Look up', label: `Logs with destination port ${n}`, detail: `dport:${n}`, icon: 'logs', run: () => navigate('logs', { q: `dport:${n}` }) },
+      );
+    }
+    items.push(
+      { group: 'Look up', label: `Session ${q}`, detail: `id:${q}`, icon: 'sessions', run: () => navigate('sessions', { q: `id:${q}` }) },
+      { group: 'Look up', label: `Logs for session ${q}`, detail: `session:${q}`, icon: 'logs', run: () => navigate('logs', { q: `session:${q}` }) },
+    );
+  }
+  return items;
+}
+
+const palette = new Palette({
+  getItems: paletteItems,
+  getLookups: lookupItems,
+  placeholder: 'Search views, policies, zones and actions, or paste an address, port or session id…',
+});
 
 let keysLayer = null;
 
@@ -1471,7 +1641,7 @@ function showKeys() {
         [k('g', 's'), 'Sessions'],
         [k('g', 'l'), 'Logs'],
         [k('g', 'b'), 'Objects (zones, address books, applications)'],
-        [k(IS_MAC ? '⌘' : 'Ctrl', 'K'), 'Command palette: views, policies, zones, actions'],
+        [k(IS_MAC ? '⌘' : 'Ctrl', 'K'), 'Command palette: views, policies, zones, actions, or paste an address, port or session id'],
       ]),
       group('Anywhere', [
         [k('/'), 'Focus the query bar'],
@@ -1722,7 +1892,12 @@ async function onSignIn(event) {
     return;
   }
   if (!res.ok || !res.data.authenticated) {
-    showSignInError(res.data.error || `Sign-in failed (HTTP ${res.status}).`);
+    let message = res.data.error || `Sign-in failed (HTTP ${res.status}).`;
+    // The session cap: say when a slot frees, when the server says so (retry_after_s or next_slot_s).
+    const wait = Number(res.data.next_slot_s || res.data.retry_after_s || 0);
+    if (res.status === 503 && wait > 0) message += ` A session slot frees in about ${format.duration(wait)}.`;
+    showSignInError(message);
+
     (token ? $('token') : $('password')).focus();
     return;
   }
@@ -1751,16 +1926,73 @@ async function signOut() {
 function onUnauthorized(data) {
   if (!S.session) return;
   const detail = data && data.error ? String(data.error) : '';
-  const message =
-    data && data.signed_out
-      ? `Your device session ended${detail ? `: ${detail}` : ''}. Sign in again; J-Wicket keeps no password, so it cannot reconnect for you.`
-      : 'Your J-Wicket session has ended (idle too long, or signed out elsewhere). Sign in again.';
+  let message;
+  if (data && data.reason === 'replaced') {
+    // Sent by servers that say why a session was closed: a newer sign-in by the same user took it.
+    const by = data.by ? ` from ${String(data.by)}` : '';
+    const at = data.at ? ` at ${format.time(data.at)} UTC` : '';
+    message = `You were signed out because ${S.session.user || 'this user'} signed in again${by}${at}. J-Wicket allows only a few sessions per user. Sign in again to continue here.`;
+  } else if (data && data.signed_out) {
+    message = `Your device session ended${detail ? `: ${detail}` : ''}. Sign in again; J-Wicket keeps no password, so it cannot reconnect for you.`;
+  } else {
+    message = 'Your J-Wicket session has ended: it was idle too long, you signed out in another tab, or the same user signed in again elsewhere. Sign in again.';
+  }
   leaveApp(message, true);
+}
+
+// ---- idle pause ----------------------------------------------------------------------------------
+
+let idleNote = null;
+
+/** Reads pause well before the server's idle timeout, so the timeout can end an unattended session. */
+function idleLimitMs(session) {
+  const timeout = Number(session && session.idle_timeout_s) || 900;
+  return Math.max(60, timeout - 300) * 1000;
+}
+
+function onIdleChange(idle) {
+  if (idleNote) {
+    idleNote.remove();
+    idleNote = null;
+  }
+  document.documentElement.classList.toggle('is-idle', Boolean(idle && S.session));
+  if (!idle || !S.session) {
+    if (!idle && S.session) say('Live reads resumed.');
+    return;
+  }
+  const mins = Math.round(idleLimitMs(S.session) / 60000);
+  const ends = Math.round((Number(S.session.idle_timeout_s) || 900) / 60);
+  idleNote = h(
+    'div',
+    { class: 'toast warn idle-note', role: 'status' },
+    icon('pause'),
+    h(
+      'div',
+      { class: 'toast-msg' },
+      h('b', null, 'Paused: no activity. '),
+      `No key or pointer input for ${mins} min, so live reads have stopped. They resume when you move the pointer or press a key. With no activity at all, your session ends after ${ends} min.`,
+    ),
+    h('button', { class: 'btn sm', type: 'button', on: { click: () => api.noteActivity() } }, 'Resume'),
+  );
+  $('toasts').append(idleNote);
+  say('Live reads paused: no activity.', true);
+}
+
+function watchActivity() {
+  const note = () => api.noteActivity();
+  for (const type of ['keydown', 'pointerdown', 'pointermove', 'wheel', 'touchstart']) {
+    document.addEventListener(type, note, { capture: true, passive: true });
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') api.noteActivity();
+  });
 }
 
 function enterApp() {
   S.gen += 1;
   api.setCsrf(S.session.csrf);
+  api.noteActivity();
+  api.setIdleLimit(idleLimitMs(S.session));
   $('boot').hidden = true;
   $('signin').hidden = true;
   $('app').hidden = false;
@@ -1796,6 +2028,7 @@ function leaveApp(message, isError) {
   S.live.clear();
   S.recent = [];
   S.scope = 'root';
+  markScope();
   S.lastHash = null;
   S.mountSeq += 1;
   for (const set of Object.values(listeners)) set.clear();
@@ -1828,6 +2061,7 @@ async function boot() {
     dom.rafBatch(() => {
       positionPanel();
       placeScopeMenu();
+      if (P.open) syncPanelModal();
     }),
   );
   if (window.matchMedia) {
@@ -1836,6 +2070,8 @@ async function boot() {
   }
   api.onUnauthorized(onUnauthorized);
   api.onResponse((data) => noteFixture(data && data.meta));
+  api.onIdle(onIdleChange);
+  watchActivity();
 
   const res = await api.get('/api/session', null, { evenIfHidden: true });
   $('boot').hidden = true;

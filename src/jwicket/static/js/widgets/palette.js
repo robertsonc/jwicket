@@ -1,10 +1,13 @@
 // widgets/palette.js: the Ctrl/Cmd-K command palette. Keyboard-first fuzzy search over items the
 // shell supplies (views, actions, scopes, policies, zones, recent filters).
 //
-//   const pal = new Palette({ getItems: () => [{ group, label, detail, hint: ['g','o'], icon, keywords, run }] });
+//   const pal = new Palette({ getItems: () => [{ group, label, detail, hint: ['g','o'], icon, keywords, run }],
+//                             getLookups: (text) => [items computed from the text itself] });
 //   pal.open(); pal.close(); pal.isOpen
 //
-// A leading ">" searches actions only.
+// A leading ">" searches actions only. getLookups turns what was typed into actions of its own (a
+// pasted address, port or session id becomes "Sessions with 10.0.0.1", "Logs for session 42", ...);
+// those come first.
 
 import { h, icon, marked } from '../dom.js';
 
@@ -58,8 +61,9 @@ export function fuzzy(query, text) {
 let seq = 0;
 
 export class Palette {
-  constructor({ getItems, placeholder = 'Search views, policies, zones and actions…', onClose } = {}) {
+  constructor({ getItems, getLookups, placeholder = 'Search views, policies, zones and actions…', onClose } = {}) {
     this.getItems = getItems;
+    this.getLookups = typeof getLookups === 'function' ? getLookups : null;
     this.onClose = onClose;
     this.placeholder = placeholder;
     this.results = [];
@@ -88,7 +92,7 @@ export class Palette {
       'aria-expanded': 'true',
       'aria-controls': `${this.id}-list`,
       'aria-autocomplete': 'list',
-      'aria-label': 'Search views, policies, zones and actions',
+      'aria-label': 'Search views, policies, zones and actions, or paste an address, port or session id',
       placeholder: this.placeholder,
       autocomplete: 'off',
       spellcheck: 'false',
@@ -154,6 +158,14 @@ export class Palette {
     if (!query) {
       return items.filter((it) => it.featured !== false && ['Recent filters', 'Views', 'Actions', 'Scopes'].includes(it.group));
     }
+    let lookups = [];
+    if (this.getLookups && !text.trim().startsWith('>')) {
+      try {
+        lookups = (this.getLookups(query) || []).map((it) => ({ ...it, hits: [] }));
+      } catch (err) {
+        console.error(err);
+      }
+    }
     const scored = [];
     for (const it of items) {
       const main = fuzzy(query, it.label);
@@ -173,7 +185,7 @@ export class Palette {
     // Groups in order of their best match; items keep score order within a group.
     const order = [];
     for (const it of top) if (!order.includes(it.group)) order.push(it.group);
-    return order.flatMap((g) => top.filter((it) => it.group === g));
+    return [...lookups, ...order.flatMap((g) => top.filter((it) => it.group === g))];
   }
 
   render() {
@@ -209,7 +221,8 @@ export class Palette {
       );
     });
     if (!nodes.length) {
-      nodes.push(h('div', { class: 'pal-empty' }, 'No match. Try a view, a policy or zone name, or ">" for actions.'));
+      nodes.push(h('div', { class: 'pal-empty' }, 'No match. Try a view, a policy or zone name, an address, a port or a session id, or ">" for actions.'));
+
     }
     this.list.replaceChildren(...nodes);
     this.syncActive();

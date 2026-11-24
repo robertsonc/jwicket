@@ -29,8 +29,9 @@ function same(a, b) {
 }
 
 /**
- * flowModel(row, { from, to }) -> the diagram's model. `from` and `to` are the zones (from the policy
- * index); the device row does not carry zones.
+ * flowModel(row, { from, to, position }) -> the diagram's model. `from` and `to` are the zones (from
+ * the policy index); the device row does not carry zones. `position` ({n, of, where}) is the policy's
+ * place in evaluation order, from the inventory: the device's policy index is an internal ID.
  */
 export function flowModel(row, zones = {}) {
   const a = row.in || {};
@@ -48,6 +49,7 @@ export function flowModel(row, zones = {}) {
     app: row.application || null,
     policy: row.policy || null,
     policyIndex: row.policy_index || null,
+    policyPos: zones.position && Number.isFinite(zones.position.n) ? { n: zones.position.n, of: zones.position.of, where: zones.position.where } : null,
     ended: Boolean(row._ended),
     oneWing: !b,
     client,
@@ -139,7 +141,7 @@ export class FlowDiagram {
     if (w) this.layout = w >= H_MIN_WIDTH ? 'h' : 'v';
     const key = JSON.stringify([
       this.layout, model.id, model.client, model.target, model.server, model.seenAs, model.policy, model.policyIndex,
-      model.proto, model.app, model.ingress, model.egress, model.ended, model.oneWing,
+      model.policyPos, model.proto, model.app, model.ingress, model.egress, model.ended, model.oneWing,
     ]);
     if (key === this._key) {
       const [fwd, rev] = this._counters;
@@ -149,8 +151,19 @@ export class FlowDiagram {
     }
     this._key = key;
     this._counters = [];
+    // A rebuild (the session ended, the layout changed) keeps the focus on the same piece.
+    const a = document.activeElement;
+    const fk = a && a !== this.el && this.el.contains(a) ? a.getAttribute('data-fk') : null;
     const root = this.layout === 'h' ? this._horizontal(model) : this._vertical(model);
     this.el.replaceChildren(root);
+    if (fk) {
+      for (const n of this.el.querySelectorAll('[data-fk]')) {
+        if (n.getAttribute('data-fk') === fk && typeof n.focus === 'function') {
+          n.focus({ preventScroll: true });
+          break;
+        }
+      }
+    }
   }
 
   // A clickable piece of the diagram (filter by it; Alt = exclude; Enter / Alt+Enter on the keyboard).
@@ -159,6 +172,7 @@ export class FlowDiagram {
     node.setAttribute('tabindex', '0');
     node.setAttribute('role', 'button');
     node.setAttribute('aria-label', label);
+    node.setAttribute('data-fk', label);
     node.classList.add('fd-hit');
     node.append(svg('title', null, label));
     node.addEventListener('click', (e) => act(Boolean(e.altKey)));
@@ -237,6 +251,7 @@ export class FlowDiagram {
       node.setAttribute('tabindex', '0');
       node.setAttribute('role', 'link');
       node.setAttribute('aria-label', `Open policy ${m.policy}`);
+      node.setAttribute('data-fk', 'policy');
       node.classList.add('fd-hit');
       node.append(svg('title', null, `Open policy ${m.policy} in Policies. Alt: filter sessions by it.`));
       const go = (alt) => (alt && this.onFilter ? this.onFilter('policy', m.policy, false) : this.onPolicy(m.policy));
@@ -250,6 +265,18 @@ export class FlowDiagram {
       });
     }
     return node;
+  }
+
+  /**
+   * The device's policy index, labelled as the internal ID it is ("id 5"), never "#5": operators
+   * read "#" as the rule position, which is a different number (Policies shows it).
+   */
+  _policyId(x, y, m, word) {
+    const t = text(x, y, `${word} ${m.policyIndex}`, 'fd-sub fd-pid', { 'text-anchor': 'end' });
+    const pos = m.policyPos;
+    const where = pos ? `: ${m.policy || 'this policy'} is ${pos.n} of ${pos.of} in ${pos.where}` : '';
+    t.append(svg('title', null, `Junos policy index ${m.policyIndex}, an internal ID, not the rule position${where}.`));
+    return t;
   }
 
   _natBadges(cx, y, m) {
@@ -394,8 +421,8 @@ export class FlowDiagram {
     srx.append(svg('rect', { x: fx, y: top - 10, width: fw, height: 124, rx: 12, class: 'fd-node srx' }));
     srx.append(this._stumps(fx + 12, top + 2, 0.9));
     srx.append(text(fx + 34, top + 14, 'SRX', 'fd-srx-t'));
-    srx.append(text(fx + fw - 12, top + 14, m.policyIndex ? `#${m.policyIndex}` : '', 'fd-sub', { 'text-anchor': 'end' }));
-    srx.append(text(cx, top + 38, 'policy', 'fd-sub', { 'text-anchor': 'middle' }));
+    if (m.policyIndex) srx.append(this._policyId(fx + fw - 12, top + 14, m, 'id'));
+    srx.append(text(cx, top + 38, m.policyPos ? `policy · rule ${m.policyPos.n} of ${m.policyPos.of}` : 'policy', 'fd-sub', { 'text-anchor': 'middle' }));
     srx.append(this._policy(cx, top + 54, m, 20));
     const appLine = [m.proto, m.app].filter(Boolean).join(' · ') || '—';
     srx.append(text(cx, top + 74, clip(appLine, 22), 'fd-app', { 'text-anchor': 'middle' }));
@@ -475,7 +502,7 @@ export class FlowDiagram {
     srx.append(svg('rect', { x: x0, y, width: W, height: 100, rx: 12, class: 'fd-node srx' }));
     srx.append(this._stumps(14, y + 12, 0.9));
     srx.append(text(36, y + 24, 'SRX', 'fd-srx-t'));
-    srx.append(text(W - 14, y + 24, m.policyIndex ? `policy #${m.policyIndex}` : 'policy', 'fd-sub', { 'text-anchor': 'end' }));
+    srx.append(m.policyIndex ? this._policyId(W - 14, y + 24, m, 'policy id') : text(W - 14, y + 24, 'policy', 'fd-sub', { 'text-anchor': 'end' }));
     srx.append(this._policy(cx, y + 50, m, 30));
     const appLine = [m.proto, m.app].filter(Boolean).join(' · ') || '—';
     srx.append(text(cx, y + 68, clip(appLine, 34), 'fd-app', { 'text-anchor': 'middle' }));

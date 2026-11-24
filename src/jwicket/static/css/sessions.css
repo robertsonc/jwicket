@@ -118,7 +118,7 @@
 
 .sx-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(64px, auto));
+  grid-template-columns: repeat(3, minmax(64px, auto));
   gap: 6px;
 }
 
@@ -139,7 +139,8 @@
   color: var(--text);
 }
 
-.sx-stat span {
+.sx-stat > span,
+.sx-stat-l {
   color: var(--faint);
   font-size: 10px;
   letter-spacing: .08em;
@@ -147,13 +148,32 @@
   white-space: nowrap;
 }
 
-.sx-stat.up b { color: var(--gold); }
-.sx-stat.down b { color: var(--muted); }
-.sx-stat.shown.filtered {
-  border-color: var(--sky-line);
-  background: var(--sky-soft);
+.sx-stat > .sx-stat-v {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  color: inherit;
+  font-size: inherit;
+  letter-spacing: 0;
+  text-transform: none;
 }
-.sx-stat.shown.filtered b { color: var(--sky); }
+
+/* Gold is an event: new sessions are gold only when there are some; zero and unknown are muted. */
+.sx-stat.up b,
+.sx-stat.down b { color: var(--muted); }
+.sx-stat.up.hot b { color: var(--gold); }
+
+/* "137 listed · 60 shown": the shown count only when the browser-side filter keeps fewer rows. */
+.sx-shown {
+  color: var(--sky);
+  font: 600 12px/1 var(--font-mono);
+  font-style: normal;
+}
+
+.sx-stat.listed.filtered {
+  border-color: var(--sky-line);
+}
 
 .sx-read {
   display: flex;
@@ -257,13 +277,56 @@
   min-width: 0;
 }
 
-.sx-sortnote {
+.sx-sortnote,
+.sx-toolnote {
   color: var(--faint);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+.sx-toolnote::before {
+  content: "·";
+  padding-right: 6px;
+}
+
+.sx-toolnote[hidden],
+.sx-stale[hidden] {
+  display: none;
+}
+
+/* reads are failing: the table shows the last good read, dimmed, with this chip */
+.sx-stale {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--amber-line);
+  background: var(--amber-soft);
+  color: var(--amber);
+  font: 600 11px/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+/* the live pill while reads fail (RETRY 15 s) and before the first read (READING…) */
+.sx-live .live-pill.sx-retry {
+  color: var(--amber);
+  border-color: var(--amber-line);
+  background: var(--amber-soft);
+}
+
+.sx-live .live-pill.sx-retry .dot {
+  background: var(--amber);
+  border-radius: 50%;
+}
+
+.sx-live .live-pill.sx-first .dot {
+  border-radius: 50%;
+  animation: sx-reading 1s var(--ease) infinite;
 }
 
 .sx-view:not(.sx-is-mobile) .sx-sortmenu-btn {
@@ -285,7 +348,7 @@
 }
 
 .sx-body.facets-open {
-  grid-template-columns: minmax(0, 1fr) 224px;
+  grid-template-columns: minmax(0, 1fr) 200px;
 }
 
 .sx-gridcard {
@@ -324,7 +387,7 @@
 }
 
 .sx-grid.stale .vlist-body {
-  opacity: .5;
+  opacity: .6;
 }
 
 .sx-headwrap {
@@ -347,11 +410,11 @@
   height: 30px;
   display: flex;
   align-items: center;
-  padding: 0 2px;
+  padding: 0 1px;
   min-width: 0;
   color: var(--faint);
   font: 700 10.5px/1 var(--font-ui);
-  letter-spacing: .08em;
+  letter-spacing: .06em;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -366,7 +429,7 @@
   gap: 4px;
   max-width: 100%;
   height: 24px;
-  padding: 0 4px;
+  padding: 0 3px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -415,6 +478,21 @@
   color: var(--text);
 }
 
+/* A row's size never depends on its content (absolute, fixed height): a poll that changes the
+ * text of a few cells lays out and repaints those rows only. */
+.sx-grid .vlist-row {
+  contain: strict;
+}
+
+/* measuring the monospace character width (sessions.js charWidth) */
+.sx-probe {
+  position: absolute;
+  visibility: hidden;
+  white-space: nowrap;
+  min-width: 0;
+  border: 0;
+}
+
 .sx-row.odd {
   background: var(--stripe);
 }
@@ -453,7 +531,7 @@
 
 .sx-c {
   min-width: 0;
-  padding: 0 6px;
+  padding: 0 5px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -495,6 +573,11 @@
   transition: background var(--t-fast) var(--ease);
 }
 
+.fx:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
 .fx:hover,
 .fx.hot {
   background: var(--hover);
@@ -512,9 +595,13 @@
 .sx-zones {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   max-width: 100%;
   min-width: 0;
+}
+
+.sx-zones .sx-arr {
+  padding: 0 2px;
 }
 
 .sx-zone {
@@ -531,8 +618,41 @@
   color: var(--muted);
 }
 
+/* Addresses: the column fits any IPv4 address with its port; a longer one (IPv6) loses the middle
+ * of the address (.ip-h), never its last group (.ip-t) and never the port. */
+.sx-ep {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: top;
+}
+
+.sx-ep .ip,
+.sx-nat .nat {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
 .sx-ep .ip {
   color: var(--text);
+}
+
+.ip-h {
+  min-width: 2ch;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip-t,
+.ip-p,
+.sx-colon,
+.sx-ep .port {
+  flex: none;
+  white-space: nowrap;
 }
 
 .sx-colon {
@@ -546,7 +666,7 @@
 .sx-nat {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   max-width: 100%;
   min-width: 0;
 }
@@ -556,19 +676,17 @@
   display: inline-flex;
   align-items: center;
   height: 16px;
-  padding: 0 5px;
+  padding: 0 3px;
   border-radius: 4px;
   border: 1px solid var(--violet-line);
   background: var(--violet-soft);
   color: var(--violet);
   font: 700 9.5px/1 var(--font-ui);
-  letter-spacing: .06em;
+  letter-spacing: .03em;
 }
 
 .sx-nat .nat {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
+  color: var(--violet);
 }
 
 .sx-nonat {
@@ -586,7 +704,7 @@
 
 .sx-bytes {
   display: inline-flex;
-  gap: 8px;
+  gap: 6px;
   justify-content: flex-end;
 }
 
@@ -606,6 +724,11 @@
   gap: 3px;
 }
 
+.sx-rate.live .sx-rate-v {
+  color: var(--text);
+}
+
+/* the average since the start (before a second poll gives a live rate): dim, no glyph */
 .sx-rate.avg .sx-rate-v {
   color: var(--faint);
 }
@@ -646,16 +769,17 @@
   max-width: 60px;
 }
 
+/* Timeout: muted while there is time (teal means interfaces), amber under a fifth left. */
 .sx-tbar > i {
-  background: var(--teal);
+  background: var(--muted);
 }
 
 .sx-to.low .sx-tbar > i {
-  background: var(--deny);
+  background: var(--amber);
 }
 
 .sx-to.low .num {
-  color: var(--deny);
+  color: var(--amber);
 }
 
 .sx-node {
@@ -671,14 +795,18 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* Phone card: source and destination on their own lines, then policy, protocol, NAT and rate. */
 .sx-mcell {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) auto;
   grid-template-areas:
-    "dot flow rate"
-    ".   meta size";
-  gap: 4px 6px;
+    "dot src  size"
+    ".   dst  rate"
+    ".   meta meta";
+  gap: 3px 6px;
+  align-content: center;
   align-items: center;
+  height: 100%;
   padding: 0 12px 0 10px;
   overflow: hidden;
 }
@@ -691,12 +819,16 @@
 }
 
 .sx-m.m-dot { grid-area: dot; }
-.sx-m.m-flow { grid-area: flow; font-size: 12.5px; }
-.sx-m.m-rate { grid-area: rate; text-align: right; color: var(--sky); font-size: 12px; }
-.sx-m.m-meta { grid-area: meta; font-size: 11.5px; color: var(--muted); display: flex; align-items: center; min-width: 0; }
+.sx-m.m-src { grid-area: src; font-size: 12px; line-height: 16px; }
+.sx-m.m-dst { grid-area: dst; font-size: 12px; line-height: 16px; display: flex; align-items: center; min-width: 0; }
+.sx-m.m-dst .sx-arr { flex: none; padding: 0 4px 0 0; }
+.sx-m.m-rate { grid-area: rate; text-align: right; font-size: 12px; }
+.sx-m.m-rate .live { color: var(--text); }
+.sx-m.m-rate .avg { color: var(--faint); }
+.sx-m.m-meta { grid-area: meta; font-size: 11.5px; line-height: 16px; color: var(--muted); display: flex; align-items: center; min-width: 0; }
 .sx-m.m-size { grid-area: size; text-align: right; color: var(--faint); font-size: 11px; }
 .sx-m .sep { color: var(--faint); }
-.sx-m.m-meta .sx-nat { flex: 0 1 auto; }
+.sx-m.m-meta .sx-nat { flex: 0 1 auto; min-width: 0; }
 
 /* ---- explicit states in place of the grid ----------------------------------------------------- */
 
@@ -709,8 +841,40 @@
   max-width: 820px;
 }
 
-.sx-loading {
-  padding: var(--s2) var(--s2);
+/* loading: the real header row, and rows shaped like the columns */
+.sx-skel[hidden] {
+  display: none;
+}
+
+.sx-skrow {
+  pointer-events: none;
+  display: grid;
+  grid-template-columns: var(--sx-cols, 1fr);
+  align-items: center;
+}
+
+.sx-skrow .sk-line {
+  display: block;
+  height: 8px;
+  margin: 0;
+  max-width: 100%;
+}
+
+.sx-skrow .sx-dot.sk {
+  background: var(--raised);
+  box-shadow: none;
+}
+
+.sx-grid.sx-mobile .sx-skrow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sx-skrow .sx-mcell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding-left: 30px;
 }
 
 .sx-suggs {
@@ -816,11 +980,12 @@
   font: 700 11.5px/1 var(--font-display);
   letter-spacing: .11em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .fc-metric > button {
   height: 20px;
-  padding: 0 6px;
+  padding: 0 5px;
   font-size: 11px;
 }
 
@@ -885,6 +1050,10 @@
   background: var(--hover);
 }
 
+.fc-item.on .fc-label {
+  color: var(--gold);
+}
+
 .fc-label {
   grid-area: label;
   overflow: hidden;
@@ -909,21 +1078,24 @@
   overflow: hidden;
 }
 
+/* One neutral colour for every facet (signal colours carry meaning elsewhere); teal stays for
+ * interfaces; gold marks the bar under the pointer and a value that is already a filter. */
 .fc-bar > i {
   position: absolute;
   inset: 0 auto 0 0;
   width: var(--w, 0%);
   border-radius: inherit;
-  background: var(--sky);
-  transition: width var(--t-slow) var(--ease);
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  transition: width var(--t-slow) var(--ease), background-color var(--t-fast) var(--ease);
 }
 
-.fc-bar.sky > i { background: var(--sky); }
-.fc-bar.violet > i { background: var(--violet); }
-.fc-bar.amber > i { background: var(--amber); }
-.fc-bar.lilac > i { background: var(--lilac); }
-.fc-bar.gold > i { background: var(--gold); }
-.fc-bar.teal > i { background: var(--teal); }
+.fc-bar.teal > i { background: color-mix(in srgb, var(--teal) 70%, transparent); }
+
+.fc-btn:hover .fc-bar > i,
+.fc-btn:focus-visible .fc-bar > i,
+.fc-item.on .fc-bar > i {
+  background: var(--gold);
+}
 
 .fc-x {
   flex: none;
@@ -1071,6 +1243,23 @@
   color: var(--gold);
 }
 
+.sx-d-rate.avg {
+  color: var(--faint);
+}
+
+/* until two polls have given a rate: a dashed baseline where the sparkline will be */
+.sx-d-sparkph {
+  display: block;
+  height: 42px;
+  border-bottom: 1px dashed var(--line-strong);
+}
+
+.sx-d-sparkph[hidden],
+.sx-d-spark .spark[hidden],
+.sx-d-gone[hidden] {
+  display: none;
+}
+
 .sx-d-ratesub {
   color: var(--faint);
   font-size: 11px;
@@ -1133,6 +1322,19 @@
   height: 5px;
 }
 
+.sx-d-timeout .bar[hidden] {
+  display: none;
+}
+
+/* muted while there is time; amber under a fifth of the configured timeout */
+.sx-d-timeout .bar > i {
+  background: var(--muted);
+}
+
+.sx-d-timeout .bar.low > i {
+  background: var(--amber);
+}
+
 .sx-d-kv dd {
   font-size: 12.5px;
 }
@@ -1172,7 +1374,42 @@
   overflow-wrap: anywhere;
 }
 
-/* outside the root system only the explanation remains */
+/* No table to show (refused, failed before any read, a bad device filter): no table chrome, and
+ * the card stands on its own at the top instead of inside an empty table frame. */
+.sx-solo .sx-tools,
+.sx-solo .sx-facets,
+.sx-nodata .sx-strip {
+  display: none;
+}
+
+.sx-solo .sx-body,
+.sx-solo .sx-body.facets-open {
+  grid-template-columns: minmax(0, 1fr);
+  flex: none;
+}
+
+.sx-solo .sx-gridcard {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.sx-solo .sx-gstate {
+  padding: 0;
+  overflow: visible;
+}
+
+.sx-solo .sx-gstate .state {
+  max-width: 720px;
+}
+
+/* Nothing on this view can be read (denied, unsupported, outside the root system): only the
+ * explanation and its way out remain. */
+.sx-solo-hard .sx-strip,
+.sx-solo-hard .sx-qb,
+.sx-solo-hard .sx-every,
+.sx-solo-hard .sx-notices,
 .sx-offscope .sx-strip,
 .sx-offscope .sx-qb,
 .sx-offscope .sx-every,
@@ -1184,6 +1421,33 @@
 
 .sx-offscope .sx-body.facets-open {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/* query chips: a zone term that cannot be evaluated, and the last good plan while the bar has an error */
+.sx-qb .qb-chip.sx-chip-off {
+  opacity: .8;
+  border-style: dashed;
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.sx-qb .qb-chip.sx-chip-off .qb-chip-where {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.sx-qb-stale .qb-chip {
+  border-style: dashed;
+}
+
+.sx-qb-stale .qb-chips::before {
+  content: "still applied";
+  align-self: center;
+  margin-right: 2px;
+  color: var(--amber);
+  font: 700 10px/1 var(--font-ui);
+  letter-spacing: .1em;
+  text-transform: uppercase;
 }
 
 .sx-dv.ip,
@@ -1566,10 +1830,7 @@ text.fd-hit:hover {
   }
   .sx-stats {
     grid-column: auto;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-  .sx-m.m-flow {
-    font-size: 12px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .sx-stat {
     min-width: 0;

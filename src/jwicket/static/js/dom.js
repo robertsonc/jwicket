@@ -528,6 +528,31 @@ export function stateCard({ status = 'failed', message, title, hint, actions, co
   );
 }
 
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+/**
+ * The line under a view title, built the same way in every view:
+ * "host · Scope label · read HH:MM:SS UTC · as user", host and user in mono. Missing parts are left
+ * out; `extra` (strings or nodes) is appended. Fills `el` when given, and returns the nodes.
+ *   viewSub(el, { host, scope: ctx.ui.scopeLabel(id), readAt, user, extra: ['12 policies'] })
+ */
+export function viewSub(el, { host, scope, readAt, user, extra } = {}) {
+  const parts = [];
+  if (host) parts.push(h('span', { class: 'mono' }, host));
+  if (scope) parts.push(h('span', null, scope));
+  if (readAt) {
+    const d = readAt instanceof Date ? readAt : new Date(readAt);
+    if (!Number.isNaN(d.getTime())) parts.push(h('span', null, `read ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())} UTC`));
+  }
+  if (user) parts.push(h('span', null, 'as ', h('span', { class: 'mono' }, user)));
+  for (const x of [].concat(extra || [])) if (x !== null && x !== undefined && x !== '') parts.push(typeof x === 'object' ? x : h('span', null, String(x)));
+  const nodes = parts.flatMap((p, i) => (i ? [h('span', { class: 'sub-sep', 'aria-hidden': 'true' }, ' · '), p] : [p]));
+  if (el) put(el, nodes);
+  return nodes;
+}
+
 /** Skeleton lines while a tile loads. */
 export function skeleton(lines = 3) {
   const widths = ['w80', 'w60', 'w40', 'w80', 'w60'];

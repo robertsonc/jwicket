@@ -7,6 +7,12 @@
 //   endpoint wait until then instead of hammering the device.
 // * While the tab is hidden, GETs wait for it to be visible again, so live polling stops and resumes
 //   on its own (Junos logs every read; nobody is watching a hidden tab).
+// * Idle pause: after setIdleLimit(ms) with no keyboard, pointer or touch input, GETs wait for the
+//   next input in the same way, so a console left open on a shared workstation stops polling and
+//   the server's idle timeout can end the session. onIdle(fn) tells the shell, which says so.
+// * A GET sent more than a few seconds after the last input is marked X-JWicket-Background: 1 (a
+//   timer-driven poll, not something the operator just asked for). The server can use this to leave
+//   its idle clock alone for polls.
 // * Network errors resolve { ok: false, status: 0 }.
 // * download() fetches a file (the inventory export) so that only a 200 body becomes a file.
 //
@@ -26,6 +32,81 @@ let unauthorizedHandler = null;
 let responseHook = null;
 const notBefore = new Map();
 const lastSent = new Map();
+
+// ---- activity (idle pause and the background marker) ----------------------------------------------
+
+const BACKGROUND_AFTER_MS = 3000;
+let lastInput = Date.now();
+let idleLimitMs = 0; // 0: never pause
+let idleNow = false;
+let idleTimer = 0;
+let idleHook = null;
+const idleWaiters = new Set();
+
+function setIdle(on) {
+  if (idleNow === on) return;
+  idleNow = on;
+  if (!on) {
+    for (const resolve of [...idleWaiters]) resolve();
+    idleWaiters.clear();
+  }
+  if (idleHook) {
+    try {
+      idleHook(on);
+    } catch (_err) {
+      // A display hook must never break a read.
+    }
+  }
+}
+
+function armIdle() {
+  clearTimeout(idleTimer);
+  if (!idleLimitMs) return;
+  const wait = lastInput + idleLimitMs - Date.now();
+  if (wait <= 0) setIdle(true);
+  else idleTimer = setTimeout(armIdle, Math.min(wait + 50, 60000));
+}
+
+/** The operator did something (key, pointer, touch): live reads resume and the idle clock restarts. */
+export function noteActivity() {
+  const now = Date.now();
+  // pointermove fires constantly; only re-arm the timer when it matters.
+  if (now - lastInput < 1000 && !idleNow) {
+    lastInput = now;
+    return;
+  }
+  lastInput = now;
+  setIdle(false);
+  armIdle();
+}
+
+/** Pause GETs after ms without input (0 turns the pause off). */
+export function setIdleLimit(ms) {
+  idleLimitMs = Math.max(0, Number(ms) || 0);
+  if (!idleLimitMs) setIdle(false);
+  armIdle();
+}
+
+/** fn(true) when reads pause for inactivity, fn(false) when they resume. */
+export function onIdle(fn) {
+  idleHook = typeof fn === 'function' ? fn : null;
+}
+
+export function isIdle() {
+  return idleNow;
+}
+
+function whenActive(signal) {
+  if (!idleNow) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      idleWaiters.delete(done);
+      resolve();
+    };
+    idleWaiters.add(done);
+    if (signal) signal.addEventListener('abort', done, { once: true });
+  });
+}
 
 export function setCsrf(token) {
   csrf = typeof token === 'string' ? token : '';
@@ -118,7 +199,13 @@ async function request(method, path, params, body, opts = {}) {
   const signal = opts.signal || null;
   const key = bucket(path, params);
 
-  if (method === 'GET' && !opts.evenIfHidden) await whenVisible(signal);
+  if (method === 'GET' && !opts.evenIfHidden) {
+    // Hidden and idle can alternate (a tab hidden, shown, then left alone): wait until neither holds.
+    while ((hidden() || idleNow) && !(signal && signal.aborted)) {
+      await whenVisible(signal);
+      await whenActive(signal);
+    }
+  }
   // Wait out a Retry-After, then the endpoint's minimum gap. Concurrent callers queue behind each other.
   for (;;) {
     const gap = MIN_GAP_MS[path] || 0;
@@ -132,6 +219,7 @@ async function request(method, path, params, body, opts = {}) {
   if (MIN_GAP_MS[path]) lastSent.set(key, Date.now());
 
   const headers = { Accept: 'application/json' };
+  if (method === 'GET' && Date.now() - lastInput > BACKGROUND_AFTER_MS) headers['X-JWicket-Background'] = '1';
   const init = { method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' };
   if (method !== 'GET') {
     headers['Content-Type'] = 'application/json';
@@ -219,6 +307,8 @@ export function reset() {
   csrf = '';
   notBefore.clear();
   lastSent.clear();
+  setIdleLimit(0);
 }
+
 
 export const messages = { NETWORK_ERROR };
