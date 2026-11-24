@@ -1,6 +1,6 @@
 # ADR 0008: Parity is measured against one named J-Web release, in a ledger
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 
@@ -21,5 +21,6 @@ tested and will drift.
 ## Consequences
 
 The spike's narrower "normal week" scope survives as **priority** within the ledger, not as the
-definition of done. Some J-Web pages will be marked "replace with better" or "out of scope", each
-with a reason the project owner approved.
+definition of done. Some J-Web pages will be marked `replace` (J-Wicket offers a different, better
+way) or `out-of-scope`, each with a reason the project owner approves
+([ledger method, section 5](../parity/README.md#5-statuses)).

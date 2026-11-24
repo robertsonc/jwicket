@@ -1,6 +1,6 @@
 # ADR 0009: Detect central management and treat it as a co-owner of the configuration
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 

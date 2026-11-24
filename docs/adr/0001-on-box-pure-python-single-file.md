@@ -1,6 +1,6 @@
 # ADR 0001: On-box, pure-Python runtime shipped as one generated file
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 
@@ -22,8 +22,8 @@ import other `.py` files from that directory has not been tested, and C extensio
 
 - Deployment matches what the spike proved: one file, no arguments, settings in a fixed file.
 - The bundle is reproducible, so a SHA-256 can be published per build and checked on the device.
-- A signed JET package (Phase "signed package" in the roadmap) would remove these limits; until
-  then, no websockets library, no fast JSON, no async framework.
+- A signed JET package (roadmap phase 6, Production, [governance section 7](../governance.md#7-roadmap))
+  would remove these limits; until then, no websockets library, no fast JSON, no async framework.
 
 ## Would be proven wrong by
 

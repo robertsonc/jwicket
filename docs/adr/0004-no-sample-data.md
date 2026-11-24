@@ -1,6 +1,6 @@
 # ADR 0004: No sample data: every panel is device data or an explicit state
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 

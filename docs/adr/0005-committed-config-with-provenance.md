@@ -1,6 +1,6 @@
 # ADR 0005: Read the committed configuration with inheritance and group provenance
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 

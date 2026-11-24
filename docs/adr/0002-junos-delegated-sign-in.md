@@ -1,6 +1,7 @@
 # ADR 0002: Sign-in is delegated to Junos through a per-operator NETCONF session
 
-Status: Accepted (2026-11-24); the mechanism is unproven on a device until Q-AUTH-01 passes.
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11). The
+mechanism is unproven on a device until Q-AUTH-01 passes.
 
 ## Context
 
@@ -29,7 +30,7 @@ Junos already has users, login classes and remote authentication (RADIUS, TACACS
 - Lab boxes need `set system services netconf ssh`. That is a configuration change and is not
   asked of production devices at this stage.
 - Multi-factor prompts (keyboard-interactive challenges) are not supported by this flow. Open
-  question for Spec 00x (AAA).
+  question for a future sign-in spec ([parity summary, gap 1](../parity/jweb-24.4.md#owner-decisions)).
 - The password passes through the J-Wicket process in memory, as it does through J-Web. It is
   never logged or stored; Python cannot guarantee it is wiped from memory.
 

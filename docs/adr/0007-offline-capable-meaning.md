@@ -1,6 +1,6 @@
 # ADR 0007: "Offline-capable" means no runtime internet dependency
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 
@@ -14,7 +14,10 @@ whatever workstation the operator used, often a shared jump host.
   Policy allows only `'self'`, and a test fails the build if an asset contains an external URL.
 - Review away from the device uses explicit exports (JSON snapshot, CSV), each stamped with device,
   scope, user and read time.
-- Device data is never written to browser storage. `localStorage` holds UI preferences only.
+- Device data is never written to browser storage. `localStorage` holds UI preferences and query
+  text the operator explicitly saved, never device replies. Saved query text can name addresses,
+  policies and users; whether that is acceptable on shared workstations is Spec 004 open question
+  14, for the security reviewer (Q-SEC-01).
 
 ## Consequences
 

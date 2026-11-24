@@ -15,7 +15,9 @@
 This procedure puts one build of `dist/jwicket.py` on a lab vSRX so that qualification tests can be
 run against a real Junos: the interpreter and module probe (Q-RT-01), the per-operator NETCONF
 sign-in (Q-AUTH-01) and the read-only policy inventory. It does not cover TLS (Q-TLS-01), a listener
-off loopback, a security-zone change or configuration writes; J-Wicket has no write path.
+off loopback, a security-zone change or configuration writes; J-Wicket has no write path. It does
+not cover SRX hardware either: hardware runs need a separate procedure, approved by the lab owner
+and the security reviewer, which is not written yet ([governance, D12](governance.md#25-decisions-pending)).
 
 What the procedure changes on the lab box, and nothing else:
 
@@ -25,6 +27,8 @@ What the procedure changes on the lab box, and nothing else:
 | One directory with the settings file, log and audit trail | `/var/db/jwicket/` |
 | `system scripts language python3` and `system extensions extension-service` entries | Steps 4 and 6 |
 | `system services netconf ssh`, for the `netconf` sign-in backend | Step 5 |
+| A lab-only account in a read-only class (and that class, if you create one), for Q-AUTH-01 | Step 7 |
+| `system services ssh tcp-forwarding`, only if step 7 needed it | Step 7 |
 
 What it never does: bind anything but `127.0.0.1`, load `junos/zone-access.set`, touch J-Web
 (`system services web-management`), or open TCP 8443 in a cloud security group. The UI is reached only
@@ -37,8 +41,13 @@ one vSRX, Junos 24.4R2-S3.5, 24 November 2026 UTC, with the file name `wicket_sp
 
 - **Verified**: the spike ran this command or statement and recorded the result. Here the file name
   is `jwicket.py` (or one of its two copies); the syntax is otherwise the same.
+- **From the spike packet's run instructions**: written in the packet's
+  [`PACKET-README.md`](evidence/2026-11-23-vsrx-spike/PACKET-README.md) run steps, but not in the
+  recorded results.
+- **Inferred**: read from a Juniper page about a neighbouring case; the page is cited.
 - **Unverified**: not exercised by the spike. Check a configuration statement with `?` in the CLI
-  before you commit it, and write down what happened: that is qualification evidence too.
+  before you commit it, and write down what happened: that is qualification evidence too. Each
+  unverified item names the qualification test whose record settles it.
 
 Shell steps (`ls`, `chmod`, `mkdir`, `rm`, `openssl`, `sysctl`) run in the Junos shell
 (`start shell`), as the spike's did.
@@ -90,11 +99,14 @@ scp -O dist/jwicket.py <user>@<device>:/var/db/scripts/jet/jwicket_probe.py
 
 `-O` is needed because SFTP is off by default on Junos (verified). The two extra copies are the same
 file under names that select a diagnostic (step 4); Junos cannot pass `--flag` options to a JET
-application (spike finding F1).
+application (spike finding F1, [charter section 5](charter.md#5-spike-evidence)).
 
-Ownership and mode (verified): each file must be owned by a user in the super-user class, with write
-permission for the owner only, mode `0644`. The `username` in step 6 should be that same account. In
-the shell:
+Ownership and mode (inferred for JET from Juniper's rules for commit, event, op and SNMP scripts,
+[Python script requirements](https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-python-scripts-requirements-for-executing.html);
+the spike packet's instructions use the same rule): each file must be owned by root or a user in the
+super-user class, with write permission for the owner only, mode `0644`. What Junos actually
+enforces for JET files is recorded by Q-RT-02 and Q-RT-03. The `username` in step 6 should be that
+same account. In the shell:
 
 ```
 ls -l /var/db/scripts/jet/jwicket.py /var/db/scripts/jet/jwicket_selftest.py /var/db/scripts/jet/jwicket_probe.py
@@ -123,9 +135,10 @@ mkdir -m 700 /var/db/jwicket
 ls -ld /var/db/jwicket
 ```
 
-Expect `drwx------` and `<user>`. Unverified: whether a super-user-class account may create a
-directory under `/var/db`. If `mkdir` is refused, the lab fallback (also unverified) is to become root
-in the shell with the lab's root password, create the directory, and `chown <user> /var/db/jwicket`.
+Expect `drwx------` and `<user>`. Unverified (Q-RT-02 records it): whether a super-user-class
+account may create a directory under `/var/db`. If `mkdir` is refused, the lab fallback (also
+unverified) is to become root in the shell with the lab's root password, create the directory, and
+`chown <user> /var/db/jwicket`.
 If neither works, stop and record it: moving the settings file elsewhere is a code change, not a lab
 workaround.
 
@@ -224,7 +237,8 @@ commit
 ```
 
 The statements are verified syntax (with the spike's file name). The second `commit`, within five
-minutes, confirms the change; without it Junos rolls back (verified procedure).
+minutes, confirms the change; without it Junos rolls back (from the spike packet's run instructions;
+not in the recorded results).
 
 Then, in operational mode:
 
@@ -236,7 +250,7 @@ request extension-service start jwicket_probe.py
 `request extension-service start` is verified, and output prints to the terminal. The bundle picks
 its mode from its own file name: `jwicket_selftest.py` runs the bundle self-test, `jwicket_probe.py`
 runs the interpreter probe, and both exit without listening. That mechanism is new and has not yet
-run on a device (unverified). Expect:
+run on a device (unverified; Q-RT-01 and Q-RT-02 record it). Expect:
 
 - self-test: JSON ending in `"ok": true`, with `payload_sha256` equal to the value from step 1;
 - probe: JSON with the Python and OpenSSL versions and, for each module the daemon needs
@@ -245,15 +259,15 @@ run on a device (unverified). Expect:
   exit status is non-zero if any module is missing.
 
 The argument form, `request extension-service start jwicket.py --bundle-self-test` (or `--probe`),
-is unverified, and spike finding F1 suggests it fails: Junos's script runner parsed `--flag` options
-itself and exited with "missing script filename" when they were given in the `arguments`
-statement. It also needs the `jwicket.py` entry without `daemonize` (see "Debugging" below). If you
-try it, record the result.
+is unverified (Q-RT-01 records it if tried), and spike finding F1 suggests it fails: Junos's script
+runner parsed `--flag` options itself and exited with "missing script filename" when they were
+given in the `arguments` statement. It also needs the `jwicket.py` entry without `daemonize` (see
+"Debugging" below). If you try it, record the result.
 
 ## 5. Enable NETCONF for the `netconf` backend (config change, lab box only)
 
 The `netconf` backend opens a NETCONF session to `127.0.0.1:830` as the person signing in, so NETCONF
-over SSH must be on. Unverified: the spike did not run this statement.
+over SSH must be on. Unverified: the spike did not run this statement (Q-AUTH-01 records it).
 
 ```
 set system services netconf ssh
@@ -311,14 +325,19 @@ changes, and `junos/zone-access.set` is not needed. Plain HTTP is acceptable onl
 are loopback and the hop between them is SSH. Keep the local port at 8443, or change `allowed_hosts`
 to match.
 
-Unverified: whether this release's SSH service allows TCP forwarding. If the tunnel reports
-`administratively prohibited`, the statement to look for is `set system services ssh tcp-forwarding`
-(unverified; a configuration change; lab box only; `commit confirmed 5`, then `commit`).
+Unverified: whether this release's SSH service allows TCP forwarding (Q-NET-03 records it). If the
+tunnel reports `administratively prohibited`, the statement to look for is
+`set system services ssh tcp-forwarding` (unverified, Q-NET-03; check it with `?`; a configuration
+change; lab box only; `commit confirmed 5`, then `commit`).
 
 Sign in with a Junos user name and password. Each operator's login class decides what they see: a
 panel their class may not read shows "denied" instead of data. For Q-AUTH-01, sign in once with a
-super-user account and once with a lab-only account in a read-only class (creating that account is
-a configuration change: `commit confirmed 5`, then `commit`), and record what each sees.
+super-user account and once with a lab-only account in a read-only class (creating that account,
+and a class for it if you make one, is a configuration change: `commit confirmed 5`, then
+`commit`), and record what each sees. Give every lab account a unique, strong password that is
+used nowhere else: in vLabs, SSH (22) and NETCONF (830) are forwarded to the vSRX from the internet
+(step 5), so any account on the box can be tried from outside for as long as it exists. Step 9
+deletes the lab-only account.
 
 ## Debugging a start failure (verified procedure)
 
@@ -338,15 +357,16 @@ request extension-service start jwicket.py
 
 With no arguments this is the daemon itself, reading `/var/db/jwicket/jwicket.ini`. How to stop a
 foreground run (interrupting the CLI command, or `request extension-service stop jwicket.py`) is
-unverified. This is also where the unverified argument form of step 4 would be tried. To go back to
-daemon mode, `set system extensions extension-service application file jwicket.py daemonize`, then
+unverified (record it with Q-RT-02). This is also where the unverified argument form of step 4
+would be tried. To go back to daemon mode,
+`set system extensions extension-service application file jwicket.py daemonize`, then
 `commit confirmed 5` and `commit`.
 
 ## Variant: `lab-token` backend
 
 Use this only if NETCONF cannot be enabled. Every read runs as `<user>`, the daemon's account, and the
-UI says so on every screen; settings refuse it on anything but a loopback bind. In the shell (verified
-command, from the spike):
+UI says so on every screen; settings refuse it on anything but a loopback bind. In the shell (from
+the spike packet's run instructions; not in the recorded results):
 
 ```
 openssl rand -hex 24 > /var/db/jwicket/lab-token
@@ -372,8 +392,9 @@ scp -O <user>@<device>:/var/db/jwicket/audit.jsonl .
 
 ## 9. Remove everything
 
-In configuration mode, delete what this procedure added. Leave out any line that step 0 showed was
-already configured before you started:
+In configuration mode, delete what this procedure added, including the lab-only account from
+step 7. Leave out any line that step 0 showed was already configured before you started, and the
+account line if you used the `lab-token` variant and created none:
 
 ```
 delete system extensions extension-service application file jwicket.py
@@ -381,14 +402,24 @@ delete system extensions extension-service application file jwicket_selftest.py
 delete system extensions extension-service application file jwicket_probe.py
 delete system services netconf ssh
 delete system scripts language
+delete system login user <lab-only account>
 commit confirmed 5
 commit
 ```
 
 Unverified: these `delete` statements are the inverses of the `set` statements above, but the spike
 only ran `delete system services rest`. Check each with `?` first. Leave out
-`delete system scripts language` if anything else on the box relies on unsigned Python, and add
-`delete system services ssh tcp-forwarding` if you set it in step 7.
+`delete system scripts language` if anything else on the box relies on unsigned Python. If step 7
+created a login class or set TCP forwarding, add these lines to the same commit (also unverified;
+check each with `?`):
+
+```
+delete system login class <lab-only class>
+delete system services ssh tcp-forwarding
+```
+
+The lab-only account matters most: with SSH and NETCONF reachable from outside in vLabs, a leftover
+account and its password stay exposed.
 
 Whether deleting the configuration stops a running daemon is unverified. In the shell, check with
 `ps ax | grep jwicket` (the spike's daemon showed as `cscript -mjet -Q3 -j -f <file> -J<user>`), and

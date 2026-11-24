@@ -1,6 +1,6 @@
 # ADR 0006: The device explains policy decisions; J-Wicket does not reimplement the matcher
 
-Status: Accepted (2026-11-24)
+Status: Proposed (written 2026-11-24; owner acceptance not recorded, governance D11)
 
 ## Context
 
