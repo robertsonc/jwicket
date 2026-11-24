@@ -213,7 +213,12 @@ def check_trusted_file(path: Path, *, label: str, secret: bool) -> None:
 
 def read_trusted_text(path: Path, *, label: str, secret: bool) -> str:
     """Open first, then check the opened file itself (``fstat``), so the checked file is the file
-    that is read; then require the name to still lead to that same file (device and inode)."""
+    that is read; then require the name to still lead to that same file (device and inode).
+
+    Directories are checked before the file, as in :func:`check_trusted_file`, so both report the
+    outermost problem: a file below a directory another account owns cannot be trusted whatever
+    its own owner and mode. Every check still runs before anything is read.
+    """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -221,8 +226,8 @@ def read_trusted_text(path: Path, *, label: str, secret: bool) -> str:
         raise ConfigError(f"{label} {path} cannot be opened: {exc.strerror or exc}") from exc
     try:
         st = os.fstat(fd)
-        _check_file_stat(st, path, label=label, secret=secret)
         check_directories(path, label=label)
+        _check_file_stat(st, path, label=label, secret=secret)
         try:
             now = os.lstat(path)
         except OSError as exc:

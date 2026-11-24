@@ -207,7 +207,10 @@ class ScriptTests(unittest.TestCase):
                     self.assertNotIn(api, code)
 
 
-IMPORT = re.compile(r"""(?:\bimport\s*\(\s*|\bimport\s[^'"`;]*?\bfrom\s*|\bimport\s*|\bexport\s[^'"`;]*?\bfrom\s*)['"]([^'"]+)['"]""")
+IMPORT = re.compile(
+    r"""(?:\bimport\s*\(\s*|\bimport\s[^'"`;]*?\bfrom\s*|\bimport\s*|\bexport\s[^'"`;]*?\bfrom\s*)"""
+    r"""['"]([^'"]+)['"]"""
+)
 SERVABLE = re.compile(r"^[a-z0-9][a-z0-9_\-]*(/[a-z0-9][a-z0-9_\-]*)*\.(html|js|css|svg)\Z")
 
 
@@ -241,7 +244,7 @@ class AssetGraphTests(unittest.TestCase):
         parsed.feed(read("index.html"))
         parsed.close()
         cls.refs = []
-        for tag, attrs in parsed.tags:
+        for _tag, attrs in parsed.tags:
             for name, value in attrs:
                 if name in ("src", "href") and value and value.startswith("/static/"):
                     cls.refs.append(value[len("/static/"):])
@@ -256,7 +259,9 @@ class AssetGraphTests(unittest.TestCase):
 
     def test_stylesheets_in_contract_order(self) -> None:
         sheets = [r for r in self.refs if r.endswith(".css")]
-        self.assertEqual(sheets, ["css/app.css", "css/querybar.css", "css/sessions.css", "css/logs.css", "css/policies.css"])
+        self.assertEqual(
+            sheets, ["css/app.css", "css/querybar.css", "css/sessions.css", "css/logs.css", "css/policies.css"]
+        )
 
     def test_every_import_resolves(self) -> None:
         for name in assets(".js"):
