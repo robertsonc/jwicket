@@ -56,7 +56,7 @@ two differ, and the project owner decides scope and out-of-scope rows ([governan
   `https://networkingdocs.hpe.com/documentation/us/en/software/junos/junos-xml-protocol/topics/`.
   Every `juniper.net/documentation/...` URL now returns 301 to the same path on
   `networkingdocs.hpe.com`. All sources were read on 2026-11-24.
-- **IDs.** `W1`–`W12` (wizards), `O1`–`O41` (operations) and `N1`–`N5` (J-Wicket-native
+- **IDs.** `W1`–`W12` (wizards), `O1`–`O41` (operations) and `N1`–`N6` (J-Wicket-native
   workflows) are catalog IDs, not ledger row IDs.
 
 ---
@@ -863,6 +863,25 @@ flowchart TD
   E -->|No| F["Export the reverse change as a preview"]
   E -->|Yes| G["Spec 002: lock, load, re-diff, commit with automatic undo, confirm"]
 ```
+
+### N6. Explain Junos in place
+
+- **J-Web 24.4.** Not assessed: this project has not studied how far J-Web's own help text explains
+  Junos concepts.
+- **J-Wicket today** (browser-only, exercised by hand on fixtures). Parts of the rule exist: a
+  traffic-log line decodes into a plain sentence ("Session 365425 closed (TCP RST) after 36 s");
+  each zone pair's policies are labelled "checked in this order"; "Explain a flow" lists the three
+  steps Junos takes; every view builds the matching read-only `show` command to copy; denied,
+  unsupported and failed states say why in plain words.
+- **Planned** (in a spec still to be written; [ADR 0010](adr/0010-usable-without-knowing-junos.md)). A short,
+  plain-language explanation, with the matching Junos statement or command, wherever a Junos concept
+  appears: zones and interfaces, screens, host-inbound traffic, address books and sets, applications
+  and application sets, source and destination NAT, global and default policies, inactive
+  configuration, configuration groups, logical and tenant systems, chassis cluster and redundancy
+  groups. The text is bundled with the application, and each explanation is sourced from Juniper
+  documentation.
+- **Unknown.** Nothing on the device side: N6 reads nothing new. Which concepts operators new to
+  Junos trip over first (the G2 check that ADR 0010 proposes).
 
 ---
 

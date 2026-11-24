@@ -1,6 +1,6 @@
 # J-Wicket
 
-**J-Web, the SRX's built-in web UI, has a security record that makes it hard to keep turned on. J-Wicket is a read-only alternative designed to run on the firewall itself: live sessions filtered as you type, logs highlighted as log syntax, policies in the order Junos checks them.**
+**J-Web, the SRX's built-in web UI, is thin where operators need it most. J-Wicket is an alternative designed to run on the firewall itself, starting read-only: live sessions filtered as you type, logs highlighted as log syntax, policies in the order Junos checks them.**
 
 [![ci](https://github.com/robertsonc/jwicket/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/robertsonc/jwicket/actions/workflows/ci.yml)
 ![Python 3.9 | 3.11 | 3.13 tested in CI](https://img.shields.io/badge/python-3.9%20%7C%203.11%20%7C%203.13-3776ab)
@@ -14,7 +14,7 @@
 
 *The Sessions view on the development server, polling every 2 s. `dport:443` is sent with the session-table read as an RPC parameter (gold DEVICE chip; here a fixture plays the device), `nat:dst bytes>1M` filters in the browser (sky BROWSER chips), and one session's flow drawer opens on its DNAT path. Synthetic fixture data, not read from a device.*
 
-Juniper published J-Web advisories every year from 2023 to 2026, five 2023 J-Web CVEs are in CISA's Known Exploited Vulnerabilities catalog, and for the 2023 and January 2024 advisories Juniper's workaround was "Disable J-Web, or limit access to only trusted hosts" ([sources](docs/charter.md#1-the-problem-and-who-it-is-for)). In J-Wicket each read is designed to run as your own Junos login, and the Logs view (built, and exercised by hand on synthetic fixtures) exports every line it holds that matches your filter, up to a 2,000 to 10,000-line window, where J-Web 24.4's Monitor > Logs grids export at most 100 rows ([ledger](docs/parity/jweb-24.4.csv)).
+In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids have a manual Refresh and no live tail, export at most 100 rows, and filter the system log on Event and Message with `=` only; security policies are inline grid rows with no policy wizard; and six paths commit at once with no review step ([catalog](docs/catalog.md#key-findings), [ledger](docs/parity/jweb-24.4.csv)). J-Wicket starts with the reads, each designed to run as your own Junos login and to make sense to someone who does not know Junos yet. Its configuration path (reviewed diffs, confirmed commits and a preview-only policy builder) is specified, not built ([Spec 002](docs/specs/002-change-protocol.md), [Spec 003](docs/specs/003-firewall-policy-builder.md)).
 
 **Stage: foundation, not installable on a production SRX.**
 
@@ -37,6 +37,7 @@ make dev    # then open http://127.0.0.1:8080/ and sign in as admin, any non-emp
 J-Wicket is a spec-driven project to replace J-Web for customers who want to manage an SRX on the firewall itself: a Junos-managed Python application with an offline-capable browser UI (nothing loads from the internet; [ADR 0007](docs/adr/0007-offline-capable-meaning.md)).
 
 - **Success:** an authorized operator can complete the same tasks as on the reference release, J-Web for SRX Series 24.4, with better tools for reviewing scope, explaining policy decisions and recovering from changes. Progress is tracked row by row in the [parity ledger](docs/parity/README.md).
+- **Usable without knowing Junos:** a binding design rule ([ADR 0010](docs/adr/0010-usable-without-knowing-junos.md)). Every screen explains the Junos concepts it shows and puts the matching command alongside, so operators learn Junos as they go. Parts exist today (decoded log lines, policy order spelled out, copyable `show` commands); in-place explanations of each concept are planned, in a spec still to be written. Installing J-Wicket still takes someone with Junos skills, once per device.
 - **First slice:** a scoped, read-only policy inventory ([Spec 001](docs/specs/001-policy-inventory.md)).
 - **First planned configuration wizard:** a preview-only Firewall Policy Builder ([Spec 003](docs/specs/003-firewall-policy-builder.md)), with brownfield, group ownership and recovery cases specified up front.
 - **The owner's binding UI requirements** ([Spec 004](docs/specs/004-live-sessions-and-logs.md), read-only):
@@ -352,6 +353,7 @@ A development server on synthetic fixtures with error injection and synthetic li
 | `specified` | Firewall Policy Builder, preview only: add, clone, edit, move or delete a rule and see the result; never commits. J-Web 24.4 has no security-policy wizard ([catalog, key findings](docs/catalog.md#key-findings)) | [Spec 003](docs/specs/003-firewall-policy-builder.md), gate G3 |
 | `specified` | Shared change protocol for every future write: private candidate, diff, confirmed commit that Junos rolls back unless confirmed. Design only; the code has no write path | [Spec 002](docs/specs/002-change-protocol.md), gate G4 |
 | `specified` | AA contrast in both themes and full keyboard reach; unmodelled settings shown on every object type, not only policies; close-reason badges | Specs 001 and 004 |
+| `planned` | Explain Junos in place: each Junos concept explained where it appears, with the matching command alongside (read-only) | [ADR 0010](docs/adr/0010-usable-without-knowing-junos.md); spec to be written |
 | `planned` | Sessions and logs scoped to a logical or tenant system (root only today) | [Spec 004](docs/specs/004-live-sessions-and-logs.md) open questions |
 | `planned` | More device-side session filters and single-session lookup; device-side report summaries for the histogram; stream files, archived and binary logs; PCAP download | Spec 004 out-of-scope table, ledger |
 | `planned` | TLS certificate provisioning spec, then Q-TLS-01 on a lab vSRX | [governance, section 8](docs/governance.md#8-what-ships-next) |
@@ -475,6 +477,7 @@ The documentation map: which document answers which question.
 A feature starts as a spec, not as code: find or add its ledger row, copy the [spec template](docs/specs/000-template.md), and open a pull request ([how to propose a feature](CONTRIBUTING.md#propose-a-feature)). Setup and coding rules are in [CONTRIBUTING.md](CONTRIBUTING.md#set-up-and-run). Ways to help now:
 
 - Run `make dev`, try the queries above, and open an issue or a pull request for anything that reads wrong to an SRX operator.
+- New to Junos? Open an issue for any screen where you got lost, and say what you expected it to tell you.
 - Know J-Web 24.4 or Junos well? Check a [ledger](docs/parity/jweb-24.4.csv) row or a spec claim against Juniper's documentation and send the correction with its source.
 - Write specs for read-only parity rows, or code and tests for accepted specs.
 - Recorded replies and qualification evidence from lab equipment are welcome. How the first qualification run would be done is in the [lab procedure](docs/deploy-lab.md) and [governance, section 8](docs/governance.md#8-what-ships-next); running it is the lab owner's choice, not something this project asks for.
