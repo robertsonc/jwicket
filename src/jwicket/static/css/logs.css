@@ -1,0 +1,2228 @@
+/* Logs view (js/views/logs.js) and the histogram widget (js/widgets/histogram.js).
+ *
+ * Tokens only (defined in css/app.css); the .tk-* token and .fam-* family classes come from there
+ * too. Row geometry is computed in JavaScript from --lg-lh and the width of "0" in the stream font,
+ * so the stream's font, its row padding (18px + 12px = GUTTER_PX in logs.js) and the inline token
+ * boxes must not add horizontal space: wrapped lines are exactly ceil(length / columns) lines tall.
+ */
+
+/* ---- frame ------------------------------------------------------------------------------------ */
+
+.lg-view {
+  /* New lines: a wash quieter than search hits (--gold-wash) and selection (--gold-soft + bar).
+     Derived from the gold fill until app.css has a --new-wash token. */
+  --lg-new-wash: color-mix(in srgb, var(--gold-fill) 12%, transparent);
+  gap: var(--s3);
+  padding-top: var(--s3);
+  padding-bottom: var(--s4);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .lg-view {
+    --lg-new-wash: color-mix(in srgb, var(--gold-fill) 16%, transparent);
+  }
+}
+
+:root[data-theme="light"] .lg-view {
+  --lg-new-wash: color-mix(in srgb, var(--gold-fill) 16%, transparent);
+}
+
+/* Family hues in the Logs view: Screen (orange), Commit (gold) and Auth (amber) were three warm
+   yellows. Auth becomes rose and SNMP slate, mixed from existing tokens until app.css has --fam-*. */
+.lg-view .fam-auth,
+.lg-detail .fam-auth {
+  --fam: color-mix(in srgb, var(--deny) 50%, var(--lilac));
+}
+
+.lg-view .fam-snmp,
+.lg-detail .fam-snmp {
+  --fam: color-mix(in srgb, var(--sky) 45%, var(--inactive));
+}
+
+/* Violet means NAT in a line; the process name is not NAT. */
+.lg-text .tk-daemon,
+.lg-d-raw .tk-daemon {
+  color: var(--muted);
+}
+
+.lg-head {
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  flex-wrap: nowrap;
+}
+
+.lg-titles {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.lg-titles .view-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.lg-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 2px;
+  min-width: 0;
+}
+
+.lg-sub b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.lg-dot {
+  color: var(--faint);
+}
+
+.lg-scope-note {
+  color: var(--amber);
+}
+
+.lg-scope-btn {
+  margin-left: 6px;
+  padding: 0 7px;
+  height: 18px;
+  border: 1px solid var(--amber-line);
+  border-radius: 999px;
+  background: var(--amber-soft);
+  color: var(--text);
+  font: 600 11px/1 var(--font-mono);
+}
+
+.lg-scope-btn:hover {
+  border-color: var(--amber);
+}
+
+.lg-actions {
+  flex: none;
+}
+
+.lg-iv > button {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  padding: 0 7px;
+}
+
+/* Nothing to read (the log configuration is denied or failed): only the explanation remains. */
+.lg-view.is-blocked .lg-srcrow,
+.lg-view.is-blocked .lg-query,
+.lg-view.is-blocked .lg-timeline,
+.lg-view.is-blocked .lg-main,
+.lg-view.is-blocked .lg-iv,
+.lg-view.is-blocked .lg-menu-wrap,
+.lg-view.is-blocked .live-pill,
+.lg-view.is-nodata .live-pill,
+.lg-view.is-nodata .lg-iv,
+.lg-view.is-nodata .lg-menu-wrap {
+  display: none;
+}
+
+/* The explanation, directly under the header and aligned with the title: no empty frame around it. */
+.lg-block {
+  max-width: 720px;
+}
+
+.lg-block .state {
+  align-items: flex-start;
+  text-align: left;
+  margin: 0;
+}
+
+.lg-view.is-blocked,
+.lg-view.is-nodata {
+  flex: 0 0 auto;
+}
+
+.lg-srcrow:has(.lg-sources:empty) .lg-sources {
+  display: none;
+}
+
+.lg-view.is-nodata .lg-timeline,
+.lg-view.is-nodata .lg-main,
+.lg-view.is-nodata .lg-qhint {
+  display: none;
+}
+
+/* ---- query ---------------------------------------------------------------------------------- */
+
+/* The plan chips and the hint share one reserved row, so filtering never moves the chart. */
+.lg-query {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lg-query .qb-plan {
+  min-height: 24px;
+}
+
+.lg-query .qb-chip {
+  flex: none;
+}
+
+.lg-query .qb-explain {
+  flex: 1 1 320px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.lg-qhint {
+  display: flex;
+  align-items: center;
+  gap: 4px 18px;
+  min-height: 24px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.lg-qh-narrow {
+  display: none;
+}
+
+.lg-qhint kbd {
+  height: 17px;
+  min-width: 17px;
+  font-size: 10px;
+}
+
+.lg-query:has(.qb-plan:not([hidden])) .lg-qhint,
+.lg-query:has(.qb-err:not([hidden])) .lg-qhint {
+  display: none;
+}
+
+/* ---- source strip ----------------------------------------------------------------------------- */
+
+.lg-srcrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  margin-top: calc(-1 * var(--s1));
+}
+
+.lg-sources {
+  display: flex;
+  gap: 3px;
+  min-width: 0;
+  padding: 3px;
+  overflow-x: auto;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  scrollbar-width: none;
+}
+
+.lg-sources::-webkit-scrollbar {
+  display: none;
+}
+
+.lg-src {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+  height: 40px;
+  max-width: 300px;
+  padding: 0 12px 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+.lg-src:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.lg-src[aria-pressed="true"] {
+  background: var(--raised);
+  background-image: linear-gradient(180deg, var(--topline), transparent);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--line-strong), inset 0 -2px 0 var(--gold), var(--shadow);
+}
+
+.lg-src-ico {
+  width: 16px;
+  height: 16px;
+  color: var(--faint);
+}
+
+.lg-src[aria-pressed="true"] .lg-src-ico {
+  color: var(--gold);
+}
+
+.lg-src-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lg-src-name {
+  font: 600 12.5px/1.1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.lg-src-meta {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+
+.lg-src-flow {
+  align-self: center;
+  padding: 2px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--permit-line);
+  background: var(--permit-soft);
+  color: var(--permit);
+  font: 700 9px/1 var(--font-ui);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.lg-select {
+  height: 26px;
+  max-width: 100%;
+  padding: 0 24px 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--sunken);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  color: var(--text);
+  font: 12px var(--font-ui);
+  appearance: none;
+  cursor: pointer;
+}
+
+.lg-select:hover {
+  border-color: var(--muted-line);
+}
+
+.lg-type {
+  height: 32px;
+  font-family: var(--font-mono);
+}
+
+.lg-where-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  height: 32px;
+  margin-left: auto;
+  padding: 0 10px 0 9px;
+  border: 1px solid var(--sky-line);
+  border-radius: 999px;
+  background: var(--sky-soft);
+  color: var(--text);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.lg-where-btn svg {
+  width: 15px;
+  height: 15px;
+  color: var(--sky);
+}
+
+.lg-where-btn .chev {
+  width: 13px;
+  height: 13px;
+  color: var(--muted);
+  transition: transform var(--t) var(--ease);
+}
+
+.lg-where-btn[aria-expanded="true"] .chev {
+  transform: rotate(180deg);
+}
+
+.lg-where-btn.is-off {
+  border-color: var(--amber-line);
+  background: var(--amber-soft);
+}
+
+.lg-where-btn.is-off svg:first-child {
+  color: var(--amber);
+}
+
+.lg-where-btn:hover {
+  filter: brightness(1.08);
+}
+
+/* ---- "where are my traffic logs?" ------------------------------------------------------------- */
+
+.lg-where-card {
+  --accent: var(--sky);
+  --accent-soft: var(--sky-soft);
+  position: relative;
+  display: flex;
+  gap: var(--s3);
+  padding: var(--s3) var(--s6) var(--s3) var(--s4);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel);
+  background-image: linear-gradient(90deg, var(--accent-soft), transparent 55%);
+  box-shadow: var(--shadow);
+  animation: jw-pop var(--t-slow) var(--ease);
+}
+
+.lg-where-card.is-off {
+  --accent: var(--amber);
+  --accent-soft: var(--amber-soft);
+}
+
+.lg-where-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--accent);
+}
+
+.lg-where-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.lg-where-title {
+  font: 700 15px/1.2 var(--font-display);
+  letter-spacing: .01em;
+}
+
+.lg-where-text {
+  max-width: 78ch;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.lg-where-kv {
+  gap: 5px var(--s4);
+}
+
+.lg-streams {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lg-stream-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lg-stream-host svg {
+  width: 14px;
+  height: 14px;
+  color: var(--amber);
+}
+
+.lg-where-jump {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.lg-where-jump .btn.is-current {
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+}
+
+.lg-where-cli {
+  font-size: 12px;
+}
+
+.lg-where-cli code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+}
+
+.lg-where-x {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+/* ---- export menu ------------------------------------------------------------------------------ */
+
+.lg-menu-wrap {
+  position: relative;
+}
+
+.lg-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: 290px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow-pop);
+  animation: jw-pop var(--t) var(--ease);
+}
+
+.lg-menu-head {
+  padding: 6px 8px 6px;
+  color: var(--faint);
+  font: 700 10.5px/1 var(--font-ui);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.lg-menu-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.lg-menu-item svg {
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  color: var(--gold);
+}
+
+.lg-menu-item > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 12.5px;
+}
+
+.lg-menu-item .faint {
+  font-size: 11.5px;
+}
+
+.lg-menu-item:hover,
+.lg-menu-item:focus-visible {
+  background: var(--hover);
+  outline-offset: -2px;
+}
+
+.lg-menu-note {
+  padding: 6px 8px 4px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* ---- timeline: family toggles and histogram --------------------------------------------------- */
+
+.lg-timeline {
+  flex: none;
+  padding: 8px var(--s3) 4px;
+}
+
+.lg-tl-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-width: 0;
+}
+
+.lg-tl-side {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+  margin-left: auto;
+}
+
+.lg-ages > button {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+/* Bucket size, clock and brush hint: above the plot, right-aligned, never over the newest bars. */
+.lg-tl-legend {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 14px;
+  margin-top: 4px;
+  padding-right: 8px;
+}
+
+.hg-legend {
+  color: var(--faint);
+  font: 10px/14px var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lg-fams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 1px;
+}
+
+.lg-fams::-webkit-scrollbar {
+  display: none;
+}
+
+.lg-fam {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 24px;
+  padding: 0 7px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+.lg-fam:hover {
+  border-color: var(--line-strong);
+  background: var(--hover);
+  color: var(--text);
+}
+
+.lg-fam[aria-pressed="true"] {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--fam) 34%, transparent);
+  background: color-mix(in srgb, var(--fam) 9%, transparent);
+}
+
+.lg-fam-sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--fam);
+  box-shadow: 0 0 0 1px var(--fam);
+}
+
+.lg-fam[aria-pressed="false"] .lg-fam-sw {
+  background: transparent;
+}
+
+.lg-fam[aria-pressed="false"] .lg-fam-label {
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.lg-fam.is-zero {
+  opacity: .5;
+}
+
+.lg-fam.is-zero:hover {
+  opacity: .85;
+}
+
+.lg-fam-more {
+  border-style: dashed;
+  color: var(--faint);
+}
+
+.lg-fam-n {
+  min-width: 14px;
+  color: var(--faint);
+  font: 600 10.5px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.lg-fam[aria-pressed="true"] .lg-fam-n {
+  color: var(--muted);
+}
+
+.lg-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.lg-range-txt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--gold);
+}
+
+.lg-range-txt svg {
+  width: 13px;
+  height: 13px;
+}
+
+.lg-range-txt b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* histogram widget */
+
+.hg {
+  position: relative;
+  height: 72px;
+  margin: 4px -4px 0;
+  min-width: 0;
+}
+
+.hg-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  cursor: crosshair;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.hg-svg:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 0;
+  border-radius: 6px;
+}
+
+.hg-bar {
+  opacity: .9;
+  shape-rendering: crispEdges;
+}
+
+.hg-gl {
+  stroke: var(--line);
+  stroke-dasharray: 2 4;
+  shape-rendering: crispEdges;
+}
+
+.hg-base {
+  stroke: var(--line-strong);
+  stroke-dasharray: none;
+}
+
+.hg-tick {
+  stroke: var(--line-strong);
+}
+
+.hg-x,
+.hg-y,
+.hg-step {
+  fill: var(--faint);
+  font: 10px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.hg-step {
+  fill: var(--faint);
+  opacity: .8;
+}
+
+.hg-earlier {
+  fill: var(--amber);
+  font: 10px var(--font-ui);
+}
+
+.hg-hover {
+  fill: var(--hover);
+}
+
+.hg-dim {
+  fill: var(--bg);
+  opacity: .62;
+}
+
+.hg-sel {
+  fill: var(--gold-soft);
+  stroke: var(--gold);
+  stroke-width: 1;
+  fill-opacity: .5;
+}
+
+.hg-brush {
+  fill: var(--gold-wash);
+  stroke: var(--gold);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+}
+
+.hg-cursor {
+  fill: none;
+  stroke: var(--focus);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+}
+
+.hg-tip {
+  position: absolute;
+  top: -6px;
+  z-index: 6;
+  min-width: 170px;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--raised);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-size: 11.5px;
+  pointer-events: none;
+  transform: translateY(-100%);
+}
+
+.hg-th {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font: 11px var(--font-mono);
+  white-space: nowrap;
+}
+
+.hg-th b {
+  color: var(--text);
+}
+
+.hg-tip ul {
+  display: grid;
+  gap: 2px;
+}
+
+.hg-tip li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.hg-tip li b {
+  font: 600 11px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.hg-sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--fam);
+}
+
+.hg-tn {
+  color: var(--faint);
+}
+
+.hg-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* ---- the stream ------------------------------------------------------------------------------- */
+
+.lg-stream {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lg-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px var(--s2);
+  min-height: 38px;
+  padding: 5px var(--s2) 5px var(--s3);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  min-width: 0;
+}
+
+.lg-count {
+  white-space: nowrap;
+}
+
+.lg-count b {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.lg-hostchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.lg-hostchip svg {
+  width: 13px;
+  height: 13px;
+  color: var(--faint);
+}
+
+/* the stream and the top-values rail */
+.lg-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.lg-main.has-facets {
+  grid-template-columns: minmax(0, 1fr) 272px;
+}
+
+.lg-facets {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 12px;
+  gap: 12px;
+  overscroll-behavior: contain;
+}
+
+.lg-fc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.lg-fc-h {
+  font: 700 13px/1.2 var(--font-display);
+  letter-spacing: .01em;
+}
+
+.lg-fc {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lg-fc-title {
+  color: var(--muted);
+  font: 700 10.5px/1.3 var(--font-ui);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.lg-fc-title .faint {
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.lg-fc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.lg-fc-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  text-align: left;
+  overflow: hidden;
+}
+
+.lg-fc-item:hover {
+  background: var(--hover);
+}
+
+.lg-fc-bar {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: var(--w, 0%);
+  border-radius: 4px;
+  background: var(--muted-soft);
+  pointer-events: none;
+}
+
+.lg-fc-item.fc-reason .lg-fc-bar {
+  background: var(--deny-soft);
+}
+
+.lg-fc-item.fc-policy .lg-fc-bar {
+  background: var(--gold-soft);
+}
+
+.lg-fc-v {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.lg-fc-n {
+  position: relative;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.lg-fc-empty {
+  font-size: 12px;
+}
+
+.lg-matchnav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: var(--s2);
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.lg-mn-txt {
+  margin-right: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lg-selfwrap:empty {
+  display: none;
+}
+
+.lg-self {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px 0 7px;
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  background: var(--gold-soft);
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.lg-self svg {
+  width: 13px;
+  height: 13px;
+  color: var(--gold);
+}
+
+.lg-self-show {
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.lg-self.is-shown {
+  border-color: var(--line-strong);
+  background: transparent;
+}
+
+.lg-down {
+  transform: rotate(90deg);
+}
+
+.lg-follow[aria-pressed="true"] svg {
+  color: var(--gold);
+}
+
+.lg-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px var(--s2) 6px var(--s3);
+  border-bottom: 1px solid var(--line);
+  background: var(--amber-soft);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.lg-notice.is-info {
+  background: var(--sky-soft);
+}
+
+.lg-notice.is-info > svg {
+  color: var(--sky);
+}
+
+.lg-notice > svg {
+  width: 15px;
+  height: 15px;
+  color: var(--amber);
+}
+
+.lg-notice > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.lg-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.lg-scroll {
+  --lg-lh: 20px;
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  contain: strict;
+  background: var(--sunken);
+  color: var(--text);
+  font: 12px/var(--lg-lh) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  tab-size: 4;
+}
+
+:root[data-density="comfortable"] .lg-scroll {
+  --lg-lh: 24px;
+}
+
+.lg-scroll:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+  border-radius: 0;
+}
+
+.lg-probe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.lg-body {
+  position: relative;
+  width: max(100%, calc(var(--lg-maxch, 80) * 1ch + 30px));
+  padding: 0;
+}
+
+.lg-body.is-wrap {
+  width: 100%;
+}
+
+.lg-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  padding: 0 12px 0 0;
+  overflow: visible; /* not hidden: the gutter is sticky against the scroller */
+  white-space: pre;
+  color: var(--text);
+  cursor: default;
+}
+
+/* gutter: 18px, sticky on the left while unwrapped lines scroll sideways */
+.lg-gut {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  display: inline-block;
+  width: 18px;
+  height: var(--lg-lh);
+  vertical-align: top;
+  background: var(--sunken);
+}
+
+.lg-gut::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--fam, var(--muted));
+  opacity: .7;
+}
+
+.lg-row:hover {
+  background: var(--hover);
+}
+
+.lg-row:hover .lg-gut {
+  background: linear-gradient(var(--hover), var(--hover)), var(--sunken);
+}
+
+.lg-row.is-sel {
+  background: var(--gold-soft);
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+
+.lg-row.is-sel .lg-gut {
+  background: linear-gradient(var(--gold-soft), var(--gold-soft)), var(--sunken);
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+
+.lg-row.is-sel .lg-gut::before {
+  opacity: 1;
+}
+
+/* a line with a search mark: a gold bead on its stripe, visible even when the mark is off to the right */
+.lg-row.has-hit .lg-gut::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: calc(var(--lg-lh) / 2 - 3.5px);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 0 2px var(--sunken);
+}
+
+.lg-row.is-self {
+  opacity: .5;
+}
+
+/* error or worse (severity 0-3): a faint wash so it stands out at a glance */
+.lg-row.is-err {
+  background: linear-gradient(90deg, var(--deny-soft), transparent 70%);
+}
+
+.lg-row.is-err:hover {
+  background: var(--deny-soft);
+}
+
+.lg-row.is-err.is-sel {
+  background: var(--gold-soft);
+}
+
+.lg-row.is-err .lg-gut {
+  background: linear-gradient(var(--deny-soft), var(--deny-soft)), var(--sunken);
+}
+
+/* New lines: a short fade from a quiet wash (a few lines), or only the gutter stripe (a burst). */
+.lg-row.is-new {
+  animation: lg-new 900ms var(--ease);
+}
+
+.lg-row.is-new-gut .lg-gut::before {
+  animation: lg-new-gut 600ms var(--ease);
+}
+
+@keyframes lg-new {
+  0% { background-color: var(--lg-new-wash); }
+  100% { background-color: transparent; }
+}
+
+@keyframes lg-new-gut {
+  0% { background-color: var(--gold-fill); opacity: 1; }
+  100% { background-color: var(--fam, var(--muted)); opacity: .7; }
+}
+
+.lg-body.is-wrap .lg-row {
+  padding-left: 18px;
+  overflow: hidden;
+  white-space: break-spaces;
+  word-break: break-all;
+  line-break: anywhere;
+  overflow-wrap: anywhere;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+.lg-body.is-wrap .lg-row.is-sel {
+  box-shadow: inset 2px 0 0 var(--gold), inset 0 -1px 0 var(--line);
+}
+
+.lg-body.is-wrap .lg-row .lg-gut {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  height: auto;
+  background: transparent;
+}
+
+.lg-body.is-wrap .lg-row:hover .lg-gut,
+.lg-body.is-wrap .lg-row.is-err .lg-gut,
+.lg-body.is-wrap .lg-row.is-sel .lg-gut {
+  background: transparent;
+}
+
+.lg-body.is-wrap .lg-text {
+  display: block;
+  /* half a column of slack: exactly --lg-cpl characters fit despite sub-pixel rounding, one more does not */
+  width: calc((var(--lg-cpl, 120) + .5) * 1ch);
+  max-width: 100%;
+}
+
+.lg-text {
+  display: inline;
+  /* Device text may hold right-to-left characters: they reorder inside their token, never the line. */
+  unicode-bidi: isolate;
+  direction: ltr;
+}
+
+.lg-text span {
+  unicode-bidi: isolate;
+}
+
+/* An invisible or direction-changing character, shown as "U+202E" (same width rules as any token). */
+.tk-ctl {
+  border-radius: 2px;
+  background: var(--deny-soft);
+  box-shadow: 0 0 0 1px var(--deny-line);
+  color: var(--deny);
+  font-weight: 600;
+}
+
+/* Compact: the RT_FLOW family badge, the remaining fields, the note on a capped line. */
+.lg-text .lg-badge {
+  letter-spacing: .02em;
+}
+
+.lg-text .lg-faint,
+.lg-text .lg-faint.tk-key,
+.lg-text .lg-faint.tk-val,
+.lg-text .lg-faint.tk-num,
+.lg-text .lg-faint.tk-ip,
+.lg-text .lg-faint.tk-nat,
+.lg-text .lg-faint.tk-iface,
+.lg-text .lg-faint.tk-user,
+.lg-text .lg-faint.tk-good,
+.lg-text .lg-faint.tk-bad {
+  color: var(--faint);
+  font-weight: 400;
+}
+
+.lg-text .lg-faint.tk-ip {
+  text-decoration: none;
+}
+
+.lg-text .tk-cap {
+  color: var(--amber);
+}
+
+.lg-text .tk-sdid {
+  color: var(--faint);
+  cursor: help;
+}
+
+.lg-text .tk-ts[title] {
+  cursor: default;
+}
+
+/* Two-line rows (Compact + Wrap at phone width): time, gutter and family on line 1, the summary on
+   line 2, cut with an ellipsis (the decoded panel has the rest). */
+.lg-body.is-two .lg-c-head {
+  display: block;
+}
+
+.lg-body.is-two .lg-c-body {
+  display: block;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+/* A day divider (Compact): the date the times below are on. */
+.lg-row.lg-day {
+  display: flex;
+  align-items: center;
+  padding: 0 12px 0 18px;
+  white-space: nowrap;
+}
+
+.lg-day-text {
+  position: sticky;
+  left: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font: 600 11px/1 var(--font-ui);
+  letter-spacing: .04em;
+}
+
+.lg-day-text::after {
+  content: "";
+  width: 48px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.lg-day-zone {
+  order: 2;
+  color: var(--faint);
+  font-weight: 400;
+  letter-spacing: 0;
+  cursor: help;
+}
+
+.lg-body.is-wrap .lg-row.lg-day {
+  padding-top: 0;
+  padding-bottom: 0;
+  box-shadow: none;
+}
+
+/* Inline token boxes must not change text width (see the file header). */
+.lg-text .tk-zone,
+.lg-d-raw .tk-zone {
+  padding: 0;
+  border-radius: 2px;
+  background: var(--raised);
+  box-shadow: 0 0 0 2px var(--raised), 0 0 0 3px var(--line-strong);
+}
+
+.lg-text .tk-click {
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.lg-text .tk-click:hover {
+  background: var(--gold-soft);
+  box-shadow: 0 0 0 1px var(--gold-line);
+}
+
+.lg-text .tk-zone.tk-click:hover {
+  box-shadow: 0 0 0 2px var(--raised), 0 0 0 3px var(--gold);
+}
+
+.lg-hit {
+  padding: 0;
+  border-radius: 2px;
+  background: var(--gold-wash);
+  box-shadow: 0 0 0 1px var(--gold-line);
+  color: inherit;
+}
+
+.lg-row.is-cur .lg-hit {
+  background: var(--gold);
+  color: var(--on-gold);
+  box-shadow: 0 0 0 1px var(--gold);
+}
+
+.lg-marker {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 var(--s3);
+  background: repeating-linear-gradient(135deg, transparent 0 6px, var(--stripe) 6px 12px);
+  color: var(--sky);
+  font: 600 11.5px/1 var(--font-ui);
+  white-space: nowrap;
+}
+
+.lg-marker.is-gap {
+  color: var(--amber);
+}
+
+.lg-marker-text {
+  position: sticky;
+  left: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: var(--panel);
+}
+
+.lg-marker-text svg {
+  width: 13px;
+  height: 13px;
+}
+
+.lg-newpill {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 14px 0 11px;
+  border: 1px solid var(--gold);
+  border-radius: 999px;
+  background: var(--gold);
+  color: var(--on-gold);
+  font: 650 12.5px/1 var(--font-ui);
+  box-shadow: var(--shadow-pop);
+  transform: translateX(-50%);
+  animation: jw-pop var(--t-slow) var(--ease);
+}
+
+.lg-newpill svg {
+  width: 15px;
+  height: 15px;
+}
+
+.lg-newpill:hover {
+  filter: brightness(1.07);
+}
+
+.lg-hint {
+  position: absolute;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--gold-line);
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.lg-hint b {
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.lg-hoverbar {
+  position: absolute;
+  right: 12px;
+  z-index: 4;
+  display: inline-flex;
+  gap: 2px;
+  padding: 1px;
+  border-radius: 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.lg-hoverbar .btn {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.lg-hoverbar .btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.lg-state {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: var(--s5);
+  background: var(--sunken);
+  overflow: auto;
+}
+
+.lg-state-in {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  width: 100%;
+  max-width: 600px;
+}
+
+.lg-foot {
+  display: flex;
+  align-items: center;
+  gap: 0 6px;
+  min-height: 28px;
+  padding: 4px var(--s3);
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font: 11px/1.3 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.lg-foot .pill {
+  font-family: var(--font-ui);
+}
+
+.lg-reading {
+  color: var(--gold);
+}
+
+.lg-foot-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-ui);
+}
+
+@media (hover: none) {
+  .lg-d-act .btn {
+    opacity: 1;
+  }
+}
+
+/* ---- decoded panel ---------------------------------------------------------------------------- */
+
+.lg-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.lg-d-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.lg-d-fam {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fam);
+  font: 700 11px/1 var(--font-ui);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.lg-d-tag {
+  color: var(--fam);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.lg-d-time {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.lg-d-zone {
+  color: var(--faint);
+}
+
+.lg-d-h3note {
+  color: var(--faint);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.lg-d-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+}
+
+.lg-d-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Device text in the panel: right-to-left characters stay inside their own value. */
+.lg-detail td,
+.lg-d-lead,
+.lg-d-facts li,
+.lg-d-ep,
+.lg-tl-what,
+.lg-d-raw {
+  unicode-bidi: isolate;
+}
+
+.lg-d-raw {
+  direction: ltr;
+}
+
+.lg-d-sentence {
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  background-image: linear-gradient(180deg, var(--topline), transparent 40px);
+  box-shadow: inset 3px 0 0 var(--fam, var(--gold));
+}
+
+.lg-d-lead {
+  font: 650 18px/1.3 var(--font-display);
+  letter-spacing: .005em;
+}
+
+.lg-d-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.lg-d-facts li {
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--sunken);
+  color: var(--text);
+  font: 12px/1.35 var(--font-mono);
+}
+
+.lg-d-none {
+  color: var(--muted);
+}
+
+.lg-d-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.3fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.lg-d-end {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--sunken);
+}
+
+.lg-d-role {
+  color: var(--faint);
+  font: 700 9.5px/1 var(--font-ui);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.lg-d-ep {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lg-d-arr {
+  color: var(--fam, var(--gold));
+}
+
+.lg-d-arr svg {
+  width: 18px;
+  height: 18px;
+}
+
+.lg-d-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--fam, var(--gold)) 40%, transparent);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.lg-d-zones {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.lg-d-zones svg {
+  width: 13px;
+  height: 13px;
+  color: var(--faint);
+}
+
+.lg-d-zone {
+  cursor: pointer;
+}
+
+.lg-d-zone:hover {
+  border-color: var(--gold);
+}
+
+.lg-d-pol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.lg-d-proto {
+  font-size: 11px;
+}
+
+.lg-d-nats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lg-d-nat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.lg-d-nat svg {
+  width: 14px;
+  height: 14px;
+  color: var(--violet);
+}
+
+.lg-d-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+}
+
+.lg-d-tlhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 12.5px;
+}
+
+.lg-tl {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 18px;
+}
+
+.lg-tl::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 10px;
+  bottom: 10px;
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.lg-tl-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 96px 58px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 2px 6px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.lg-tl-item.is-here {
+  background: var(--gold-soft);
+}
+
+.lg-tl-dot {
+  position: absolute;
+  left: -16px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--fam);
+  box-shadow: 0 0 0 3px var(--panel);
+}
+
+.lg-tl-time {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.lg-tl-ev {
+  color: var(--fam);
+  font: 700 11px/1 var(--font-mono);
+  letter-spacing: .04em;
+}
+
+.lg-tl-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.lg-d-missing {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 18px;
+  color: var(--faint);
+  font-size: 12px;
+  list-style: disc;
+}
+
+.lg-d-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 9px 11px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+
+.lg-d-live > span:nth-child(2) {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.lg-live-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--inactive);
+}
+
+.lg-live-dot.is-live {
+  background: var(--permit);
+  box-shadow: 0 0 0 0 var(--permit-soft);
+  animation: jw-pulse 1.6s var(--ease) infinite;
+}
+
+.lg-live-dot.is-unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
+
+.lg-live-dot.is-closed {
+  background: var(--teal);
+}
+
+.lg-live-dot.is-denied {
+  background: var(--deny);
+}
+
+.lg-d-fields {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;
+}
+
+.lg-d-fields th,
+.lg-d-fields td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.lg-d-fields th {
+  width: 36%;
+  color: var(--tk-key);
+  font-weight: 500;
+  font-size: 11.5px;
+}
+
+.lg-d-fields .ip {
+  color: var(--text);
+}
+
+.lg-d-fields tr.is-ph td,
+.lg-d-fields tr.is-ph th {
+  color: var(--faint);
+}
+
+.lg-d-fields tr:hover {
+  background: var(--hover);
+}
+
+.lg-d-act {
+  width: 64px;
+  text-align: right !important;
+  white-space: nowrap;
+}
+
+.lg-d-act .btn {
+  width: 22px;
+  height: 20px;
+  font: 600 13px/1 var(--font-mono);
+  opacity: .35;
+}
+
+.lg-d-fields tr:hover .lg-d-act .btn,
+.lg-d-act .btn:focus-visible {
+  opacity: 1;
+}
+
+.lg-d-sub {
+  margin-top: var(--s2);
+}
+
+.lg-d-cli {
+  padding-right: 44px;
+}
+
+.lg-d-raw {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font: 12px/1.6 var(--font-mono);
+}
+
+/* ---- responsive ------------------------------------------------------------------------------- */
+
+@media (max-width: 1180px) {
+  .lg-iv {
+    display: none;
+  }
+  .lg-src-meta {
+    max-width: 150px;
+  }
+  /* The top-values rail moves under the stream as a strip of columns. */
+  /* With the rail under the stream the page scrolls, as on a phone: the stream keeps its height. */
+  .view.view-fill.lg-view:has(.lg-main.has-facets) {
+    flex: 1 0 auto;
+    overflow: visible;
+  }
+  .lg-main.has-facets {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+  .lg-main.has-facets .lg-stream {
+    flex: none;
+    height: max(420px, calc(100dvh - 300px));
+  }
+  .lg-facets {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    align-items: start;
+  }
+  .lg-fc-head {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .lg-head {
+    flex-wrap: wrap;
+  }
+  .lg-srcrow {
+    flex-wrap: wrap;
+  }
+  .lg-where-btn {
+    margin-left: 0;
+  }
+  .lg-tl-head {
+    flex-wrap: wrap;
+  }
+  .lg-fams {
+    flex: 1 0 100%;
+  }
+  .lg-d-flow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .lg-d-arr {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .view.view-fill.lg-view {
+    flex: 1 0 auto;
+    overflow: visible;
+    gap: var(--s2);
+  }
+  .lg-head {
+    gap: 6px var(--s2);
+  }
+  .lg-titles {
+    flex: 1 1 0;
+  }
+  .lg-sub {
+    font-size: 11.5px;
+  }
+  .lg-sub > span:nth-of-type(2),
+  .lg-sub > span:nth-of-type(1) {
+    display: none;
+  }
+  .lg-btn-label {
+    display: none;
+  }
+  .lg-qh-wide {
+    display: none;
+  }
+  .lg-qh-narrow {
+    display: inline;
+  }
+  .lg-srcrow {
+    margin-top: 0;
+  }
+  .lg-sources {
+    flex: 1 0 100%;
+  }
+  .lg-src {
+    height: 36px;
+    padding: 0 10px 0 8px;
+  }
+  .lg-src-meta {
+    max-width: 120px;
+  }
+  .lg-where-btn,
+  .lg-type {
+    height: 28px;
+  }
+  .lg-where-card {
+    padding: var(--s3) var(--s5) var(--s3) var(--s3);
+  }
+  .lg-where-icon {
+    display: none;
+  }
+  .hg {
+    height: 56px;
+  }
+  .lg-stream {
+    flex: none;
+    height: max(430px, calc(100dvh - 250px));
+  }
+  .lg-main {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+  .lg-facets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+  }
+  .lg-tl-side {
+    margin-left: 0;
+  }
+  .lg-tl-head {
+    flex-wrap: wrap;
+  }
+  .lg-hostchip {
+    display: none;
+  }
+  .lg-win,
+  .lg-mn-txt {
+    display: none;
+  }
+  .lg-bar {
+    flex-wrap: wrap;
+  }
+  .lg-foot {
+    font-size: 10.5px;
+  }
+  .lg-hoverbar,
+  .lg-hint {
+    display: none !important;
+  }
+  .lg-state {
+    place-items: start center;
+    padding-top: var(--s5);
+  }
+  .lg-tl-item {
+    grid-template-columns: 78px 50px minmax(0, 1fr);
+  }
+  .lg-tl-item > :last-child {
+    grid-column: 3;
+    justify-self: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* No motion: new lines are announced and counted, not flashed. */
+  .lg-row.is-new,
+  .lg-row.is-new-gut .lg-gut::before {
+    animation: none !important;
+  }
+  .lg-live-dot.is-live {
+    animation: none !important;
+  }
+  .lg-where-card,
+  .lg-menu,
+  .lg-newpill {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,6 @@
+# J-Wicket baseline, verified on vSRX Junos 24.4R2-S3.5 (2026-11-24 UTC).
+# Replace <user> with a Junos account that owns /var/db/scripts/jet/wicket_spike.py.
+set system scripts language python3
+set system extensions extension-service application file wicket_spike.py daemonize
+set system extensions extension-service application file wicket_spike.py respawn-on-normal-exit
+set system extensions extension-service application file wicket_spike.py username <user>

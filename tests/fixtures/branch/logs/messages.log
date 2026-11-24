@@ -1,0 +1,3 @@
+Nov 23 22:00:01 branch-fw-01 /kernel: SYNTHETIC FIXTURE: log lines below are illustrative, not captured from a device
+Nov 23 22:00:04 branch-fw-01 chassisd[1310]: CHASSISD_IFDEV_DETACH_ALL_PSEUDO: ifdev_detach(pseudo devices: all)
+Nov 23 22:00:19 branch-fw-01 mgd[1402]: UI_COMMIT_COMPLETED: commit complete

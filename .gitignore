@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+# Local settings, tokens, keys and logs never belong in the repository.
+*.ini
+!tests/fixtures/*.ini
+!docs/examples/*.ini
+*.pem
+*.key
+*.log
+!tests/fixtures/*/logs/*.log
+*.jsonl
+.playwright/
+screenshots/

@@ -1,0 +1,1 @@
+--bind 0.0.0.0 --port 8443 --token-file /var/tmp/wicket_token --cert /var/tmp/wicket.crt --key /var/tmp/wicket.key --log-file /var/tmp/wicket-spike.log

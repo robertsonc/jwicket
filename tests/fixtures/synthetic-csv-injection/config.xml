@@ -1,0 +1,68 @@
+<!-- SYNTHETIC. Hostile-looking but valid-shaped values for the CSV export's formula-injection guard
+     (tests/test_http_server.py). Not captured from a device; see tests/fixtures/README.md. -->
+<configuration xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <security>
+    <zones>
+      <security-zone><name>trust</name></security-zone>
+      <security-zone><name>untrust</name></security-zone>
+    </zones>
+    <policies>
+      <policy>
+        <from-zone-name>trust</from-zone-name>
+        <to-zone-name>untrust</to-zone-name>
+        <policy>
+          <name>formula-desc</name>
+          <description>=1+2</description>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>plus-desc</name>
+          <description>+SUM(A1:A9)</description>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then><permit/></then>
+          <scheduler-name>@sched</scheduler-name>
+        </policy>
+        <policy junos:group="=grp">
+          <name>minus-desc</name>
+          <description>-2+3</description>
+          <match junos:group="=grp">
+            <source-address junos:group="=grp">any</source-address>
+            <destination-address junos:group="=grp">any</destination-address>
+            <application junos:group="=grp">any</application>
+          </match>
+          <then junos:group="=grp"><deny junos:group="=grp"/></then>
+        </policy>
+        <policy>
+          <name>at-desc</name>
+          <description>@cmd|' /C calc'!A0</description>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>plain-desc</name>
+          <description>An ordinary description, with a comma</description>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+      </policy>
+      <default-policy><deny-all/></default-policy>
+    </policies>
+  </security>
+</configuration>

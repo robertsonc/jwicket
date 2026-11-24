@@ -1,0 +1,1082 @@
+# Governance and qualification roadmap
+
+Status: living document. Owner: the project owner (Corey Robertson). Last reviewed 2026-11-24.
+The gates and decision rights on this page are the owner's. Anything marked **proposed** is a
+contributor proposal that waits for an owner decision; each one is listed in
+[section 2.5](#25-decisions-pending).
+
+**Where the project stands.** G0, the spike, passed on one vSRX (Junos 24.4R2-S3.5) on 2026-11-23
+(24 November UTC). No J-Wicket qualification test has run. Three tests have partial
+spike-equivalent evidence from the spike's own daemon on that vSRX: Q-RT-01, Q-RT-02 and the vSRX
+part of Q-NET-01. None of the three meets its full pass criterion. Nothing has run on SRX
+hardware, and every reply J-Wicket parses is synthetic.
+
+**What comes next.** G1: least-privilege, TLS-protected on-box reads, proven on a device. Nothing
+writes to a device before G4. The next three deliverables are in
+[section 8](#8-what-ships-next).
+
+Labels used on this page: **verified** means a cited source or the spike record says it.
+**Inferred** means our reading of verified facts. **Unknown** means nobody has checked; the test
+that will settle it is named. **Proposed** means a design or process choice waiting for the owner.
+
+On this page:
+
+1. [Decision rights](#1-decision-rights)
+2. [How decisions are made and recorded](#2-how-decisions-are-made-and-recorded)
+3. [Gates G0 to G5](#3-gates-g0-to-g5)
+4. [Qualification test catalogue](#4-qualification-test-catalogue)
+5. [Qualification matrix](#5-qualification-matrix)
+6. [Evidence rules](#6-evidence-rules)
+7. [Roadmap](#7-roadmap)
+8. [What ships next](#8-what-ships-next)
+9. [Risk register](#9-risk-register)
+10. [Sources](#10-sources)
+
+## 1. Decision rights
+
+### Roles
+
+| Role | Who | What the role decides |
+| --- | --- | --- |
+| Project owner | Corey Robertson | Scope, priorities, the reference release, gate approvals and `out-of-scope` rows. Anything this table does not assign |
+| Security reviewer | **Not yet named** ([D1](#25-decisions-pending)) | Signs off G1 and G4. Runs the internal review (Q-SEC-01). Reviews changes that touch a security control |
+| Qualification lab owner | **Not yet named** ([D2](#25-decisions-pending)) | Certifies qualification evidence. Owns the lab equipment and [deploy-lab.md](deploy-lab.md) |
+| Product sponsor | **None yet** | Required before G4. Represents the product organization, whose answer the signed-package and support positions need |
+| Contributors | Anyone with a pull request | Propose through specs and ADRs in pull requests. Run tests and record evidence |
+
+An approval counts only when the person holding the role gives it in the pull request or in a
+recorded ADR. A contributor's or a tool's approval never stands in for one of these roles.
+
+### Who decides what
+
+| Decision | Decides | Must also review or sign | Recorded in |
+| --- | --- | --- | --- |
+| Goals, non-goals, principles | Owner | | [Charter](charter.md) and an ADR |
+| Priority of a ledger row (`P0` to `P4`) | Owner | | [`parity/jweb-24.4.csv`](parity/jweb-24.4.csv) |
+| A row marked `out-of-scope` or `replace` | Owner | | The ledger row's reason, approved in the pull request. Until then the row says "owner approval pending". An ADR when the reason is a principle (for example Junos-FIPS mode) |
+| The reference release, and moving it | Owner | | A new ADR superseding [ADR 0008](adr/0008-release-scoped-parity.md)'s reference, with a diff of the two ledgers ([2.3](#23-the-parity-reference-release)) |
+| Accepting a spec | Owner | Security reviewer, for any spec that touches sign-in, transport, the RPC allowlist, secrets or writes | The spec's Status field, in the accepting pull request ([2.2](#22-spec-reviews)) |
+| An architecture decision | Owner | Security reviewer, when a trust boundary or a security control changes | An ADR ([2.1](#21-architecture-decision-records)) |
+| Adding a read RPC to `ALLOWED_RPCS` | Owner, with the spec that needs it | Security reviewer. A recorded reply from a lab device (Q-REL-01) | [`junos/session.py`](../src/jwicket/junos/session.py), the spec's data-sources table, the pull request |
+| Any RPC that changes the device | Owner, not before G4 | Security reviewer | The write-model ADR that [Spec 002](specs/002-change-protocol.md) open question 1 asks for, and the G4 record |
+| A setting default or rule that weakens a control (bind, TLS, file trust, throttles) | Owner | Security reviewer | An ADR |
+| Gate approval G0 to G5 | Owner | Security reviewer signs G1 and G4. Lab owner certifies the evidence for every gate | The gate log ([2.4](#24-gate-log)) |
+| A qualification result is valid | Lab owner | | The evidence record and this page's catalogue ([section 6](#6-evidence-rules)) |
+| Pass criteria and budgets of a qualification test, before it runs | Owner | Lab owner for the method; security reviewer for Q-AUTH, Q-TLS and Q-SEC tests | This page |
+| The platform and release list the lab must cover | Owner | Lab owner, on what the lab can get | The [qualification matrix](#5-qualification-matrix) |
+| A vulnerability fix and its disclosure | Owner | Security reviewer | Private, as [SECURITY.md](../SECURITY.md) says |
+| Changes to the lab procedure | Lab owner | Security reviewer, when a step changes the device's security posture | [deploy-lab.md](deploy-lab.md) |
+| Signed package, support statement, product sponsor | Owner, with the product organization | Security reviewer | ADRs at G4 (positions decided) and G5 (package and statement exist) |
+| Development tooling pins and CI | Contributors | One reviewer other than the author | [`requirements-dev.txt`](../requirements-dev.txt), [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
+
+## 2. How decisions are made and recorded
+
+Every decision lands in the repository through a pull request: a spec for what to build, an ADR for
+a choice that constrains later work, a ledger row for parity scope, and an evidence record for what
+a device did. [CONTRIBUTING.md](../CONTRIBUTING.md) is the step-by-step version.
+
+```mermaid
+flowchart LR
+  IDEA["Need: a J-Web 24.4 task,<br/>or a J-Wicket workflow"] --> ROW["Ledger row<br/>planned"]
+  ROW --> SPEC["Spec in review: Draft<br/>row: specified"]
+  SPEC -->|owner accepts| ACC["Spec Accepted<br/>code may start"]
+  SPEC -.->|a choice that binds later work| ADR["ADR<br/>Proposed, then Accepted"]
+  ADR -.-> ACC
+  ACC --> CODE["Code and tests<br/>in pull requests"]
+  CODE -->|acceptance tests pass on fixtures,<br/>browser check included| IMPL["row: implemented"]
+  IMPL -->|recorded replies and a qualified<br/>platform, certified by the lab owner| QUAL["row: qualified"]
+```
+
+### 2.1 Architecture decision records
+
+ADRs live in [`docs/adr/`](adr/README.md), one decision per file, numbered `NNNN-short-title.md`.
+
+- **Shape.** Context (what forced a choice), Decision, Consequences (what it costs) and, whenever
+  a qualification test could overturn the decision, "Would be proven wrong by", naming that test
+  (ADRs 0001 to 0003 have one).
+- **Life.** An ADR is opened in a pull request as `Status: Proposed`. The owner accepts it, and the
+  status becomes `Accepted (YYYY-MM-DD)`. An accepted ADR is not edited afterwards. A later ADR
+  supersedes it and says so; only the earlier one's status line changes, to `Superseded by NNNN`.
+  The index in [`adr/README.md`](adr/README.md) is updated in the same pull request.
+- **Today.** ADRs 0001 to 0009 were written and committed by a contributor on 2026-11-24 with the
+  status "Accepted", but no owner acceptance is recorded in the repository. They therefore read
+  `Status: Proposed` until the owner accepts each one in a pull request (D11).
+- **When a test contradicts an ADR.** If a qualification result proves an ADR wrong (for example
+  Q-AUTH-01 failing would overturn [ADR 0002](adr/0002-junos-delegated-sign-in.md)), the result is
+  recorded first. A superseding ADR must be accepted before any code relies on the new behaviour.
+  [Architecture section 13](architecture.md#13-if-per-operator-sign-in-fails-q-auth-01) lists the
+  options already known for that case.
+- **ADRs requested and not yet written:** the write model (Spec 002 open question 1), the secrets
+  handling of whole-configuration diffs ([catalog](catalog.md), Spec 002 open question 10), and,
+  if Q-AUTH-01 fails, the successor to ADR 0002.
+
+### 2.2 Spec reviews
+
+A spec says what a feature does, what it rests on and how it is tested. Code follows an accepted
+spec. Specs live in [`docs/specs/`](specs/), numbered `NNN-short-name.md`, and start from
+[`000-template.md`](specs/000-template.md).
+
+**Spec status and ledger status move together.** Specs 001, 002 and 004 write their status in
+free text (Spec 002 says "Design only"); Spec 003 already starts with "Draft", from the vocabulary
+below. New specs, and existing ones when next revised, start their Status field with one of these
+words (**proposed** vocabulary):
+
+| Spec status | Means | Ledger rows it covers |
+| --- | --- | --- |
+| Draft | Open for review. Nothing may be built against it except throwaway prototypes | `specified` (a spec covers the row) |
+| Accepted | The owner accepted the design; for security-relevant specs, the security reviewer reviewed it. Code may start | `specified` |
+| Implemented on fixtures | Its acceptance tests pass against synthetic fixtures. Say which parts, if not all | `implemented` for each row whose criteria all pass, the browser check included for an operation done in the browser; the others stay `specified` ([ledger method, section 5](parity/README.md#5-statuses)) |
+| Qualified on *cells* | Its acceptance tests pass against recorded replies, and on the qualified platform cells named ([3.2](#32-what-qualified-platform-means)) | `qualified`, for those cells |
+| Superseded by *NNN* | Replaced | as the new spec says |
+
+Today: Spec 001 and Spec 004 are implemented on fixtures for their backends and browser engines;
+their UI views are built in the working tree, not yet committed, and not yet checked in a browser
+(AC-001-21, AC-004-20 not met), so their ledger rows stay `specified`. They are the first slices the
+owner named. Spec 002 is design
+only. Spec 003, the first planned configuration wizard, is specified and preview-only. No spec
+records the owner's acceptance in its Status field yet, and none is qualified.
+
+**What a reviewer checks.**
+
+1. The problem is grounded in named J-Web 24.4 pages, with source URLs, and the ledger rows it
+   covers are listed.
+2. Every claim about Junos is labelled verified (with a source), inferred or unknown. No CLI, RPC
+   name, XML element or J-Web menu name appears without a source. Each unknown names the
+   qualification test that settles it.
+3. Every RPC and configuration subtree the feature reads is listed, with its allowlist impact. Any
+   new RPC follows the allowlist rule in [CONTRIBUTING.md](../CONTRIBUTING.md).
+4. Panels show device data or an explicit state ([ADR 0004](adr/0004-no-sample-data.md)); nothing
+   is cached in the browser ([ADR 0007](adr/0007-offline-capable-meaning.md)).
+5. Security considerations cover input validation, secrets, error text, load on the routing engine
+   and the browser rules.
+6. Acceptance criteria have IDs (`AC-NNN-xx`), each with the tests that prove it and an honest
+   status. The last criteria say what must pass against recorded replies and in a browser.
+7. Open questions name who decides and what settles them.
+8. Nothing writes to a device unless the spec is Spec 002 or builds on it, and nothing that writes
+   ships before G4.
+
+**Changing an accepted spec.** Edit it in a pull request and add a dated line to its Status
+section saying what changed. If the change reverses a decision recorded in an ADR, write the ADR
+first.
+
+### 2.3 The parity reference release
+
+**The reference is J-Web for SRX Series 24.4**, as documented in the J-Web User Guide for SRX
+Series Firewalls, release 24.4 ([ADR 0008](adr/0008-release-scoped-parity.md)). Parity means an
+authorized operator can complete the same tasks as on that release. The ledger
+([method](parity/README.md), [data](parity/jweb-24.4.csv), [summary](parity/jweb-24.4.md)) has
+one row per page or operation.
+
+**Two different release questions.** The *reference release* says what parity means. The
+*qualified releases* say which Junos releases J-Wicket has been shown to run on
+([section 5](#5-qualification-matrix)). Moving one does not move the other. J-Wicket can be
+qualified on 22.4 while measuring parity against J-Web 24.4.
+
+**Why the reference stays pinned.** J-Web's structure changes between releases. The 25.2 guide's
+table of contents has 276 topics against 24.4's 453 (each counted as unique topic URLs, without
+`index.html` and the PDF), adds a "Shared Objects and Identity" section, and has no top-level
+"Security Policies and Objects" or "Security Services" section (**verified**, the 25.2 and 24.4
+guide tables of contents, `__toc.js`, read 2026-11-24). A ledger keyed
+to a moving target cannot measure progress.
+
+**How it changes.** Only the owner moves the reference, and only through these steps:
+
+1. A pull request adds a new ledger, `parity/jweb-<release>.csv`, built by the same method. The
+   24.4 ledger stays.
+2. The pull request includes a diff of the two ledgers: rows added, removed, renamed or moved to a
+   different menu, and rows whose page changed behaviour, each with the spec it affects.
+3. Status carries over only where the page and the Junos hierarchy it touches are unchanged.
+   Anything else drops to `specified` or `planned`, and the diff says which.
+4. A new ADR supersedes the reference choice in ADR 0008, linking the diff. The owner accepts it.
+5. The README, the charter, the ledger summary and this page are updated in the same pull request.
+
+### 2.4 Gate log
+
+Append-only. A gate is passed when the owner approves its entry here, with the sign-offs and
+evidence its row in [section 3](#3-gates-g0-to-g5) requires.
+
+| Gate | Date | Decision | Evidence | Sign-offs |
+| --- | --- | --- | --- | --- |
+| G0 spike | 2026-11-23 (24 November UTC) | Passed on vSRX 24.4R2-S3.5, as recorded in the owner's framing. The kill tests T1, T2 and T5 passed, and T4 passed | [Spike packet](evidence/2026-11-23-vsrx-spike/README.md); [notebook, results](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far) | Owner. G0 needs no security or lab sign-off |
+
+The spike report made "the same tests pass on SRX300 hardware" the gate that ends the spike phase
+([report, roadmap](evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md#roadmap)).
+The current roadmap records G0 as passed on vSRX and carries the hardware test forward as
+Q-HW-01, an exit criterion of G2 ([charter, section 6](charter.md#6-from-a-branch-admins-normal-week-to-release-scoped-parity)).
+
+### 2.5 Decisions pending
+
+These block a gate or a qualification run. Each is the owner's unless the row says otherwise.
+
+| ID | Decision | Blocks | Raised in |
+| --- | --- | --- | --- |
+| D1 | Name the security reviewer | Q-SEC-01, G1 sign-off | This page |
+| D2 | Name the qualification lab owner, and give them lab equipment | Every certified result; the first lab run ([section 8](#8-what-ships-next)) | This page |
+| D3 | Confirm the platform and release list (the [matrix](#5-qualification-matrix) is a proposal), the release set for Q-REL-01, and whether chassis cluster and MNHA are required at G2 or can follow | Q-REL-01, G2 | [Charter, open question 2](charter.md#9-open-questions-for-the-owner) |
+| D4 | Side project, or a proposal to the product team? A side project can stop at G3 with no device writes | Whether G4 and G5 are pursued | [Charter, open question 3](charter.md#9-open-questions-for-the-owner) |
+| D5 | Does preview-only mode (a load into the operator's private copy and a commit check) count as "no device writes" for G3? If not, Spec 003 at G3 uses J-Wicket's local model only. Owner with the security reviewer | G3 scope | [Spec 002, open question 2](specs/002-change-protocol.md#20-open-questions) |
+| D6 | Confirm Junos-FIPS mode devices as a non-goal for the unsigned app, and that J-Wicket replaces the management UI only, not firewall web authentication or Juniper Secure Connect | Ledger rows; charter non-goals | [Charter, section 7](charter.md#junos-fips-mode) |
+| D7 | Place the tests that the gate definitions do not name ([3.1](#31-tests-the-gate-definitions-do-not-place)), and accept or reject the **proposed** additions to the exit criteria in [section 3](#3-gates-g0-to-g5): the Spec 001 and 004 acceptance criteria at G1, and the `out-of-scope` and `replace` clauses at G2 | G1, G2 planning | This page |
+| D8 | Does G5 require the `P2` and `P3` rows, or can a read-only J-Wicket reach customer production after G2 with a signed package and a support statement? | G5 scope | This page |
+| D9 | Set the budgets for Q-HW-01 and Q-LOAD-01 to Q-LOAD-03 before they run | Those tests | This page |
+| D10 | Adopt the J-Web 24.4 reference observation as a qualification item ([4.12](#412-proposed-additions)) | Spec 002 open question 16; catalog unknowns | [Catalog, unknowns](catalog.md#unknowns-and-what-settles-them) |
+| D11 | Accept, amend or reject ADRs 0001 to 0009. A contributor wrote and committed them on 2026-11-24 as "Accepted", but no owner acceptance is recorded, so they read "Proposed" ([2.1](#21-architecture-decision-records)) | Any ADR-based claim that a decision is settled | [ADR index](adr/README.md) |
+| D12 | Approve a hardware variant of the lab procedure. [deploy-lab.md](deploy-lab.md) covers a disposable virtual SRX with a loopback bind only; the hardware runs and Q-NET-01 need their own procedure. Lab owner, with the security reviewer | Every hardware run; Q-NET-01 | [Section 4](#4-qualification-test-catalogue) |
+
+## 3. Gates G0 to G5
+
+The order is the point: nothing writes to a firewall until sign-in, encryption, review and read
+parity are proven, and the first configuration wizard is preview-only.
+
+```mermaid
+flowchart LR
+  G0["G0 spike<br/>passed, one vSRX"] --> F(["Foundation"])
+  F --> G1["G1 foundation exit<br/>least-privilege TLS reads proven"]
+  G1 --> S(["See everything"])
+  S --> G2["G2 read parity<br/>P0 and P1 qualified, hardware, HA"]
+  G2 --> P(["Preview-only builder"])
+  P --> G3["G3 builder shipped<br/>no device writes"]
+  G3 --> C(["Change safely"])
+  C --> G4["G4 live writes<br/>Spec 002, pen test, sponsor"]
+  G4 --> O(["Operate and set up;<br/>production readiness"])
+  O --> G5["G5 customer production<br/>signed package, support statement"]
+```
+
+| Gate | Means | Entry: true before work toward it starts | Exit: all true to pass | Signs off | Status |
+| --- | --- | --- | --- | --- | --- |
+| **G0** spike | Unsigned Python runs under Junos, listens, and reads the device | A lab with veriexec enforcing | Kill tests T1, T2, T5 pass; T4 decides platform reach | Owner | **Passed** on vSRX 24.4R2-S3.5, 2026-11-23 ([gate log](#24-gate-log)) |
+| **G1** foundation exit | Least-privilege, TLS-protected on-box reads are proven | G0 passed. Specs 001 and 004 written. Lab procedure written | Q-RT-01, Q-RT-02, Q-RT-03, Q-AUTH-01, Q-AUTH-02, Q-AUTH-03, Q-TLS-01, Q-REL-01, Q-LOAD-01, Q-LOAD-02, Q-LOAD-03 and Q-SEC-01 pass and are certified. **Proposed** (D7): Spec 001 and Spec 004 acceptance criteria are met, including the recorded-reply criteria AC-001-22 and AC-004-21, with AC-004-21's replies required only on the non-cluster, single-SPU cells; its cluster and multi-SPU part moves to G2 | Security reviewer and owner; lab owner certifies the evidence | **Not reached.** No test has run |
+| **G2** read parity | An operator can do every `P0` and `P1` task read-only, on real hardware | G1 passed | Every `P0` and `P1` ledger row is `implemented` and `qualified`. **Proposed** (D7): a row `out-of-scope` with owner approval also counts, and a `replace` row counts when its replacement is implemented and qualified; the cluster and multi-SPU part of AC-004-21 is met. Q-HW-01, Q-HA-01, Q-HA-02, Q-HA-03, Q-LOG-01 and Q-MGMT-01 pass. SEs use J-Wicket on real labs and choose it over J-Web for look-ups (the spike report's test; the owner names the SEs and labs, and each records dated notes under `docs/evidence/`) | Owner; lab owner certifies | Not reached |
+| **G3** preview-only builder shipped | The Firewall Policy Builder shows a proposed change and its effect; nothing that changes the device is sent | G2 passed. [Spec 003](specs/003-firewall-policy-builder.md) and Spec 002's preview-only mode (section 12) accepted. D5 decided | Spec 003's AC-003-01 to AC-003-29 met, and its evaluator agreement check (AC-003-31) run on the lab vSRX. A preview-only build cannot reach a write RPC (Spec 002 AC-002-01, AC-002-18). Q-SEC-01 repeated over the builder's routes and preview mode. Only if D5 allows the device preview: AC-003-30, Q-CHG-08 and Q-CHG-09 pass | Owner; lab owner certifies | Not reached |
+| **G4** live writes | J-Wicket may commit configuration, through Spec 002 only | G3 passed. The write-model ADR accepted. A product sponsor named | Spec 002 built, AC-002-01 to AC-002-20 met. Q-CHG-01 to Q-CHG-16 pass. Q-SEC-02 (external penetration test) passed. Signed-package and support positions decided and recorded as ADRs | Security reviewer and owner; lab owner certifies | Not reached |
+| **G5** customer production | A customer may install J-Wicket on a production SRX | G4 passed (unless D8 decides a read-only route) | A signed package exists. A support statement is published. HA qualified: Q-HA-01 to Q-HA-03 on hardware pairs, and Q-CHG-05 and Q-CHG-12 for writes. Upgrade and restart qualified: Q-RT-05 and Q-RT-04 on every platform offered. Every platform and release offered to customers is a qualified cell | Owner, with the product organization | Not reached |
+
+Until G5, J-Wicket is not installable on a production SRX, and the project asks no one to enable a
+listener, disable J-Web or change a production firewall. The only documented way to run it on a
+device is [deploy-lab.md](deploy-lab.md): a disposable lab vSRX, a loopback bind and an SSH tunnel.
+
+### 3.1 Tests the gate definitions do not place
+
+The gate definitions name 21 of the 25 tests from Q-RT to Q-SEC by ID (G5 names Q-RT-04 and
+Q-RT-05). Four have no gate: Q-AUTH-04, Q-NET-01, Q-NET-02 and Q-NET-03. Q-RT-04 is also proposed
+earlier than G5. **Proposed** placement, for the owner (D7):
+
+| Test | Proposed gate | Why |
+| --- | --- | --- |
+| Q-NET-03 SSH local forwarding | G1 | Every G1 lab test reaches the UI through the tunnel ([ADR 0003](adr/0003-tls-off-loopback.md)); this is a precondition, not a feature |
+| Q-RT-04 survives reboot | G2 (G5 already names it) | SEs' lab devices reboot. G5 requires it in any case |
+| Q-AUTH-04 lockout versus throttle | G2 | Before several SEs share a lab device; behind the tunnel every operator shares one per-source failure budget, and a named account can be locked out deliberately ([architecture, gap 3](architecture.md#15-known-gaps-in-the-current-code)) |
+| Q-NET-01 reachability on hardware | G2 | Needed before any non-loopback listener on hardware; the tunnel needs none |
+| Q-NET-02 8443 collision | G2 | Before 8443 is relied on as the default port on hardware |
+
+### 3.2 What "qualified platform" means
+
+The ledger's `qualified` status needs "a qualified platform". **Proposed** definition (D3, D7):
+
+- A **cell** is one platform class and one release line from the [matrix](#5-qualification-matrix),
+  for example "vSRX, 24.4". The evidence names the exact model and build (for example
+  24.4R2-S3.5).
+- A cell is **qualified** when the lab owner has certified passing results on it for Q-RT-01,
+  Q-RT-02, Q-RT-03, Q-NET-03, Q-AUTH-01, Q-AUTH-03, Q-TLS-01 and Q-LOAD-01, plus Q-HW-01 for the
+  SRX300 class, and recorded replies (Q-REL-01) exist on it for every RPC in `ALLOWED_RPCS`.
+- A ledger row is **`qualified` on a cell** when its spec's acceptance tests pass against that
+  cell's recorded replies, and its UI requirements were checked on a device of that cell.
+- No cell is qualified today.
+
+### 3.3 Rules at every gate
+
+- A gate is passed only by an entry in the [gate log](#24-gate-log). Passing tests do not pass a
+  gate by themselves.
+- Evidence that is not certified does not count ([section 6](#6-evidence-rules)).
+- A failed test is a result. It is recorded the same way as a pass, and it may change the plan:
+  the charter and the risk register say what each failure would mean.
+- A gate's exit criteria change only by owner decision, recorded on this page with the date.
+
+## 4. Qualification test catalogue
+
+Each test has a purpose, a method, a pass criterion, the platforms it runs on, the gate that needs
+it, and a status with evidence. IDs are referenced from code, specs and the architecture; do not
+renumber them. Every test runs on lab equipment only, never on a production firewall, following
+[deploy-lab.md](deploy-lab.md) unless its method says otherwise. Configuration changes are made
+with `commit confirmed 5`.
+
+deploy-lab.md covers a disposable virtual SRX only, with a loopback bind and an SSH tunnel. It does
+not cover hardware, and it never binds off loopback or changes a security zone. So every run on
+hardware (any platform other than vSRX in a test's Platforms line: for example the "one hardware
+platform" runs of Q-RT-03, Q-AUTH-01 and Q-NET-03, Q-HW-01, and the hardware pairs of Q-HA-01) and
+all of Q-NET-01, which binds to fxp0 and a revenue zone, need a hardware variant of the procedure. That
+variant is not written. The lab owner writes it and the security reviewer approves it (D12) before
+any of those runs; deploy-lab.md itself is not widened beyond disposable virtual lab devices.
+
+### 4.1 How to read an entry
+
+Status is one of these states, or "spike-equivalent" (explained below the diagram):
+
+```mermaid
+stateDiagram-v2
+  [*] --> NotRun: test defined
+  NotRun --> Partial: some evidence, not the full method
+  NotRun --> Run: method followed
+  Partial --> Run: method followed
+  Run --> Passed: meets the pass criterion
+  Run --> Failed: does not
+  Passed --> Certified: lab owner checks the evidence
+  Failed --> Certified: lab owner checks the evidence
+  Certified --> NotRun: new release or platform cell
+```
+
+Status is per cell of the [matrix](#5-qualification-matrix). "Spike-equivalent" means the spike's
+daemon, `wicket_spike.py`, did what the test asks on vSRX 24.4R2-S3.5; J-Wicket's own bundle has
+not. "Spike-equivalent partial" means it met some of the pass criteria, and the entry lists which
+it met and which it did not. No test is spike-equivalent in full today. Spike-equivalent evidence
+is not certified and does not qualify a cell.
+
+A pass criterion that depends on a budget (memory, CPU, log volume) needs that budget written into
+its entry before the test runs (D9). A test run without one records numbers; it cannot pass.
+
+### 4.2 Summary
+
+| ID | Test | Gate | Status (all cells "not run" unless stated) |
+| --- | --- | --- | --- |
+| [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
+| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Spike-equivalent partial** on vSRX 24.4R2-S3.5 (no arguments, respawn, idle memory; not the refused start or the digest); bundle not run |
+| [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | Not run |
+| [Q-RT-04](#q-rt-04-survives-reboot) | Survives reboot | G2 (proposed) | Not run |
+| [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
+| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | Not run |
+| [Q-AUTH-02](#q-auth-02-radius-and-tacacs-template-users) | RADIUS and TACACS+ template users | G1 | Not run |
+| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | Not run |
+| [Q-AUTH-04](#q-auth-04-junos-lockout-and-j-wickets-throttle) | Junos lockout and J-Wicket's throttle | G2 (proposed) | Not run |
+| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | Not run |
+| [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **vSRX part spike-equivalent partial** (clear text, one port checked); hardware not run |
+| [Q-NET-02](#q-net-02-port-8443-collisions) | Port 8443 collisions | G2 (proposed) | Not run |
+| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | Not run |
+| [Q-HW-01](#q-hw-01-srx300-class-runtime-and-resources) | SRX300-class runtime and resources | G2 | Not run |
+| [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
+| [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
+| [Q-LOAD-03](#q-load-03-log-volume-from-polling) | Log volume from polling | G1 | Not run |
+| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | Not run |
+| [Q-HA-01](#q-ha-01-chassis-cluster) | Chassis cluster | G2 | Not run |
+| [Q-HA-02](#q-ha-02-identify-the-local-node) | Identify the local node | G2 | Not run |
+| [Q-HA-03](#q-ha-03-multinode-high-availability) | Multinode High Availability | G2 | Not run |
+| [Q-MGMT-01](#q-mgmt-01-central-management-signatures) | Central-management signatures | G2 | Not run |
+| [Q-LOG-01](#q-log-01-log-source-matrix) | Log source matrix | G2 | Not run |
+| [Q-SEC-01](#q-sec-01-internal-security-review) | Internal security review | G1 (repeated for G3) | Not run |
+| [Q-SEC-02](#q-sec-02-external-penetration-test) | External penetration test | G4 | Not run |
+| [Q-CHG-01 to Q-CHG-16](#411-change-protocol-q-chg-01-to-q-chg-16) | Change protocol | G4 (Q-CHG-08, Q-CHG-09 also G3) | Not run |
+
+### 4.3 Runtime
+
+#### Q-RT-01 Runtime probe
+
+- **Purpose:** record the on-box Python version, and whether each module J-Wicket needs imports,
+  for each platform and release. It settles the Python 3.9 floor
+  ([ADR 0001](adr/0001-on-box-pure-python-single-file.md)), whether `ssl` exists for Q-TLS-01,
+  and whether `paramiko` exists for Q-AUTH-01. Juniper documents only "Python 3.x" for JET
+  (**verified**, Python scripts overview); the minor version is **unknown**.
+- **Method:** [deploy-lab.md](deploy-lab.md) step 4. Copy the bundle as `jwicket_probe.py`, register
+  it without `daemonize`, and run `request extension-service start jwicket_probe.py`. The probe
+  ([`app.probe`](../src/jwicket/app.py)) prints JSON with the J-Wicket version, the Python and
+  OpenSSL versions, and `ok` or `missing: <reason>` for each module in `PROBE_MODULES`:
+  `http.server`, `ssl`, `json`, `hmac`, `threading`, `jnpr.junos`, `lxml`, `ncclient`, `paramiko`.
+  It exits non-zero if any is missing. Keep the whole output. The `--probe` argument form under
+  Junos is unverified, and spike finding F1 ([charter, section 5](charter.md#5-spike-evidence))
+  suggests it fails; record it if tried.
+- **Pass:** Python 3.9 or later, and every module `ok`. A missing module is recorded and fails the
+  test; the owner then decides (missing `ssl` changes [ADR 0003](adr/0003-tls-off-loopback.md);
+  missing `paramiko` triggers [architecture section 13](architecture.md#13-if-per-operator-sign-in-fails-q-auth-01)).
+- **Platforms:** every cell of the matrix.
+- **Status:** **partial** on vSRX 24.4R2-S3.5. The spike's script ran to its own startup check, so
+  `http.server` imported; its T5 reads worked through PyEZ, so `jnpr.junos` imported and worked;
+  `ncclient` appeared in the logs. The Python version, `ssl` and `paramiko` were not recorded.
+  Running Python directly from the shell was refused by veriexec, as expected. Evidence:
+  [notebook, results](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far);
+  [charter, notes on the evidence](charter.md#notes-on-the-evidence). J-Wicket's probe has not run.
+
+#### Q-RT-02 Daemonized bundle, respawn and idle footprint
+
+- **Purpose:** show that J-Wicket's own bundle, `dist/jwicket.py`, runs as a daemonized JET
+  application with no arguments, that Junos restarts it, and what it costs at rest.
+- **Method:** [deploy-lab.md](deploy-lab.md) steps 1 to 6. Build the bundle and record its SHA-256
+  and `payload_sha256`. Run the `jwicket_selftest.py` copy; its `payload_sha256` must match the
+  build. Register `jwicket.py` with the four baseline statements and `commit confirmed 5`. Check
+  `/var/db/jwicket/jwicket.log` for `listening on 127.0.0.1:8443 tls=False backend=...`, then
+  confirm. Stop the process with `kill`, then with `kill -9`, and time each restart. Commit a change
+  to the application's statements and check it restarts. Start once with a bad settings file and
+  check `startup-refused.txt` and Junos's "thrashing, not restarted". Record where a daemonized
+  app's standard error goes, because with `[log] file` and `[log] audit_file` unset (the defaults)
+  the diagnostic log and the audit trail go only there. Record resident and virtual memory after
+  ten idle minutes, and with one signed-in operator.
+- **Pass:** the daemon listens with no arguments; it restarts without operator action after both
+  kills; a refused start writes its reason where `file show` can read it; the self-test digest
+  matches the build; idle memory is recorded (the budget for small routing engines is Q-HW-01's).
+- **Platforms:** lab vSRX on each release; hardware under Q-HW-01.
+- **Status:** **spike-equivalent partial** on vSRX 24.4R2-S3.5 for `wicket_spike.py`.
+  - Met by the spike daemon: it listened with no `arguments` statement (with `daemonize`, Junos
+    started it at commit; it read its options from a file); it restarted without operator action
+    after `kill` and `kill -9` with `respawn-on-normal-exit` (without it, a clean stop left it
+    down); committing a change to its statements restarted it; idle memory was recorded, about
+    22 MB resident and 36 MB virtual.
+  - Not met: no refused start was tried, so nothing shows a reason written where `file show` can
+    read it; there was no bundle, so no self-test digest was compared with a build; memory with a
+    signed-in operator was not recorded; restart times were not timed. Evidence:
+  [notebook, daemon supervision](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far),
+  [report, what we tested](evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md#what-we-tested),
+  [`junos/baseline.set`](evidence/2026-11-23-vsrx-spike/junos/baseline.set). The spike daemon read
+  options from `/var/tmp/wicket.args`; J-Wicket reads `/var/db/jwicket/jwicket.ini`. J-Wicket's
+  bundle has not been started by Junos.
+
+#### Q-RT-03 Sibling-module imports
+
+- **Purpose:** decide whether the one-file bundle is required. Whether an unsigned script in
+  `/var/db/scripts/jet/` may import a sibling `.py` file is **unknown**; no Juniper page allows or
+  forbids it. The unsigned JET package format documents extra module files (`srcs`) (**verified**,
+  JET Developer Guide; not tried).
+- **Method:** with lab-only test files (not J-Wicket): an entry script that imports a sibling
+  module, then one that imports a module from a subdirectory package, each owned and moded as
+  deploy-lab.md step 2 requires. Register each without `daemonize` and run it with
+  `request extension-service start`. Record the output, any veriexec line in the kernel log, and
+  `cscript` messages. If the lab owner has the tooling, also try the unsigned package form.
+  Also record `sys.path` as Junos starts the app (`cscript -mjet ... -f <file>`, spike evidence):
+  whether the script's directory is on it. The bundle removes that directory before any other
+  import and refuses to start if a module was loaded from it; its self-test reports
+  `path_removed` and `foreign_modules`, so run the `jwicket_selftest.py` copy with a harmless
+  lab-only `json.py` beside it and record both fields.
+- **Pass:** a recorded answer, with the exact error if imports fail. Either answer passes. "Imports
+  work" makes the bundle optional, not wrong ([ADR 0001](adr/0001-on-box-pure-python-single-file.md)).
+  The self-test with a planted `json.py` reports no foreign module.
+- **Platforms:** lab vSRX on each release; one hardware platform.
+- **Status:** not run.
+
+#### Q-RT-04 Survives reboot
+
+- **Purpose:** J-Wicket comes back after a device reboot with no operator action, with its files
+  and settings intact.
+- **Method:** with the Q-RT-02 set-up running, reboot the device from the CLI. After boot, check the
+  process, the log, and the bundle's presence, owner, mode and SHA-256, and the settings
+  directory's modes. On hardware, repeat with a power cycle. Record the time from boot to
+  `listening on`.
+- **Pass:** listening after boot without operator action; files byte-identical; permissions
+  unchanged; the audit trail shows the stop and the start.
+- **Platforms:** lab vSRX; each hardware platform; the Q-HA-01 cluster pair.
+- **Status:** not run. The spike did not test reboot (T6 covered `kill` and `kill -9` only).
+
+#### Q-RT-05 Survives a Junos upgrade
+
+- **Purpose:** record what happens to `/var/db/scripts/jet/`, `/var/db/jwicket/` and the
+  extension-service statements across an upgrade. No Juniper page read says (**unknown**). The
+  `file (JET)` statement page describes `respawn-on-normal-exit` as restarting an app "after you
+  exit the application normally, such as when you upgrade the JET application" (**verified**,
+  [`file (JET)`](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/file-edit-system-jet.html));
+  that is an upgrade of the app, not of Junos, and says nothing about Junos upgrades.
+- **Method:** with J-Wicket running on release N, upgrade to N+1 by the platform's documented
+  procedure, recorded verbatim. After the reboot, check the files, owner, mode, SHA-256, the
+  configuration statements and the daemon; run Q-RT-01 on the new release. Repeat a downgrade.
+- **Pass:** after the upgrade, either J-Wicket runs with unchanged files, or it does not start and
+  the documented recovery restores it. In no case does a changed file run unnoticed: the bundle
+  self-test or the JET `checksum` option (**verified** to exist on the `file (JET)` statement;
+  not used yet) detects it.
+- **Platforms:** lab vSRX and each hardware platform, across each release step in the matrix.
+- **Status:** not run.
+
+### 4.4 Authentication and authorization
+
+#### Q-AUTH-01 Per-operator NETCONF to loopback
+
+- **Purpose:** prove [ADR 0002](adr/0002-junos-delegated-sign-in.md): on-box Python opens a
+  NETCONF-over-SSH session to the device's own loopback as another local user, with that user's
+  password, and every RPC on it runs with that user's login class.
+- **Method:** [deploy-lab.md](deploy-lab.md) steps 5 to 7: `set system services netconf ssh`,
+  backend `netconf`, the SSH tunnel. Sign in once with a super-user account and once with a
+  lab-only account in a read-only class. For each, record the J-Wicket audit records, the device's
+  `UI_NETCONF_CMD` lines, and what the UI shows. Sign in with a wrong password. Then give the
+  daemon account an SSH key that the lab account accepts (in its `~/.ssh`, and named in its
+  `~/.ssh/config`) and sign in as that account with a wrong password: J-Wicket tells PyEZ not to
+  offer keys or read the SSH config (`look_for_keys=False`, `ssh_config` set to `/dev/null`), but
+  PyEZ ignores keyword arguments it does not know, so only this test shows that the on-box PyEZ
+  honours them. Remove the key afterwards. Sign out, let a session time out, and check each time
+  that the device session is gone. Sign in three times as the same account and check that the first
+  session is closed (`max_sessions_per_user`, default 2, `session_replaced`). Fill the session cap
+  (`max_sessions`) with distinct accounts.
+- **Pass:** both accounts sign in; the device attributes every J-Wicket RPC to the signed-in
+  operator, not to the daemon's account; a wrong password is refused by Junos and shown as an
+  operator-safe message, also when the daemon account holds an accepted key; sign-out, timeout and
+  a second sign-in by the same account end the device session; no password appears in any
+  J-Wicket file, and a failed sign-in appears in the audit trail as `user_hash`, not as the name.
+- **Platforms:** lab vSRX on each release; one hardware platform.
+- **Status:** not run. The spike's reads ran as the daemon's account (`jcluser`, class
+  `j-super-user`) through a no-argument local `Device()` session. That is not this test.
+
+#### Q-AUTH-02 RADIUS and TACACS+ template users
+
+- **Purpose:** remote-authenticated users get their mapped class over NETCONF, so what they see in
+  J-Wicket is what their class allows. That the template supplies the class for NETCONF is
+  **inferred**; no Juniper page read says it for NETCONF in so many words.
+- **Method:** lab RADIUS and TACACS+ servers. Users mapped to local templates with different
+  classes, through the RADIUS `Juniper-Local-User-Name` attribute and the TACACS+ `local-user-name`
+  attribute (**verified**, Juniper RADIUS and TACACS+ pages); a user with no mapping, to exercise
+  the `remote` template fallback; a user given allow or deny configuration regexps by the server.
+  Sign in to J-Wicket as each and compare with what the same user sees on the CLI.
+- **Pass:** each user's J-Wicket reads equal their CLI reads; regexps behave over NETCONF as on the
+  CLI, or the difference is recorded; the fallback behaves as documented.
+- **Platforms:** lab vSRX on each release.
+- **Status:** not run.
+
+#### Q-AUTH-03 Least privilege
+
+- **Purpose:** each login class sees exactly what Junos allows; a denied read renders as denied,
+  never as empty; and it settles whether Junos omits configuration a class cannot see or refuses
+  the read ([architecture section 7](architecture.md#omit-or-refuse)).
+- **Method:** classes: predefined `read-only` and `operator`; a custom class with `view`,
+  `view-configuration` and `security`; one without `security`; one with deny-configuration regexps
+  over part of `security policies`; a logical-system-bound and a tenant-bound class. For each, sign
+  in and read every J-Wicket endpoint (inventory, sessions, log sources, log tail, report, buffer),
+  and capture each RPC's raw reply or error with lab-only tooling. Compare with the CLI as the same
+  user.
+- **Pass:** every class sees what it may and nothing more; every refused read shows `denied` with
+  the operator-safe message; every omitted subtree is recorded and the UI warns instead of showing
+  "nothing configured"; the minimum class for each view is recorded; for scope-bound classes, the
+  reply's root is recorded and the scope label is right (Spec 001 open question 7).
+- **Platforms:** lab vSRX on each release; a platform that supports logical systems and tenant
+  systems (the set-up Q-CHG-13 shares).
+- **Status:** not run.
+
+#### Q-AUTH-04 Junos lockout and J-Wicket's throttle
+
+- **Purpose:** J-Wicket's sign-in limits and Junos's own login retry and lockout options interact
+  predictably. By default J-Wicket counts only failed sign-ins that reached Junos: 5 a minute for
+  one user name from one source address (`login_failures_per_user_per_min`), 20 a minute from one source
+  address over all names (`login_failures_per_source_per_min`), with at most 2 sign-ins checked at once
+  (`login_concurrent`) ([architecture section 3.2](architecture.md#32-sign-in)). Behind the tunnel
+  every source is `127.0.0.1`, so the per-source budget is shared, and a named account can be
+  locked out on purpose by failing its sign-in, as Junos retry options allow.
+- **Method:** configure Junos's login retry options under `[edit system login]` (the exact
+  statements are recorded from the device with `?`). From one tunnel, then from two operators on
+  the same tunnel, send wrong passwords for one account, then for many names. Send requests that
+  never reach Junos (bad JSON, empty fields, a cross-origin `Origin`) and check they cost nothing.
+  Record J-Wicket's 429 responses (with `retry_after_s`), Junos's lockout, the error a locked
+  account's NETCONF sign-in returns, and the message J-Wicket shows.
+- **Pass:** the interaction is recorded; requests that never reach Junos lock nobody out; failures
+  for one account do not block another account's sign-in from a different name, except through
+  the shared per-source budget, which is recorded; each case shows an operator-safe message; the
+  defaults are confirmed or changed from the record.
+- **Platforms:** lab vSRX.
+- **Status:** not run.
+
+### 4.5 Transport and network
+
+#### Q-TLS-01 On-box TLS
+
+- **Purpose:** prove [ADR 0003](adr/0003-tls-off-loopback.md) on a device: the on-box `ssl` module
+  serves TLS 1.2 or later with a key the daemon's account can read, and a certificate provisioning
+  path exists.
+- **Method:** after Q-RT-01 shows `ssl`: create a key and certificate off the device; place them as
+  the settings file rules require (owned by the daemon's account or root, key mode `0600`); set
+  `tls_cert` and `tls_key` with the bind still on loopback; connect through the tunnel with a TLS
+  client on the workstation and record the protocol versions offered and refused, compression and
+  handshake time. Then try the candidate on-device paths (the Junos PKI local certificate store,
+  and a certificate J-Wicket generates). Record the settings refusals for wrong owner and mode.
+- **Pass:** TLS 1.2 handshakes succeed (TLS 1.3 recorded if the on-box OpenSSL offers it); TLS 1.0
+  and 1.1 are refused; the `Secure` cookie, the `__Host-jwicket-<8 hex>` cookie name and HSTS are
+  present; bad file modes, and a directory above a TLS file that another account owns or can
+  write, refuse the start; one provisioning path is documented, and a spec chooses it.
+- **Platforms:** lab vSRX on each release; hardware under Q-HW-01 for handshake cost.
+- **Status:** not run. The spike's T8 (TLS) was not run.
+
+#### Q-NET-01 Reachability through fxp0 and a revenue zone
+
+- **Purpose:** a TLS listener off loopback is reachable through the management port and through a
+  revenue interface in a security zone that allows only `webapi-ssl`, on hardware.
+- **Method:** on lab hardware with Q-TLS-01 passed: bind to the fxp0 address where the model has
+  one; then bind to a revenue interface in a zone with only
+  `host-inbound-traffic system-services webapi-ssl` ([`junos/zone-access.set`](evidence/2026-11-23-vsrx-spike/junos/zone-access.set)).
+  Test from a host in that zone; confirm it fails with no host-inbound statement; record what else
+  the setting admits. Record per model whether it has a dedicated management port. The J-Web
+  24.4 guide's Table 1 (factory defaults,
+  [j-web-security-starting.html](https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/topics/topic-map/j-web-security-starting.html))
+  gives SRX300 and SRX320 management through ge-0/0/1 to ge-0/0/6, and SRX340, SRX345 and SRX380
+  through MGMT/fxp0 (**verified** as factory defaults); that SRX300 and SRX320 have no dedicated
+  management port at all is **inferred** from that table. The spike notebook treats the whole
+  SRX300 class as having no fxp0, which the table contradicts for SRX340, SRX345 and SRX380.
+  **Proposed** by [Spec 003](specs/003-firewall-policy-builder.md#15-qualification-needed): also
+  record whether security policies with `to-zone junos-host` affect management access through fxp0
+  or a revenue zone, and J-Wicket's own loopback NETCONF session.
+- **Pass:** reachable with exactly `webapi-ssl` and not without it; no other port opened by the
+  setting; the result recorded per model.
+- **Platforms:** each hardware platform in the matrix.
+- **Status:** **vSRX part spike-equivalent partial**, on vSRX 24.4R2-S3.5. T3: three of three
+  requests from the internet reached the daemon through vLabs port forwarding to fxp0. T4: from a
+  vMX host to ge-0/0/0 in zone `spike`, no host-inbound statement failed,
+  `system-services all` did not admit the custom port, `any-service` did (too broad to ship), and
+  on TCP 8443 `webapi-ssl` alone admitted it. That filtering is by port is **inferred** from that
+  one observation.
+  - Met for the revenue zone on that vSRX: reachable on TCP 8443 with exactly `webapi-ssl`.
+    "Not without a host-inbound statement" was observed on TCP 3000 only (notebook, T4 at 04:15);
+    it is not recorded for 8443.
+  - Not met: the listener was clear text, not TLS (Q-TLS-01 has not run); the daemon bound
+    `0.0.0.0`, not the fxp0 address, and reached fxp0 only through vLabs forwarding; only TCP 8443
+    was checked, so whether `webapi-ssl` opens any other port is not known; nothing was recorded on
+    hardware or per model. Evidence:
+  [notebook, results](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far).
+  Hardware not run.
+
+#### Q-NET-02 Port 8443 collisions
+
+- **Purpose:** J-Wicket's default port, 8443, does not collide with a Junos service that may listen
+  on it, and a collision is caught at startup.
+- **Method:** on a lab device, enable in turn the REST API (`system services rest`; its documented
+  default ports are 3000 and 3443, **verified** in the J-Web 24.4 Basic Settings topic), J-Web's
+  `system services web-management https` with and without a port, and the Web API service
+  (`system services webapi`; that the `webapi-ssl` host-inbound name stands for its HTTPS port is
+  **inferred**). Start J-Wicket on 8443 each time and record which process
+  holds the port and J-Wicket's startup refusal.
+- **Pass:** every collision refuses the start with a message naming the port; if a Junos service
+  defaults to 8443, the J-Wicket default changes by ADR.
+- **Platforms:** lab vSRX; one hardware platform; each release.
+- **Status:** not run.
+
+#### Q-NET-03 SSH local forwarding
+
+- **Purpose:** the lab access path, `ssh -L 8443:127.0.0.1:8443 <user>@<device>`, works, and any
+  configuration it needs is known ([ADR 0003](adr/0003-tls-off-loopback.md)).
+- **Method:** [deploy-lab.md](deploy-lab.md) step 7 on a box with default SSH settings, with a
+  super-user account and a read-only-class account. If the tunnel reports "administratively
+  prohibited", check the statement deploy-lab.md names (unverified) with `?`, and record it.
+- **Pass:** the tunnel carries the UI; any statement it needed is recorded verbatim with the
+  release; whether forwarding depends on the login class is recorded.
+- **Platforms:** lab vSRX on each release; one hardware platform.
+- **Status:** not run.
+
+### 4.6 Hardware and load
+
+#### Q-HW-01 SRX300-class runtime and resources
+
+- **Purpose:** whether J-Wicket can run on the smallest target routing engine, and at what cost.
+  The spike report calls this "the largest open risk". If the class cannot run it, J-Wicket becomes
+  a vSRX and larger-platform tool.
+- **Method:** on the smallest SRX300-class model the lab can get (record the model and its memory):
+  run Q-RT-01, Q-RT-02, Q-AUTH-01 and Q-TLS-01. Then measure J-Wicket's memory and CPU, and the
+  routing engine's CPU and memory, at idle; with one and with four (`max_sessions`) signed-in
+  operators; while parsing a large lab configuration (thousands of policies); with Sessions
+  polling 2,000 rows and Logs tailing a 1 MB file (Spec 004 section 11). Record flash space used.
+  Repeat Q-LOAD-01 there.
+- **Pass:** every measurement within the budget the owner writes into this entry before the run
+  (D9). None is set yet.
+- **Platforms:** SRX300 class, each release in the matrix.
+- **Status:** not run. Nothing in this project has run on SRX hardware.
+
+#### Q-LOAD-01 Sustained UI load
+
+- **Purpose:** J-Wicket's cost to the routing engine and to mgd under sustained use, and whether it
+  slows other administrators.
+- **Method:** on a lab device with a large configuration: four operators for an hour, each with
+  Policies, Sessions and Logs open at their default intervals; then the spike's planned T7, ten
+  requests per second for five minutes. Record J-Wicket's memory and CPU, routing-engine CPU and
+  memory, mgd CPU, NETCONF sessions and response times. Time a CLI `show` and `commit check` before
+  and during the load.
+- **Pass:** within the budget set before the run (D9); J-Wicket's memory does not grow over the
+  hour; no errors other than designed 429 responses; the CLI timings recorded.
+- **Platforms:** lab vSRX (G1); SRX300 class with Q-HW-01 (G2).
+- **Status:** not run. The spike measured idle only.
+
+#### Q-LOAD-02 Session-list pull cost
+
+- **Purpose:** validate `MAX_UNFILTERED = 5000` in
+  [`junos/sessions.py`](../src/jwicket/junos/sessions.py). A full session-table pull makes the data
+  plane send every session to the routing engine (a 2015 community-forum reply quoting the title
+  of Juniper KB28956; the KB was not read).
+- **Method:** drive 1,000, 5,000 and 20,000 sessions through the lab device from lab-only hosts.
+  For each, measure routing-engine CPU, mgd and time for the summary and list reads exactly as
+  J-Wicket sends them, at the default poll interval, with and without device-side filters. On a
+  cluster, record each node's counts and whether a node's count includes its Backup copies
+  (J-Wicket now takes the largest node's count; [architecture, gap 2](architecture.md#15-known-gaps-in-the-current-code)).
+  Record what happens when the summary read fails (J-Wicket now lists nothing: `count-unknown`).
+- **Pass:** at 5,000 matching sessions the list read at the default interval stays within the
+  budget (D9); above the threshold J-Wicket refuses before pulling; the threshold is confirmed or
+  changed per platform class.
+- **Platforms:** lab vSRX; SRX300 class; a multi-SPU platform (the SRX5000 line is the likely
+  candidate, **inferred**); a chassis cluster.
+- **Status:** not run.
+
+#### Q-LOAD-03 Log volume from polling
+
+- **Purpose:** measure the system log lines J-Wicket's reads add. Junos logs `UI_NETCONF_CMD` when
+  a user runs a command through the NETCONF API, at info level, to the authorization facility
+  (**verified**, Juniper System Log Explorer). That every J-Wicket RPC produces one is
+  **inferred**.
+- **Method:** with a syslog file that records authorization messages at info level, open one view
+  at a time at 2, 5, 10 and 30 second intervals and count lines per minute; count lines per
+  inventory read; work out how soon `messages` rotates at its default size.
+- **Pass:** lines per view per minute recorded; the one-line-per-RPC inference confirmed or
+  corrected; default intervals confirmed or changed so that one open view stays within the budget
+  (D9).
+- **Platforms:** lab vSRX on each release; SRX300 class.
+- **Status:** not run.
+
+### 4.7 Release coverage
+
+#### Q-REL-01 Recorded replies
+
+- **Purpose:** replace synthetic fixtures with recorded replies for every allowlisted RPC, on at
+  least three releases and two platforms, and show the parsers pass on them. Every adapter today
+  parses fixtures written from documentation and YANG, not from a device.
+- **Method:** for every RPC in `ALLOWED_RPCS` and every configuration filter (`INVENTORY_FILTER`,
+  `INVENTORY_FILTER_MINIMAL`, `LOGS_FILTER`, read from the committed database with inheritance and
+  group annotations), capture the reply over NETCONF as a lab account, and the error each returns
+  when denied or unsupported. Record the CLI form of each filtered read with `| display xml rpc`.
+  Cover the specifics [Spec 001](specs/001-policy-inventory.md#11-qualification-needed) and
+  [Spec 004](specs/004-live-sessions-and-logs.md#11-qualification-needed) list (namespaces,
+  `junos:group` placement, `default-policy` encoding, cluster `device-stats` layout, the standalone
+  cluster error, session list and summary on a branch device, a cluster and a multi-SPU platform,
+  `get-log` encoding, the report wrapper, where an SPU label sits in a per-SPU session list, whether
+  the narrowed inventory filter returns only the selected `[edit security]` children and each
+  logical or tenant system's key and `inactive` attribute, where `junos:comment` elements sit),
+  and what
+  [Spec 003](specs/003-firewall-policy-builder.md#15-qualification-needed) lists for its ownership
+  read. **Proposed** (Spec 001 open question 1, Spec 003 section 15): record
+  `show security match-policies` and `show security shadow-policies` for the lab rule base, so the
+  displayed order and the builder's local evaluator can be compared with the device's answers.
+  Store each set under
+  `tests/fixtures/recorded-<platform>-<release>/` with a `SOURCE.md`
+  ([fixtures README](../tests/fixtures/README.md)), and run the parser acceptance tests on it
+  (AC-001-22, AC-004-21).
+- **Pass:** recorded replies for every allowlisted RPC on at least three releases and two
+  platforms; the acceptance tests pass on all of them; every difference from the synthetic
+  fixtures is either fixed in a parser or recorded as a release difference.
+- **Platforms:** proposed (D3): vSRX and SRX300 class on 22.4, 23.4 and 24.4, plus a chassis
+  cluster and a multi-SPU platform for Spec 004. "Each qualified release" in Spec 002 section 19
+  means this release set.
+- **Status:** not run. No recorded reply exists. The spike called `get-software-information` and
+  the flow-session summary as the daemon's account and recorded neither reply.
+
+### 4.8 High availability
+
+#### Q-HA-01 Chassis cluster
+
+- **Purpose:** script placement, which node serves the UI, and behaviour on RG0 failover. Junos
+  script synchronization covers commit, event, lib, op and SNMP scripts and does not list JET
+  (**verified**, Juniper script synchronization page), so the file must be placed on each node
+  (**inferred**).
+- **Method:** on a lab chassis-cluster pair: place the bundle on each node by hand; record what each
+  node's daemon does with the shared configuration and with or without its own file; read the
+  inventory and sessions on each node; perform a manual RG0 failover (the CLI recorded) and record
+  what each node's J-Wicket does to signed-in operators; record `get-chassis-cluster-status` and
+  the session Active and Backup copies on each node for Q-REL-01.
+- **Pass:** a verified placement procedure written into the lab procedure; each node's J-Wicket runs
+  or fails closed; after failover, operators can sign in on the new primary; whether one node's
+  session count includes its Backup copies settled (J-Wicket takes the largest node's count).
+- **Platforms:** a lab chassis-cluster pair (vSRX if the lab supports it); a hardware pair before
+  G5.
+- **Status:** not run.
+
+#### Q-HA-02 Identify the local node
+
+- **Purpose:** the scope banner says which node is serving the page and its RG0 role. Today
+  `ha.local_node` is always empty: the cluster status reply does not say which node answered
+  ([`junos/facts.py`](../src/jwicket/junos/facts.py)).
+- **Method:** on the Q-HA-01 pair, find a read that identifies the local node, from replies
+  recorded on each node before and after failover. Any new RPC follows the allowlist rule.
+- **Pass:** `ha.local_node` is right on both nodes before and after failover, from a recorded reply,
+  never guessed.
+- **Platforms:** the Q-HA-01 pair.
+- **Status:** not run.
+
+#### Q-HA-03 Multinode High Availability
+
+- **Purpose:** detect Multinode High Availability (MNHA) and define J-Wicket's behaviour on each
+  node. MNHA is two firewalls "presenting themselves as independent nodes to the rest of the
+  network", and Juniper recommends configuration groups with `commit peers-synchronize`
+  (**verified**, Juniper MNHA page). J-Wicket detects MNHA from the presence of an active (not
+  deactivated) `chassis high-availability` only (**inferred** to be enough).
+- **Method:** on a lab MNHA pair: capture the `chassis high-availability` configuration and, with
+  lab-only tooling, `get-chassis-high-availability-information` (not allowlisted); run J-Wicket on
+  each node; record session fields, and whether `commit peers-synchronize` is configured.
+- **Pass:** MNHA detected on both nodes; the UI says it is one node of two independent devices; any
+  RPC added goes through the allowlist rule with its recorded reply.
+- **Platforms:** a lab MNHA pair (record the platform).
+- **Status:** not run.
+
+### 4.9 Coexistence and logs
+
+#### Q-MGMT-01 Central-management signatures
+
+- **Purpose:** record how Security Director, Security Director Cloud and Mist appear in a device's
+  configuration, and what each does after a change made on the box
+  ([ADR 0009](adr/0009-central-management-coexistence.md)). That an outbound-SSH client means one
+  of them is **inferred**.
+- **Method:** one lab device per manager. Capture the `system services outbound-ssh` clients and
+  any other configuration the manager adds (secrets redacted). Check J-Wicket's "also managed
+  from" banner. Make a CLI change as a stand-in for a future J-Wicket change and record how each
+  manager reacts. Shares a set-up with Q-CHG-06.
+- **Pass:** a signature per manager recorded and the detection rules updated; the banner names each
+  correctly; each manager's out-of-band behaviour recorded, and Spec 002's acknowledgement text
+  corrected to match; what detection cannot see (management over plain inbound NETCONF) stated.
+- **Platforms:** one device each for Security Director, Security Director Cloud and Mist.
+- **Status:** not run.
+
+#### Q-LOG-01 Log source matrix
+
+- **Purpose:** know where security logs are for each security log mode and platform, so the Logs
+  view never shows an unexplained empty pane ([Spec 004](specs/004-live-sessions-and-logs.md),
+  [architecture section 9](architecture.md#9-security-logging-modes)). The on-box reporting platform
+  list does not include the SRX5000 line, and J-Web 24.4's six log grids (not its System log page)
+  are "available on all the SRX Series Firewalls except the SRX5000 line" (**verified**); that
+  on-box reporting is absent there is **inferred**. J-Wicket still offers a configured report there,
+  and in event mode, with a note.
+- **Method:** for each cell: record the effective default mode (the vSRX default is documented two
+  ways, Spec 004 open question 12), what lands in the routing-engine buffer in event mode, whether
+  on-box reporting exists, which report types accept `expression`, how `count` orders records with
+  and without `descending` (J-Wicket sends `descending` on a first read, on the inference that the
+  default is oldest first), and the time zone of report times. Compare with J-Wicket's sources
+  card.
+- **Pass:** the matrix is recorded; the sources card matches it on every cell; the default-mode
+  table in [`junos/logs.py`](../src/jwicket/junos/logs.py) is corrected from it.
+- **Platforms:** every platform in the matrix, the SRX5000 line in particular.
+- **Status:** not run.
+
+### 4.10 Security
+
+#### Q-SEC-01 Internal security review
+
+- **Purpose:** review J-Wicket against the failure classes of J-Web's 2023 to 2025 advisories
+  ([architecture section 14](architecture.md#14-threat-model)) before least-privilege reads are
+  called proven.
+- **Method:** the security reviewer reviews a tagged commit and its bundle SHA-256: the threat
+  model, every control and its tests ([SECURITY.md](../SECURITY.md)), the
+  [known code gaps](architecture.md#15-known-gaps-in-the-current-code), and the open questions
+  assigned to the security reviewer (Spec 001 questions 8 and 13; Spec 004 questions 1, 7, 9 and
+  14). Spec 001 question 13 and Spec 004 question 14 are one browser-side pair: query state in the
+  URL hash, and saved query text in `localStorage`.
+  Targeted testing against the development server and a lab vSRX. Findings are reported
+  privately, as SECURITY.md says. Repeated for G3 to cover preview-only mode (Spec 002 section 17).
+- **Pass:** a written review; no open finding the reviewer rates high or critical; every accepted
+  residual risk recorded in SECURITY.md.
+- **Platforms:** the code, the development server, a lab vSRX.
+- **Status:** not run. No reviewer is named (D1).
+
+#### Q-SEC-02 External penetration test
+
+- **Purpose:** an independent test before any live write path ships.
+- **Method:** an external tester, scoped by the owner and the security reviewer: the bundle on lab
+  equipment with TLS on a non-loopback listener, and the write path under G4 conditions.
+- **Pass:** report delivered; no unresolved finding rated high or critical; fixes retested; the
+  security reviewer signs off.
+- **Platforms:** lab vSRX and one hardware platform.
+- **Status:** not run.
+
+### 4.11 Change protocol: Q-CHG-01 to Q-CHG-16
+
+Defined, with purpose, method, pass criterion and platforms, in
+[Spec 002 section 19](specs/002-change-protocol.md#19-qualification-tests-q-chg-01-to-q-chg-16).
+All are G4 tests; Q-CHG-08 and Q-CHG-09 also decide G3 if the owner allows a device preview (D5).
+None has run, and none can until Spec 002 is built.
+
+| ID | Test |
+| --- | --- |
+| Q-CHG-01 | Lock and candidate contention with CLI and J-Web users |
+| Q-CHG-02 | Commit confirmed rescues a change that cuts the management path |
+| Q-CHG-03 | Rollback correctness |
+| Q-CHG-04 | Group-owned and protected edits refused |
+| Q-CHG-05 | Chassis cluster commit and synchronize |
+| Q-CHG-06 | Out-of-band conflict with Security Director and Security Director Cloud |
+| Q-CHG-07 | Permission-denied and partial loads |
+| Q-CHG-08 | Commit scripts and groups altering the result |
+| Q-CHG-09 | Private copy semantics |
+| Q-CHG-10 | Device reboot or power loss during the confirm window |
+| Q-CHG-11 | Session loss, J-Wicket restart and other commits during the window |
+| Q-CHG-12 | MNHA per-node commits and peers-synchronize |
+| Q-CHG-13 | Logical-system and tenant-bound operators |
+| Q-CHG-14 | Commit comments, history and syslog attribution |
+| Q-CHG-15 | Stale preview detection |
+| Q-CHG-16 | Commit duration and RPC timeouts |
+
+### 4.12 Proposed additions
+
+Raised by other documents, with no ID yet. The owner decides whether each becomes a test (D10).
+Additions to an existing test's method are written into that test, marked **proposed** (Q-NET-01,
+Q-REL-01).
+
+| Item | Why | Raised in |
+| --- | --- | --- |
+| **J-Web 24.4 reference observation** on the lab device: what the Commit Configuration menu's options do (the autorollback timer, the confirm step, the diff format, "preferred way", shared or private candidate, behaviour under a CLI exclusive lock); whether the PPPoE and NAT wizards exist and their steps; the Setup Wizard's Tap-mode statements; whether Software Management > Install Package still appears | The 24.4 guide documents these by name only, and parity is measured against what J-Web does | [Catalog, unknowns](catalog.md#unknowns-and-what-settles-them); [Spec 002, open question 16](specs/002-change-protocol.md#20-open-questions) |
+| **Junos-FIPS mode**: whether unsigned JET applications may run at all | No test covers it; the charter proposes a non-goal instead (D6) | [Charter, section 7](charter.md#junos-fips-mode) |
+
+## 5. Qualification matrix
+
+Rows are platform classes, columns are release lines. The list is the owner's to confirm (D3); it
+is also the release set for Q-REL-01. A cell holds the status of the qualification tests on that
+platform and release, and is "qualified" only as [3.2](#32-what-qualified-platform-means) defines.
+
+| Platform | 22.4 | 23.4 | 24.4 |
+| --- | --- | --- | --- |
+| vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5 only**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). Every other test, and J-Wicket's own bundle: not run. Not qualified |
+| SRX300 class | not run | not run | not run |
+| SRX1500 | not run | not run | not run |
+| SRX4600 | not run | not run | not run |
+| SRX5000 line | not run | not run | not run |
+
+Notes on the cells:
+
+- **vSRX, 24.4:** the evidence is the [spike packet](evidence/2026-11-23-vsrx-spike/README.md): one
+  Juniper vLabs sandbox, veriexec enforcing (`loaded active enforce`), 23 to 24 November 2026. The
+  spike's lab token crossed the internet in clear text and is treated as burned.
+- **SRX300 class:** Q-HW-01 runs here. Record the exact model; the spike report names the SRX300,
+  SRX320 and SRX345 as candidates.
+- **SRX5000 line:** on-box reporting is not on its platform list; Q-LOG-01 records what is there.
+- **Clusters and MNHA** are set-ups on these platforms, not separate rows: Q-HA-01 and Q-HA-02 need
+  a chassis-cluster pair, and Q-HA-03 an MNHA pair, on a platform the lab owner names.
+- **Release lines:** a column covers its release line; each evidence record names the exact build.
+  Python 3 for JET exists from 20.2R1 (**verified**, Python scripts overview), so all three columns
+  are in range; the minor version per release is Q-RT-01's to record.
+
+## 6. Evidence rules
+
+What counts as qualification evidence:
+
+1. **Lab equipment only.** A disposable or dedicated lab device, never a production firewall.
+2. **Pinned build.** The commit, the bundle's file SHA-256 and its `payload_sha256` are recorded.
+   A result applies to that build; the lab owner decides whether a later build needs a re-run.
+3. **Method as written.** The test's method on this page (or in Spec 002 for Q-CHG tests) was
+   followed, and every deviation is written down.
+4. **Raw output kept.** Probe and self-test JSON, J-Wicket's log and audit trail, the device's
+   syslog lines, CLI transcripts and captured replies, with secrets redacted and the redaction
+   described.
+5. **Filed in the repository.** Results go in a dated directory under `docs/evidence/`, next to the
+   spike record. Recorded replies go under `tests/fixtures/recorded-<platform>-<release>/` with a
+   `SOURCE.md`. [CONTRIBUTING.md](../CONTRIBUTING.md#add-a-qualification-result) gives the layout.
+6. **Certified.** The lab owner checks the evidence against the method and the pass criterion in
+   the pull request that adds it. Only then does this page's status change to certified.
+7. **Never edited.** Evidence directories are not edited after they merge, as with the spike
+   packet. Corrections are dated notes added beside them.
+
+## 7. Roadmap
+
+Six phases, each ending at a gate, mapped to the ledger priorities and specs. No dates: the pace
+depends on D4.
+
+```mermaid
+flowchart TB
+  subgraph P1["1 Foundation: P0"]
+    S001["Spec 001 policy inventory"]
+    S004["Spec 004 live sessions and logs"]
+    FND["Junos sign-in, TLS, settings,<br/>audit trail, bundle, lab procedure"]
+  end
+  subgraph P2["2 See everything: P1"]
+    READ["Read-only specs per area,<br/>numbered when proposed"]
+  end
+  subgraph P3["3 Preview-only builder"]
+    S003["Spec 003 Firewall Policy Builder"]
+    S002P["Spec 002 section 12, preview-only mode"]
+  end
+  subgraph P4["4 Change safely: P2"]
+    S002["Spec 002 change protocol, built"]
+    KINDS["Change kinds for policies,<br/>objects, NAT, zones, interfaces"]
+  end
+  subgraph P5["5 Operate and set up: P3"]
+    OPS["Diagnostics, policy match test,<br/>restore, Setup Wizard, guided actions"]
+  end
+  subgraph P6["6 Production"]
+    PKG["Signed package, support statement,<br/>HA and upgrade qualified"]
+  end
+  P1 --> G1{{"G1"}} --> P2 --> G2{{"G2"}} --> P3 --> G3{{"G3"}} --> P4 --> G4{{"G4"}} --> P5
+  G4 --> P6 --> G5{{"G5"}}
+```
+
+| Phase | What ships | Specs | Ledger priority | Ends at | State on 2026-11-24 |
+| --- | --- | --- | --- | --- | --- |
+| 1. Foundation | Scoped, read-only policy inventory; live sessions and logs with filtering and highlighting; sign-in through Junos; TLS; settings file; audit trail; reproducible bundle; lab procedure | [001](specs/001-policy-inventory.md), [004](specs/004-live-sessions-and-logs.md); a TLS and certificate-provisioning spec (not yet written; [ADR 0003](adr/0003-tls-off-loopback.md) asks for it) | `P0` | G1 | Backends and browser engines built on synthetic fixtures; UI v2 views built in the working tree, not yet committed, not yet checked in a browser; nothing run on a device |
+| 2. See everything | The rest of the read-only parity rows the ledger lists: dashboard, interfaces, zones, NAT, VPN, routes, alarms and more, including the policy Hits column (Spec 001 open question 10) | One read spec per area, numbered when proposed | `P1` | G2 | Not started; the ledger lists the rows |
+| 3. Preview-only builder | The Firewall Policy Builder: a proposed change built from the committed configuration with group provenance, its effect, its ownership and reference conflicts, and an export. Nothing that changes the device is sent (a device preview into the operator's private copy is allowed only if the owner and the security reviewer decide D5 that way; otherwise the preview is local only) | [003](specs/003-firewall-policy-builder.md); [002](specs/002-change-protocol.md) section 12 | `P2`: the preview half of J-Web 24.4's rule add, edit, clone, move and delete. A guided builder goes beyond parity: J-Web 24.4 has no security-policy wizard ([catalog, key findings](catalog.md#key-findings)) | G3 | Specified; nothing built |
+| 4. Change safely | Spec 002's lifecycle: private preview, diff, confirmed commit, confirmation from the browser, rollback; the first change kinds | [002](specs/002-change-protocol.md); change-kind specs, starting from 003's | `P2` | G4 | Design only; the code has no write path |
+| 5. Operate and set up | Ping and traceroute, the policy match test answered by the device's own lookup ([ADR 0006](adr/0006-device-explains-policy-decisions.md)), restoring earlier configurations, the Setup Wizard; a spec for guided actions (operational commands with no configuration diff, Spec 002 open question 3) | To be written | `P3` | No gate of its own. Read-only items may ship after G2; anything that writes, after G4 | Not started |
+| 6. Production | Signed package, support statement, HA and upgrade qualified | ADRs at G4 and G5 | all offered rows | G5 | Not started; owner and product decisions (D4, D8) |
+
+`P4` rows (later, or maybe) have no roadmap phase. A `P4` row can be `planned` once its shape is
+known; work on it starts only when the owner raises its priority.
+
+The spike report's five phases map onto these: its phase 1 is phase 1, its "See everything" is
+phase 2, its "Change safely" is phase 4, and its "Operate and set up" is phase 5. The preview-only
+builder (phase 3) and production (phase 6) are new, and the hardware gate moved to G2
+([charter, section 6](charter.md#6-from-a-branch-admins-normal-week-to-release-scoped-parity)).
+
+## 8. What ships next
+
+Three deliverables, in order. Each is read-only. None asks anyone to change a production firewall.
+
+| # | Deliverable | Done when | Needs | Moves |
+| --- | --- | --- | --- | --- |
+| 1 | **UI v2 views** for Specs 001 and 004: Policies, Objects, Sessions and Logs | AC-001-21 and AC-004-20 met: the UI requirements checked in a browser against the development server with the `branch` and `cluster-lsys` fixtures, as `admin` and `auditor`, with no console errors or CSP violations; `make test` green, including the static-asset safety tests | Views built in the working tree, not yet committed | The 38 Spec 001 and 004 rows held at `specified` move to `implemented` ([ledger summary, gap 4](parity/jweb-24.4.md#owner-decisions)) |
+| 2 | **First lab qualification run** on a disposable vSRX 24.4 through [deploy-lab.md](deploy-lab.md) | Evidence filed under `docs/evidence/` for Q-RT-01, Q-RT-02, Q-RT-03, Q-NET-03 and Q-AUTH-01; the first recorded replies in `tests/fixtures/recorded-vsrx-<build>/`; early Q-AUTH-03 observations for a read-only class | A named lab owner and a lab vSRX (D2); `set system services netconf ssh` on the lab box | First certified G1 results; the first test of ADR 0002 |
+| 3 | **TLS and the G1 security work** | A TLS and certificate-provisioning spec accepted; Q-TLS-01 run on the lab vSRX; the [known code gaps](architecture.md#15-known-gaps-in-the-current-code) fixed or accepted, so that Q-SEC-01 reviews a stable target | A named security reviewer (D1); Q-RT-01 showing `ssl` | Q-TLS-01 and Q-SEC-01 can start |
+
+Not in the next three: any write path, building Spec 003, and non-loopback listeners on hardware. Spec 003's
+review and the expansion of the parity ledger continue in parallel, as documents. After these
+three: SRX300-class hardware (Q-HW-01) and a second and third release for Q-REL-01.
+
+## 9. Risk register
+
+Product and technical risks are explained in the [charter, section 8](charter.md#8-risks); this
+register tracks them, with the delivery risks, to the test or decision that settles each. All are
+open.
+
+| ID | Risk | If it happens | Mitigation now | Settled or measured by | Owner |
+| --- | --- | --- | --- | --- | --- |
+| R-01 | On-box Python cannot open a NETCONF session to loopback as the operator (`paramiko` missing, loopback NETCONF refused) | Per-operator sign-in, the base of least privilege, falls | Options A to E recorded ([architecture section 13](architecture.md#13-if-per-operator-sign-in-fails-q-auth-01)); the probe checks `paramiko` | Q-RT-01, Q-AUTH-01; an ADR superseding ADR 0002 | Owner |
+| R-02 | SRX300-class routing engines cannot run J-Wicket | The audience shrinks to vSRX and larger platforms | One process; four signed-in operators by default; idle and absolute timeouts; parsing and highlighting in the browser | Q-HW-01, Q-LOAD-01 | Owner, lab owner |
+| R-03 | No usable on-box `ssl`, or no workable certificate path | No listener off loopback; access by SSH tunnel only | Loopback by default; TLS required off loopback ([ADR 0003](adr/0003-tls-off-loopback.md)) | Q-RT-01, Q-TLS-01 | Security reviewer |
+| R-04 | A target release ships Python older than 3.9 | ADR 0001 is wrong for that release; code changes | 3.9 floor in CI; 3.9 syntax rules | Q-RT-01 | Contributors |
+| R-05 | Reply formats differ from the synthetic fixtures, or between releases | Parsers misread device data, possibly without an error | Local-name matching; unknown configuration listed, never dropped; explicit states; release in every snapshot | Q-REL-01 | Contributors |
+| R-06 | A hand-written web server on the routing engine has J-Web-class vulnerabilities | A firewall compromised through its management UI | Controls and tests per advisory class ([SECURITY.md](../SECURITY.md)); loopback default; no upload route; RPC allowlist | Q-SEC-01 (G1), Q-SEC-02 (G4) | Security reviewer |
+| R-07 | Polling loads the routing engine or mgd, or floods syslog | Control-plane impact; real events rotate out of logs sooner | Poll floors; one RPC at a time per operator; session cap; the 5,000-session refusal | Q-LOAD-01, Q-LOAD-02, Q-LOAD-03 | Contributors |
+| R-08 | No security reviewer or lab owner is named | Gates cannot be signed; no result can be certified | Listed as D1 and D2 | Owner decision | Owner |
+| R-09 | No lab equipment: the vLabs sandbox expires; AWS could not subscribe to the vSRX listing; no SRX300-class device found | Qualification stalls at G1 or G2 | The lab procedure assumes only a disposable vSRX | D2 | Owner, lab owner |
+| R-10 | No signing path and no support position for unsigned on-box Python | G4 and G5 cannot be reached; the project stops at G3 | Lab-only procedure; reproducible bundle with a published checksum; nobody asked to install it in production | Owner and product decisions at G4 and G5 (D4) | Owner |
+| R-11 | Synthetic fixtures give false confidence | Something "passes" that has never met a device | Every status says "on fixtures"; `implemented` is not `qualified`; fixtures labelled synthetic | Q-REL-01 and the qualified-platform rule ([3.2](#32-what-qualified-platform-means)) | Everyone |
+| R-12 | Parity scope (453 topics in the 24.4 guide) delays the read paths and the change protocol | The foundation never finishes | Ledger priorities; read before write; a row is done only when qualified | Owner priority decisions | Owner |
+| R-13 | The reference drifts: later J-Web guides restructure the menus | Parity loses meaning | Pinned to 24.4; the change procedure in [2.3](#23-the-parity-reference-release) | Owner decision | Owner |
+| R-14 | Files, registration or daemon behaviour lost on reboot, upgrade or cluster failover | J-Wicket silently gone, or a changed file running | Placement and checksum checks in the lab procedure; self-test with payload digest | Q-RT-04, Q-RT-05, Q-HA-01 | Lab owner |
+| R-15 | `language python3` is itself a security-posture change on the device | Customers' security teams refuse it, even on labs | Said plainly in the lab procedure and SECURITY.md; signed package at G5 | G5 | Owner |
+| R-16 | Pace and staffing undecided | Gates slip without anyone deciding to slip them | Everything is in the repository; specs before code; the next three deliverables are small | D4 | Owner |
+
+## 10. Sources
+
+Project records:
+
+- Spike packet, unedited: [`docs/evidence/2026-11-23-vsrx-spike/`](evidence/2026-11-23-vsrx-spike/README.md),
+  in particular the
+  [notebook's results](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far)
+  and the [report's roadmap](evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md#roadmap).
+- [Charter](charter.md), [architecture](architecture.md), [catalog](catalog.md), the
+  [ADRs](adr/README.md), [Spec 001](specs/001-policy-inventory.md),
+  [Spec 002](specs/002-change-protocol.md), [Spec 004](specs/004-live-sessions-and-logs.md),
+  [deploy-lab.md](deploy-lab.md), [SECURITY.md](../SECURITY.md).
+
+Juniper documentation, read 2026-11-24. `www.juniper.net/documentation/...` URLs redirect (HTTP 301)
+to the same path on `networkingdocs.hpe.com`.
+
+- J-Web User Guide for SRX Series Firewalls, 24.4, and its table of contents:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/> and
+  <https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/__toc.js>
+- The 25.2 guide's table of contents:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx25.2/jweb-srx/__toc.js>
+- Python scripts overview (Python 3 for JET from 20.2R1):
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-python-scripts-overview.html>
+- `file (JET)` statement:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/file-edit-system-jet.html>
+- JET Developer Guide (PDF):
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/jet-developer/jet-developer.pdf>
+- Script synchronization between routing engines:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-script-synchronizing-routing-engines-overview.html>
+- RADIUS authentication:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-radius-authentication.html>;
+  TACACS+ authentication:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html>
+- Multinode High Availability:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/high-availability/topics/topic-map/mnha-introduction.html>
+- J-Web 24.4 Basic Settings (REST API ports):
+  <https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/topics/task/j-web-security-basic-settings-configuring.html>
+- System Log Explorer, `UI_NETCONF_CMD`:
+  <https://apps.juniper.net/syslog-explorer/messageDetails?msg=UI_NETCONF_CMD>
+- Session-table pull cost, a 2015 community-forum reply quoting the title of KB28956 (the KB itself
+  was not read):
+  <https://community.networking.hpe.com/discussion/info-over-logs>

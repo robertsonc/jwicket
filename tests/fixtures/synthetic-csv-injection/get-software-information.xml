@@ -1,0 +1,6 @@
+<!-- SYNTHETIC. A host name with characters that must not reach a file name or start a formula. -->
+<software-information>
+  <host-name>=csv"fw</host-name>
+  <product-model>vsrx</product-model>
+  <junos-version>24.4R2-S3.5</junos-version>
+</software-information>

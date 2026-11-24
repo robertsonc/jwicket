@@ -1,0 +1,19 @@
+<!-- SYNTHETIC. Multi-RE layout as seen on chassis clusters; not captured from a device. -->
+<multi-routing-engine-results>
+  <multi-routing-engine-item>
+    <re-name>node0</re-name>
+    <software-information>
+      <host-name>dc-fw-a</host-name>
+      <product-model>srx4600</product-model>
+      <junos-version>24.4R2-S3.5</junos-version>
+    </software-information>
+  </multi-routing-engine-item>
+  <multi-routing-engine-item>
+    <re-name>node1</re-name>
+    <software-information>
+      <host-name>dc-fw-b</host-name>
+      <product-model>srx4600</product-model>
+      <junos-version>24.4R2-S3.5</junos-version>
+    </software-information>
+  </multi-routing-engine-item>
+</multi-routing-engine-results>
