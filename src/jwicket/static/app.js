@@ -647,14 +647,14 @@ function renderBanner(snap) {
     fact('Scope', scopeFact(meta, snap.scope)),
     fact('Read as', readAsFact(meta)),
     fact('Source', sourceFact(meta)),
-    fact('Central management', mgmtFact(snap.management || {})),
+    fact('Central management', mgmtFact(snap.management || {}, snap.config || {}), 'wide'),
   );
 }
 
 function deviceFact(dev) {
   if (dev.status !== 'ok') return stateInline(dev.status, dev.message);
   const out = [
-    line(data(dev.hostname || '?'), SEP, data(dev.model || 'model not reported'), SEP, 'Junos ', data(dev.version || 'not reported')),
+    line(h('span', { class: 'data nowrap', text: dev.model || 'model not reported' }), SEP, h('span', { class: 'nowrap' }, 'Junos ', data(dev.version || 'not reported'))),
   ];
   const versions = [...new Set((dev.nodes || []).map((n) => n.version).filter(Boolean))];
   if (versions.length > 1) out.push(line(h('span', { class: 'warn-line', text: `Nodes report different releases: ${versions.join(', ')}` })));
@@ -708,7 +708,8 @@ function scopeFact(meta, scopeInv) {
   const scopes = meta.scopes || [];
   const select = h('select', { id: 'scope-select' });
   if (!scopes.length) {
-    select.append(h('option', { value: meta.scope || S.scope, text: scopeLabel(meta.scope || S.scope) }));
+    const label = scopeLabel(meta.scope || S.scope);
+    select.append(h('option', { value: meta.scope || S.scope, text: label.charAt(0).toUpperCase() + label.slice(1) }));
     select.disabled = true;
   }
   for (const s of scopes) {
@@ -732,7 +733,7 @@ function scopeFact(meta, scopeInv) {
 function readAsFact(meta) {
   const ra = meta.read_as || {};
   const user = ra.user || '?';
-  const out = [line('Read as ', h('strong', { class: 'data', text: user }))];
+  const out = [line(h('strong', { class: 'data', text: user }))];
   if (ra.backend === 'lab-token') {
     out.push(
       h(
@@ -763,7 +764,14 @@ function sourceFact(meta) {
   ];
 }
 
-function mgmtFact(mg) {
+function mgmtFact(mg, cfg) {
+  if (mg.status !== 'ok' && cfg.status && cfg.status !== 'ok') {
+    // Central management is read from the configuration; it is unknown when that read failed.
+    return [
+      line(h('span', { class: 'state-inline' }, h('span', { class: 'state-code', text: 'unknown' }), ' Not known: it is read from the configuration, which could not be read.')),
+      line(mute('Another system may also manage this device.', 'small')),
+    ];
+  }
   if (mg.status !== 'ok') {
     return [line(stateInline(mg.status, mg.message)), line(mute('Another system may also manage this device.', 'small'))];
   }
@@ -1090,7 +1098,6 @@ function buildSummary(scope) {
 }
 
 function buildFilters(model) {
-  const f = S.filters;
   const zoneOptions = (id, label) => {
     const select = h('select', { id }, h('option', { value: '', text: 'Any zone' }));
     for (const z of model.zones) select.append(h('option', { value: z, text: z }));
@@ -1121,15 +1128,16 @@ function buildFilters(model) {
   search.addEventListener('input', () => {
     clearTimeout(debounce);
     debounce = setTimeout(() => {
-      f.q = search.value.trim();
+      S.filters.q = search.value.trim();
       applyPolicyFilters(true);
     }, 120);
   });
-  box.querySelector('#pf-from').addEventListener('change', (e) => { f.from = e.target.value; applyPolicyFilters(true); });
-  box.querySelector('#pf-to').addEventListener('change', (e) => { f.to = e.target.value; applyPolicyFilters(true); });
-  actionSelect.addEventListener('change', () => { f.action = actionSelect.value; applyPolicyFilters(true); });
-  inactive.addEventListener('change', () => { f.inactive = inactive.checked; applyPolicyFilters(true); });
-  groups.addEventListener('change', () => { f.groupsOnly = groups.checked; applyPolicyFilters(true); });
+  // Handlers read S.filters at event time: "Clear filters" replaces the object.
+  box.querySelector('#pf-from').addEventListener('change', (e) => { S.filters.from = e.target.value; applyPolicyFilters(true); });
+  box.querySelector('#pf-to').addEventListener('change', (e) => { S.filters.to = e.target.value; applyPolicyFilters(true); });
+  actionSelect.addEventListener('change', () => { S.filters.action = actionSelect.value; applyPolicyFilters(true); });
+  inactive.addEventListener('change', () => { S.filters.inactive = inactive.checked; applyPolicyFilters(true); });
+  groups.addEventListener('change', () => { S.filters.groupsOnly = groups.checked; applyPolicyFilters(true); });
   box.querySelector('#pf-clear').addEventListener('click', () => {
     S.filters = defaultFilters();
     syncFilterControls();
@@ -1155,7 +1163,7 @@ function syncFilterControls() {
 }
 
 function buildPolicyTable(scope, model) {
-  const table = h('table', { class: 'data policies', id: 'policy-table' });
+  const table = h('table', { class: 'tbl policies', id: 'policy-table' });
   table.append(
     h('caption', { class: 'sr-only', text: 'Security policies in evaluation order' }),
     h('colgroup', null, ['num', 'name', 'src', 'dst', 'app', 'act', 'notes'].map((c) => h('col', { class: `c-${c}` }))),
@@ -1174,9 +1182,13 @@ function buildPolicyTable(scope, model) {
       h(
         'th',
         { colspan: '7', scope: 'colgroup' },
-        `${pair.from} ${ARROW} ${pair.to}`,
-        h('span', { class: 'sec-sub', text: `${SEP}checked in this order${SEP}${plural(pair.rows.length, 'policy', 'policies')}` }),
-        allPairInactive ? h('span', { class: 'sec-flag', text: 'zone pair deactivated' }) : null,
+        h(
+          'span',
+          { class: 'sec-label' },
+          `${pair.from} ${ARROW} ${pair.to}`,
+          h('span', { class: 'sec-sub', text: `${SEP}checked in this order${SEP}${plural(pair.rows.length, 'policy', 'policies')}` }),
+          allPairInactive ? h('span', { class: 'sec-flag', text: 'zone pair deactivated' }) : null,
+        ),
       ),
     );
     model.sections.push(sectionBody(head, pair.rows, model, table));
@@ -1185,7 +1197,7 @@ function buildPolicyTable(scope, model) {
     const head = h(
       'tr',
       { class: 'section' },
-      h('th', { colspan: '7', scope: 'colgroup' }, 'Global policies', h('span', { class: 'sec-sub', text: `${SEP}checked after zone-pair policies${SEP}${plural(model.globals.length, 'policy', 'policies')}` })),
+      h('th', { colspan: '7', scope: 'colgroup' }, h('span', { class: 'sec-label' }, 'Global policies', h('span', { class: 'sec-sub', text: `${SEP}checked after zone-pair policies${SEP}${plural(model.globals.length, 'policy', 'policies')}` }))),
     );
     model.sections.push(sectionBody(head, model.globals, model, table));
   }
@@ -1339,7 +1351,7 @@ function defaultBody(pol) {
     h(
       'tr',
       { class: 'section' },
-      h('th', { colspan: '7', scope: 'colgroup' }, 'Default policy', h('span', { class: 'sec-sub', text: `${SEP}applies when no policy above matches` })),
+      h('th', { colspan: '7', scope: 'colgroup' }, h('span', { class: 'sec-label' }, 'Default policy', h('span', { class: 'sec-sub', text: `${SEP}applies when no policy above matches` }))),
     ),
     h(
       'tr',
@@ -1521,7 +1533,7 @@ function resolvedAddressSection(row, side, title) {
       body.push(
         h(
           'table',
-          { class: 'data' },
+          { class: 'tbl' },
           h('thead', null, h('tr', null, ['Address', 'Kind', 'Value'].map((t) => h('th', { scope: 'col', text: t })))),
           h('tbody', null, leaves.map((l) => h('tr', null, h('td', { class: 'd', text: l.name }), h('td', { text: l.kind || '' }), h('td', { class: 'd', text: l.value || '' })))),
         ),
@@ -1546,7 +1558,7 @@ function resolvedAppSection(row) {
       body.push(
         h(
           'table',
-          { class: 'data' },
+          { class: 'tbl' },
           h('thead', null, h('tr', null, ['Application', 'Protocol', 'Destination port', 'Source port'].map((t) => h('th', { scope: 'col', text: t })))),
           h(
             'tbody',
@@ -1626,7 +1638,12 @@ function provenanceSection(row) {
 }
 
 function cliBlock(text) {
-  const kids = [h('code', { text })];
+  const code = h('code');
+  text.split(' ').forEach((word, i) => {
+    if (i) code.append(' ');
+    code.append(h('span', { class: 'w', text: word }));
+  });
+  const kids = [code];
   if (navigator.clipboard && window.isSecureContext) {
     const btn = h('button', { type: 'button', class: 'btn small', text: 'Copy', 'aria-label': `Copy command: ${text}` });
     btn.addEventListener('click', async () => {
@@ -1695,7 +1712,7 @@ function evaluationSection(row, idx, model) {
   if (from && to) {
     const pair = model.pairs.find((p) => p.from === from && p.to === to);
     const zoneRows = pair ? pair.rows : [];
-    kids.push(h('p', { class: 'order-label', text: `1. Zone-pair policies for ${from} ${ARROW} ${to}, top to bottom` }));
+    kids.push(h('p', { class: 'order-label', text: `Zone-pair policies for ${from} ${ARROW} ${to}, top to bottom` }));
     if (zoneRows.length) {
       kids.push(h('ol', { class: 'order', start: String(n) }, zoneRows.map((i) => orderItem(model, i, idx))));
       n += zoneRows.length;
@@ -1703,7 +1720,7 @@ function evaluationSection(row, idx, model) {
       kids.push(h('p', { class: 'mute small', text: 'No zone-pair policy for this pair.' }));
     }
     const applying = model.globals.filter((i) => globalApplies(model.rows[i], from, to));
-    kids.push(h('p', { class: 'order-label', text: `2. Then global policies that apply to ${from} ${ARROW} ${to}` }));
+    kids.push(h('p', { class: 'order-label', text: `Then the global policies that apply to ${from} ${ARROW} ${to}` }));
     if (applying.length) {
       kids.push(h('ol', { class: 'order', start: String(n) }, applying.map((i) => orderItem(model, i, idx))));
       n += applying.length;
@@ -1722,7 +1739,7 @@ function evaluationSection(row, idx, model) {
     n += model.globals.length;
   }
   kids.push(
-    h('p', { class: 'order-label', text: `${from && to ? '3. ' : ''}Then the default policy` }),
+    h('p', { class: 'order-label', text: 'Then the default policy' }),
     h('ol', { class: 'order', start: String(n) }, h('li', null, h('span', { class: 'nm', text: defaultText }))),
     h('p', { class: 'small', text: 'This shows order, not a match result. To test a flow, run on the device:' }),
     cliBlock(matchPoliciesCli(row.scope || S.scope, from, to, row)),
@@ -1738,7 +1755,8 @@ function evaluationSection(row, idx, model) {
 // ---- other tabs ----------------------------------------------------------------------------------
 
 /** A text filter over a set of rows; hides non-matching rows and keeps a count. */
-function textFilter(id, label, placeholder, items, noun, onApply) {
+function textFilter(id, label, placeholder, items, nouns, onApply) {
+  const [one, many] = nouns;
   const input = h('input', { id, type: 'search', autocomplete: 'off', spellcheck: 'false', placeholder });
   const count = h('span', { class: 'filter-count' });
   const apply = () => {
@@ -1749,7 +1767,7 @@ function textFilter(id, label, placeholder, items, noun, onApply) {
       item.node.hidden = !vis;
       if (vis) shown += 1;
     }
-    count.textContent = `${shown.toLocaleString('en')} of ${plural(items.length, noun)}`;
+    count.textContent = `${shown.toLocaleString('en')} of ${plural(items.length, one, many)}`;
     if (onApply) onApply();
     return shown;
   };
@@ -1758,7 +1776,7 @@ function textFilter(id, label, placeholder, items, noun, onApply) {
     clearTimeout(debounce);
     debounce = setTimeout(() => {
       const shown = apply();
-      announce(`Showing ${shown} of ${plural(items.length, noun)}.`);
+      announce(`Showing ${shown} of ${plural(items.length, one, many)}.`);
     }, 120);
   });
   const box = h('div', { class: 'filters', role: 'search', 'aria-label': label }, h('div', { class: 'f f-search' }, h('label', { for: id, text: label }), input), count);
@@ -1842,7 +1860,7 @@ function renderZones(scope) {
   });
   const table = h(
     'table',
-    { class: 'data entries' },
+    { class: 'tbl entries' },
     h('caption', { class: 'sr-only', text: 'Security zones' }),
     h(
       'thead',
@@ -1852,7 +1870,7 @@ function renderZones(scope) {
     h('tbody', null, items.map((i) => i.node)),
   );
   panel.append(
-    textFilter('zf-q', 'Filter zones', 'zone, interface, service, screen', items, 'zone'),
+    textFilter('zf-q', 'Filter zones', 'zone, interface, service, screen', items, ['zone', 'zones']),
     h('div', { class: 'scroll', tabindex: '0', role: 'region', 'aria-label': 'Zones table' }, table),
     h('p', { class: 'axis', text: 'Interface lines list host-inbound settings configured on that interface; zone columns list the settings configured for the whole zone.' }),
   );
@@ -1926,7 +1944,7 @@ function renderBooks(scope) {
           h(
             'div',
             { class: 'scroll', tabindex: '0', role: 'region', 'aria-label': `Addresses in ${book.name}` },
-            h('table', { class: 'data entries' }, h('thead', null, h('tr', null, ['Address', 'Kind', 'Value', 'Provenance', 'Description'].map((t) => h('th', { scope: 'col', text: t })))), addrTable),
+            h('table', { class: 'tbl entries' }, h('thead', null, h('tr', null, ['Address', 'Kind', 'Value', 'Provenance', 'Description'].map((t) => h('th', { scope: 'col', text: t })))), addrTable),
           ),
         )
       : h('p', { class: 'none', text: 'No addresses.' });
@@ -1938,7 +1956,7 @@ function renderBooks(scope) {
           h(
             'div',
             { class: 'scroll', tabindex: '0', role: 'region', 'aria-label': `Address sets in ${book.name}` },
-            h('table', { class: 'data entries' }, h('thead', null, h('tr', null, ['Set', 'Addresses', 'Nested sets', 'Provenance', 'Description'].map((t) => h('th', { scope: 'col', text: t })))), h('tbody', null, setRows)),
+            h('table', { class: 'tbl entries' }, h('thead', null, h('tr', null, ['Set', 'Addresses', 'Nested sets', 'Provenance', 'Description'].map((t) => h('th', { scope: 'col', text: t })))), h('tbody', null, setRows)),
           ),
         )
       : null;
@@ -1946,7 +1964,7 @@ function renderBooks(scope) {
       'section',
       { class: 'book', 'aria-label': `Address book ${book.name}` },
       h('h3', { text: book.name }),
-      h('div', { class: 'book-meta' }, h('span', { text: attach }), provenance(book)),
+      h('div', { class: 'book-meta' }, h('span', { text: attach }), book.group || book.inactive ? provenance(book) : null),
       addrSection,
       setSection,
     );
@@ -1956,7 +1974,10 @@ function renderBooks(scope) {
   const refreshSections = () => {
     for (const s of sections) s.section.hidden = s.items.length > 0 && s.items.every((i) => i.node.hidden);
   };
-  panel.append(textFilter('bf-q', 'Filter address books', 'name, 10.20.0.10, set, book', items, 'entry', refreshSections), sections.map((s) => s.section));
+  panel.append(
+    textFilter('bf-q', 'Filter address books', 'name, 10.20.0.10, set, book', items, ['entry', 'entries'], refreshSections),
+    ...sections.map((s) => s.section),
+  );
 }
 
 function renderApps(scope) {
@@ -1994,7 +2015,7 @@ function renderApps(scope) {
   });
   const table = h(
     'table',
-    { class: 'data entries' },
+    { class: 'tbl entries' },
     h('caption', { class: 'sr-only', text: 'Applications and application sets' }),
     h(
       'thead',
@@ -2004,7 +2025,7 @@ function renderApps(scope) {
     h('tbody', null, items.map((i) => i.node)),
   );
   panel.append(
-    textFilter('af-q', 'Filter applications', 'name, protocol, port, member', items, 'application'),
+    textFilter('af-q', 'Filter applications', 'name, protocol, port, member', items, ['application', 'applications']),
     h('div', { class: 'scroll', tabindex: '0', role: 'region', 'aria-label': 'Applications table' }, table),
   );
 }

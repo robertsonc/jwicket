@@ -240,6 +240,7 @@ code, .data, kbd { font-family: var(--data); font-size: 12.5px; }
 .fact dt { font-size: 11.5px; color: var(--mute); letter-spacing: 0.03em; margin-bottom: 2px; }
 .fact dd { margin: 0; overflow-wrap: anywhere; }
 .fact.wide { grid-column: 1 / -1; }
+.nowrap { white-space: nowrap; }
 .fact .line + .line { margin-top: 3px; }
 .fact select {
   max-width: 100%; padding: 4px 8px; border-radius: 6px; min-height: 30px;
@@ -295,7 +296,10 @@ details.warnings li { margin: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
 .state-inline { color: var(--warn-fg); }
 
 /* ---- overview: matrix + summary ------------------------------------------------------------- */
-.overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 320px); gap: 24px; align-items: start; }
+.overview { display: grid; grid-template-columns: minmax(0, max-content) minmax(260px, 340px); gap: 32px; align-items: start; justify-content: start; }
+.matrix-wrap { min-width: 0; max-width: 100%; }
+.matrix-wrap .sub { max-width: 68ch; }
+.policy-title { margin-top: 30px; }
 .scroll { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
 .scroll:focus-visible { outline-offset: 0; }
 table.matrix { border-collapse: separate; border-spacing: 5px; margin: -5px; }
@@ -356,15 +360,17 @@ table.matrix td { padding: 0; vertical-align: top; }
 .filters .f-search input { width: 100%; }
 .filters .check { display: flex; align-items: center; gap: 6px; font-size: 13.5px; min-height: 32px; cursor: pointer; }
 .filters .check input { width: 16px; height: 16px; accent-color: var(--gold); margin: 0; }
-.filter-count { font-family: var(--data); font-size: 12.5px; color: var(--mute); margin-left: auto; align-self: center; white-space: nowrap; }
+.filter-count { font-family: var(--data); font-size: 12.5px; color: var(--mute); margin-left: auto; align-self: flex-end; padding-bottom: 7px; white-space: nowrap; }
 .filter-note { font-size: 12.5px; color: var(--mute); margin: -4px 0 8px; }
 
 /* ---- data tables ---------------------------------------------------------------------------- */
-table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
-table.data th, table.data td { text-align: left; vertical-align: top; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); }
-table.data thead th { font-weight: 500; font-size: 12px; color: var(--mute); white-space: nowrap; border-bottom-color: var(--line-strong); }
-table.data td.num, table.data th.num { text-align: right; padding-right: 12px; font-family: var(--data); font-size: 12.5px; color: var(--mute); width: 1%; }
-table.data .d { font-family: var(--data); font-size: 12.5px; overflow-wrap: anywhere; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.tbl th, table.tbl td { text-align: left; vertical-align: top; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); }
+table.tbl tbody th { font-weight: 400; }
+table.tbl tbody th.d { font-weight: 600; }
+table.tbl thead th { font-weight: 500; font-size: 12px; color: var(--mute); white-space: nowrap; border-bottom-color: var(--line-strong); }
+table.tbl td.num, table.tbl th.num { text-align: right; padding-right: 12px; font-family: var(--data); font-size: 12.5px; color: var(--mute); width: 1%; }
+table.tbl .d { font-family: var(--data); font-size: 12.5px; overflow-wrap: anywhere; }
 table.policies { min-width: 940px; }
 table.policies col.c-num { width: 3%; }
 table.policies col.c-name { width: 19%; }
@@ -378,6 +384,7 @@ tr.section th {
   padding: 16px 0 6px; font-weight: 600; font-size: 14px; color: var(--fg);
   border-bottom: 1px solid var(--line-strong); text-align: left;
 }
+tr.section .sec-label { position: sticky; left: 0; display: inline-block; }
 tr.section .sec-sub { color: var(--mute); font-weight: 400; }
 tr.section .sec-flag { color: var(--warn-fg); font-weight: 400; margin-left: 6px; }
 tr.prow.is-inactive td, tr.prow.is-inactive th {
@@ -448,7 +455,7 @@ dialog.detail::backdrop { background: var(--backdrop); }
 }
 .sheet-head .t { flex: 1; min-width: 0; }
 .sheet-head h2 { font: 700 21px/1.2 var(--data); overflow-wrap: anywhere; }
-.sheet-head .where { color: var(--mute); font-size: 13px; margin-top: 3px; }
+.sheet-head .where { color: var(--mute); font-size: 13px; margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
 .sheet section { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .sheet section:last-child { border-bottom: 0; }
 .sheet h3 { font-size: 14px; margin: 0 0 8px; }
@@ -460,14 +467,15 @@ dialog.detail::backdrop { background: var(--backdrop); }
 .res-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 .res-head .nm { font-family: var(--data); font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
 .res-head .k { color: var(--mute); font-size: 12px; }
-.res table.data { margin-top: 4px; font-size: 12.5px; }
-.res table.data td, .res table.data th { padding: 3px 10px 3px 0; }
+.res table.tbl { margin-top: 4px; font-size: 12.5px; }
+.res table.tbl td, .res table.tbl th { padding: 3px 10px 3px 0; }
 .unres { color: var(--err-fg); font-weight: 600; font-size: 12.5px; }
 .cli {
   display: flex; gap: 8px; align-items: flex-start; margin: 6px 0;
   border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg2); padding: 8px 10px;
 }
-.cli code { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; user-select: all; }
+.cli code { flex: 1; min-width: 0; white-space: normal; overflow-x: auto; font-size: 12.5px; user-select: all; }
+.cli code .w { white-space: nowrap; }
 .order { padding-left: 26px; margin: 4px 0 8px; }
 .order li { margin: 2px 0; font-size: 13px; }
 .order li .nm { font-family: var(--data); font-size: 12.5px; }

@@ -2,7 +2,10 @@
 name: ci
 
 on:
+  # Pull requests run on their own event; push runs only for the default branch, so one push to a
+  # PR branch starts one run, not two.
   push:
+    branches: [main]
   pull_request:
 
 permissions:
