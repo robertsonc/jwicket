@@ -2207,7 +2207,7 @@ tr:hover .cell-actions,
   position: relative;
   overflow: auto;
   overscroll-behavior: contain;
-  contain: strict;
+  contain: content;
 }
 
 .vlist-body {
