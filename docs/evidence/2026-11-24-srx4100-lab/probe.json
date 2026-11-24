@@ -1,0 +1,16 @@
+{
+  "jwicket": "0.1.0.dev0",
+  "python": "3.7.10",
+  "modules": {
+    "http.server": "ok",
+    "ssl": "ok",
+    "json": "ok",
+    "hmac": "ok",
+    "threading": "ok",
+    "jnpr.junos": "ok",
+    "lxml": "ok",
+    "ncclient": "ok",
+    "paramiko": "ok"
+  },
+  "openssl": "OpenSSL 1.1.1zb  11 Feb 2025"
+}

@@ -1,4 +1,4 @@
-"""Shared helpers for the J-Wicket test suite (stdlib only, Python 3.9 syntax).
+"""Shared helpers for the J-Wicket test suite (stdlib only, Python 3.7 syntax).
 
 Nothing here talks to a device. Device sessions are fakes or ``jwicket.fixtures.FixtureSession``
 over the synthetic fixtures in tests/fixtures.

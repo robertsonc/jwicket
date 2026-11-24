@@ -1,6 +1,6 @@
 """The parity ledger (docs/parity/jweb-24.4.csv) is well formed, and its summary matches it.
 
-Stdlib only, Python 3.9 syntax, no network. The method, the columns and the vocabularies are in
+Stdlib only, Python 3.7 syntax, no network. The method, the columns and the vocabularies are in
 docs/parity/README.md. These tests check the shape of the ledger, not whether a status is true:
 reviewers check that against each spec's acceptance table and the code.
 """

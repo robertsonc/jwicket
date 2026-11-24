@@ -331,8 +331,9 @@ stateDiagram-v2
 ```
 
 Status is per cell of the [matrix](#5-qualification-matrix). "Spike-equivalent" means the spike's
-daemon, `wicket_spike.py`, did what the test asks on vSRX 24.4R2-S3.5; J-Wicket's own bundle has
-not. "Spike-equivalent partial" means it met some of the pass criteria, and the entry lists which
+daemon, `wicket_spike.py`, did what the test asks on vSRX 24.4R2-S3.5. Results without that
+word are J-Wicket's own bundle, first run on a lab SRX4100 on 24 November 2026
+([evidence](evidence/2026-11-24-srx4100-lab/README.md)). "Spike-equivalent partial" means it met some of the pass criteria, and the entry lists which
 it met and which it did not. No test is spike-equivalent in full today. Spike-equivalent evidence
 is not certified and does not qualify a cell.
 
@@ -343,19 +344,19 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 
 | ID | Test | Gate | Status (all cells "not run" unless stated) |
 | --- | --- | --- | --- |
-| [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
-| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Spike-equivalent partial** on vSRX 24.4R2-S3.5 (no arguments, respawn, idle memory; not the refused start or the digest); bundle not run |
+| [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Pass** on SRX4100 25.2R1-S1.4 (Python 3.7.10, every module `ok`); **partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
+| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Partial** on SRX4100 25.2R1-S1.4 (bundle daemonized, digest matched, refused start recorded, restart after SIGTERM, memory with one operator); **spike-equivalent partial** on vSRX 24.4R2-S3.5 |
 | [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | Not run |
 | [Q-RT-04](#q-rt-04-survives-reboot) | Survives reboot | G2 (proposed) | Not run |
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
-| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | Not run |
+| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Partial** on SRX4100 25.2R1-S1.4 (super-user sign-in and reads; wrong password refused; no read-only-class account) |
 | [Q-AUTH-02](#q-auth-02-radius-and-tacacs-template-users) | RADIUS and TACACS+ template users | G1 | Not run |
 | [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | Not run |
 | [Q-AUTH-04](#q-auth-04-junos-lockout-and-j-wickets-throttle) | Junos lockout and J-Wicket's throttle | G2 (proposed) | Not run |
-| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | Not run |
-| [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **vSRX part spike-equivalent partial** (clear text, one port checked); hardware not run |
+| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Partial** on SRX4100 25.2R1-S1.4 (TLS 1.2 and 1.3 served; 1.0 and 1.1 refusal not tested) |
+| [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **fxp0 part met** on SRX4100 25.2R1-S1.4 (TLS, through `mgmt_junos`); **vSRX part spike-equivalent partial** (clear text, one port checked); revenue zone on hardware not run |
 | [Q-NET-02](#q-net-02-port-8443-collisions) | Port 8443 collisions | G2 (proposed) | Not run |
-| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | Not run |
+| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | **Fails** on SRX4100 25.2R1-S1.4 (`administratively prohibited`; the documented statement is a syntax error) |
 | [Q-HW-01](#q-hw-01-srx300-class-runtime-and-resources) | SRX300-class runtime and resources | G2 | Not run |
 | [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
 | [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
@@ -375,7 +376,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 #### Q-RT-01 Runtime probe
 
 - **Purpose:** record the on-box Python version, and whether each module J-Wicket needs imports,
-  for each platform and release. It settles the Python 3.9 floor
+  for each platform and release. It settles the Python floor, 3.7 since this test's first run
   ([ADR 0001](adr/0001-on-box-pure-python-single-file.md)), whether `ssl` exists for Q-TLS-01,
   and whether `paramiko` exists for Q-AUTH-01. Juniper documents only "Python 3.x" for JET
   (**verified**, Python scripts overview); the minor version is **unknown**.
@@ -387,7 +388,8 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   It exits non-zero if any is missing. Keep the whole output. The `--probe` argument form under
   Junos is unverified, and spike finding F1 ([charter, section 5](charter.md#5-spike-evidence))
   suggests it fails; record it if tried.
-- **Pass:** Python 3.9 or later, and every module `ok`. A missing module is recorded and fails the
+- **Pass:** Python 3.7 or later, and every module `ok`. (The first version of this criterion said
+  3.9; [ADR 0001](adr/0001-on-box-pure-python-single-file.md#revision) records why it moved.) A missing module is recorded and fails the
   test; the owner then decides (missing `ssl` changes [ADR 0003](adr/0003-tls-off-loopback.md);
   missing `paramiko` triggers [architecture section 13](architecture.md#13-if-per-operator-sign-in-fails-q-auth-01)).
 - **Platforms:** every cell of the matrix.
@@ -396,7 +398,12 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   `ncclient` appeared in the logs. The Python version, `ssl` and `paramiko` were not recorded.
   Running Python directly from the shell was refused by veriexec, as expected. Evidence:
   [notebook, results](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far);
-  [charter, notes on the evidence](charter.md#notes-on-the-evidence). J-Wicket's probe has not run.
+  [charter, notes on the evidence](charter.md#notes-on-the-evidence).
+- **Status, SRX4100 25.2R1-S1.4:** **pass**, 24 November 2026. Python 3.7.10, OpenSSL 1.1.1zb,
+  every module `ok`; the copy-by-name mechanism (`jwicket_probe.py`) worked. The first bundle,
+  built for 3.9, failed to import `typing.Protocol`; the code was changed for 3.7 and the probe
+  re-run. The Junos 26.2R1-S2.3 install image also carries only `python3.7` (read from the image,
+  not run). Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md), [`probe.json`](evidence/2026-11-24-srx4100-lab/probe.json).
 
 #### Q-RT-02 Daemonized bundle, respawn and idle footprint
 
@@ -428,8 +435,16 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   [notebook, daemon supervision](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far),
   [report, what we tested](evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md#what-we-tested),
   [`junos/baseline.set`](evidence/2026-11-23-vsrx-spike/junos/baseline.set). The spike daemon read
-  options from `/var/tmp/wicket.args`; J-Wicket reads `/var/db/jwicket/jwicket.ini`. J-Wicket's
-  bundle has not been started by Junos.
+  options from `/var/tmp/wicket.args`; J-Wicket reads `/var/db/jwicket/jwicket.ini`.
+- **Status, SRX4100 25.2R1-S1.4:** **partial**, J-Wicket's own bundle.
+  - Met: it listened as a daemonized app with no arguments; the self-test's `payload_sha256`
+    matched the build; a refused start (an address the default instance cannot bind) wrote its
+    reason to `startup-refused.txt`, readable with `file show`, and Junos logged "jwicket.py is
+    thrashing, not restarted"; after `kill` (SIGTERM) it restarted without operator action; with one
+    signed-in operator it used 54 MB resident and 86 MB virtual.
+  - Not met: `kill -9` not tried; restart times not measured; idle memory without an operator not
+    recorded; where a daemonized app's standard error goes not recorded (the run set `[log] file`).
+    Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
 
 #### Q-RT-03 Sibling-module imports
 
@@ -509,8 +524,15 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   a second sign-in by the same account end the device session; no password appears in any
   J-Wicket file, and a failed sign-in appears in the audit trail as `user_hash`, not as the name.
 - **Platforms:** lab vSRX on each release; one hardware platform.
-- **Status:** not run. The spike's reads ran as the daemon's account (`jcluser`, class
-  `j-super-user`) through a no-argument local `Device()` session. That is not this test.
+- **Status:** **partial** on SRX4100 25.2R1-S1.4 (24 November 2026). A super-user account signed
+  in through J-Wicket; the device logged `Accepted password for root from 127.0.0.1`, and J-Wicket
+  read the policy inventory, the session table and the `messages` log as that account. A wrong
+  password was refused by Junos (`SSHD_LOGIN_FAILED ... from host '127.0.0.1'`), shown as an
+  operator-safe message, and audited as `user_hash`. Not run: the read-only-class account,
+  `UI_NETCONF_CMD` attribution, the daemon-account SSH-key case, sign-out and timeout checks, and
+  the session caps. Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's reads ran as the daemon's
+  account (`jcluser`, class `j-super-user`) through a no-argument local `Device()` session; that is
+  not this test.
 
 #### Q-AUTH-02 RADIUS and TACACS+ template users
 
@@ -586,7 +608,13 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   present; bad file modes, and a directory above a TLS file that another account owns or can
   write, refuse the start; one provisioning path is documented, and a spec chooses it.
 - **Platforms:** lab vSRX on each release; hardware under Q-HW-01 for handshake cost.
-- **Status:** not run. The spike's T8 (TLS) was not run.
+- **Status:** **partial** on SRX4100 25.2R1-S1.4. A self-signed RSA-2048 certificate generated on
+  the box (`openssl req` in the shell, key `0600` owned by the daemon account) loaded; from a lab
+  workstation TLS 1.2 (`ECDHE-RSA-AES256-GCM-SHA384`) and TLS 1.3 (`TLS_AES_256_GCM_SHA384`)
+  handshakes succeeded on fxp0, not through a tunnel (Q-NET-03 failed). Not done: TLS 1.0 and 1.1
+  refusal (the workstation's client could not offer them), compression, handshake time, the cookie
+  and HSTS checks, the settings refusals, and a provisioning path. Evidence:
+  [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's T8 (TLS) was not run.
 
 #### Q-NET-01 Reachability through fxp0 and a revenue zone
 
@@ -623,7 +651,12 @@ its entry before the test runs (D9). A test run without one records numbers; it 
     was checked, so whether `webapi-ssl` opens any other port is not known; nothing was recorded on
     hardware or per model. Evidence:
   [notebook, results](evidence/2026-11-23-vsrx-spike/docs/Wicket-concept-brief-and-spike-plan.md#spike-results-so-far).
-  Hardware not run.
+- **Status, SRX4100 25.2R1-S1.4:** **fxp0 part met**, revenue zone not run. The model has a
+  dedicated fxp0. With `system management-instance` the fxp0 address is in `mgmt_junos`; the
+  listener reached it only with `[server] routing_instance = mgmt_junos`
+  ([architecture](architecture.md)); TLS on TCP 9443 answered from a lab workstation, and a foreign
+  `Host` got 421. No host-inbound statement was involved: fxp0 is not in a security zone.
+  Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
 
 #### Q-NET-02 Port 8443 collisions
 
@@ -638,7 +671,9 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Pass:** every collision refuses the start with a message naming the port; if a Junos service
   defaults to 8443, the J-Wicket default changes by ADR.
 - **Platforms:** lab vSRX; one hardware platform; each release.
-- **Status:** not run.
+- **Status:** not run. On the SRX4100 run J-Wicket used 9443, and 8443 refused connections
+  normally with nothing listening. A listener in the wrong routing instance makes a port look
+  filtered (the SYN arrives, the reply leaves through the wrong table), which is not a collision.
 
 #### Q-NET-03 SSH local forwarding
 
@@ -650,7 +685,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Pass:** the tunnel carries the UI; any statement it needed is recorded verbatim with the
   release; whether forwarding depends on the login class is recorded.
 - **Platforms:** lab vSRX on each release; one hardware platform.
-- **Status:** not run.
+- **Status:** **fails** on SRX4100 25.2R1-S1.4 with a super-user account: the tunnel reported
+  `channel 1: open failed: administratively prohibited`, and `set system services ssh
+  tcp-forwarding` is a syntax error on that release. The statement that enables forwarding there,
+  if any, is not known. The run reached the UI directly over TLS instead. Evidence:
+  [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
 
 ### 4.6 Hardware and load
 
@@ -912,19 +951,25 @@ Rows are platform classes, columns are release lines. The list is the owner's to
 is also the release set for Q-REL-01. A cell holds the status of the qualification tests on that
 platform and release, and is "qualified" only as [3.2](#32-what-qualified-platform-means) defines.
 
-| Platform | 22.4 | 23.4 | 24.4 |
-| --- | --- | --- | --- |
+| Platform | 22.4 | 23.4 | 24.4 | 25.2 |
+| --- | --- | --- | --- | --- |
 | vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5 only**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). Every other test, and J-Wicket's own bundle: not run. Not qualified |
-| SRX300 class | not run | not run | not run |
-| SRX1500 | not run | not run | not run |
-| SRX4600 | not run | not run | not run |
-| SRX5000 line | not run | not run | not run |
+| SRX300 class | not run | not run | not run | not run |
+| SRX1500 | not run | not run | not run | not run |
+| SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02, Q-AUTH-01, Q-TLS-01 partial; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). Not qualified |
+| SRX4600 | not run | not run | not run | not run |
+| SRX5000 line | not run | not run | not run | not run |
 
 Notes on the cells:
 
 - **vSRX, 24.4:** the evidence is the [spike packet](evidence/2026-11-23-vsrx-spike/README.md): one
   Juniper vLabs sandbox, veriexec enforcing (`loaded active enforce`), 23 to 24 November 2026. The
   spike's lab token crossed the internet in clear text and is treated as burned.
+- **25.2 column and SRX4100 row:** added for the first device run, on the owner's lab SRX4100
+  (hardware, standalone, veriexec enforcing, Security Director Cloud attached). The owner directed
+  the run; the separate hardware procedure (D12) is not written, so it followed
+  [deploy-lab.md](deploy-lab.md) with its deviations recorded. Neither is in the proposed matrix
+  yet (D3).
 - **SRX300 class:** Q-HW-01 runs here. Record the exact model; the spike report names the SRX300,
   SRX320 and SRX345 as candidates.
 - **SRX5000 line:** on-box reporting is not on its platform list; Q-LOG-01 records what is there.
@@ -1031,7 +1076,7 @@ open.
 | R-01 | On-box Python cannot open a NETCONF session to loopback as the operator (`paramiko` missing, loopback NETCONF refused) | Per-operator sign-in, the base of least privilege, falls | Options A to E recorded ([architecture section 13](architecture.md#13-if-per-operator-sign-in-fails-q-auth-01)); the probe checks `paramiko` | Q-RT-01, Q-AUTH-01; an ADR superseding ADR 0002 | Owner |
 | R-02 | SRX300-class routing engines cannot run J-Wicket | The audience shrinks to vSRX and larger platforms | One process; four signed-in operators by default; idle and absolute timeouts; parsing and highlighting in the browser | Q-HW-01, Q-LOAD-01 | Owner, lab owner |
 | R-03 | No usable on-box `ssl`, or no workable certificate path | No listener off loopback; access by SSH tunnel only | Loopback by default; TLS required off loopback ([ADR 0003](adr/0003-tls-off-loopback.md)) | Q-RT-01, Q-TLS-01 | Security reviewer |
-| R-04 | A target release ships Python older than 3.9 | ADR 0001 is wrong for that release; code changes | 3.9 floor in CI; 3.9 syntax rules | Q-RT-01 | Contributors |
+| R-04 | A target release ships Python older than the floor | ADR 0001 is wrong for that release; code changes | **Happened** with a 3.9 floor: Junos 25.2 ships 3.7.10. Now a 3.7 floor in CI and 3.7 syntax rules | Q-RT-01 | Contributors |
 | R-05 | Reply formats differ from the synthetic fixtures, or between releases | Parsers misread device data, possibly without an error | Local-name matching; unknown configuration listed, never dropped; explicit states; release in every snapshot | Q-REL-01 | Contributors |
 | R-06 | A hand-written web server on the routing engine has J-Web-class vulnerabilities | A firewall compromised through its management UI | Controls and tests per advisory class ([SECURITY.md](../SECURITY.md)); loopback default; no upload route; RPC allowlist | Q-SEC-01 (G1), Q-SEC-02 (G4) | Security reviewer |
 | R-07 | Polling loads the routing engine or mgd, or floods syslog | Control-plane impact; real events rotate out of logs sooner | Poll floors; one RPC at a time per operator; session cap; the 5,000-session refusal | Q-LOAD-01, Q-LOAD-02, Q-LOAD-03 | Contributors |

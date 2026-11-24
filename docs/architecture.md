@@ -10,10 +10,12 @@ themselves**, so Junos (not J-Wicket) decides who they are and what they may see
 code can change the device. The whole program ships as one generated file that Junos starts and
 restarts.
 
-**J-Wicket has not run on a device.** The spike ran a different, single-file daemon on one vSRX
-(Junos 24.4R2-S3.5). J-Wicket's own code has run only against synthetic fixtures. The
-per-operator NETCONF sign-in, TLS on the device, and every reply format are unproven until the
-qualification tests named below pass. Test IDs (`Q-...`) and gates (`G0`-`G5`) are defined in
+**J-Wicket has run on one lab device.** On 24 November 2026 its bundle ran on the owner's lab
+SRX4100 (Junos 25.2R1-S1.4, Python 3.7.10). It served TLS on fxp0 through `mgmt_junos`, signed in a
+super-user operator over NETCONF to loopback, and read the policy inventory, the session table and
+the `messages` log ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). The spike ran a different, single-file daemon on one
+vSRX (Junos 24.4R2-S3.5). Least-privilege sign-in, other platforms and releases, and recorded reply
+formats remain unproven until the qualification tests named below pass. Test IDs (`Q-...`) and gates (`G0`-`G5`) are defined in
 [governance.md](governance.md).
 
 Labels used on this page:
@@ -698,7 +700,14 @@ Juniper documents a packaged form with extra module files (`srcs`), which J-Wick
   `sys.path` at all is part of Q-RT-03.
 - Copies named `jwicket_selftest.py` and `jwicket_probe.py` run the self-test and the interpreter
   probe (Q-RT-01) instead of the daemon, because Junos cannot pass `--flag` arguments (spike
-  finding F1, [charter section 5](charter.md#5-spike-evidence)). This mechanism has not run on a device.
+  finding F1, [charter section 5](charter.md#5-spike-evidence)). Both ran on the lab SRX4100
+  ([evidence](evidence/2026-11-24-srx4100-lab/README.md)).
+- `[server] routing_instance` names a Junos routing instance for the listening socket only. With
+  `system management-instance`, fxp0's address exists only in `mgmt_junos`, and a socket in the
+  default instance can neither bind it nor answer through it. `app.routing_instance()` calls
+  `jcs.set_routing_instance()` around creating the listener and then restores `"default"`, because
+  the call is process-wide and NETCONF to `127.0.0.1:830` times out inside `mgmt_junos` (measured
+  on 25.2R1-S1.4). The extension-service `routing-instance` statement did not have this effect.
 
 **Supervision** (**verified** by the spike for the spike daemon, and by [jet-file]):
 `daemonize` starts the app at commit; `respawn-on-normal-exit` restarts it after a clean exit as

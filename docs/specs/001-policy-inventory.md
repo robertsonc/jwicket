@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Backend implemented on synthetic fixtures. UI v2 views built and committed, exercised by hand on the development server; browser acceptance (AC-001-21) not signed off. Never run on a device. Nothing qualified.** |
+| Status | **Backend implemented on synthetic fixtures. UI v2 views built and committed, exercised by hand on the development server; browser acceptance (AC-001-21) not signed off. The inventory read ran once on a lab SRX4100, Junos 25.2R1-S1.4, as a signed-in super-user ([evidence](../evidence/2026-11-24-srx4100-lab/README.md)); no reply recorded. Nothing qualified.** |
 | Parity priority | `P0` (first vertical slice) |
 | Gate | Part of G1 (foundation exit); its ledger rows reach `qualified` only at G2 |
 | Decides scope | Project owner. G1 sign-off: the named security reviewer |
