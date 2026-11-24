@@ -43,6 +43,13 @@ class RpcFailed(JunosError):
     kind = "failed"
 
 
+class RpcTimeout(RpcFailed):
+    """The device did not answer in time. A failure of the read, never evidence about the device."""
+
+    def __init__(self, message: str, public: str = "") -> None:
+        super().__init__(message, public or "The device took too long to answer.")
+
+
 class LoginRejected(JunosError):
     """Junos refused the credentials."""
 
@@ -93,7 +100,7 @@ def classify(exc: BaseException) -> JunosError:
     if name == "PermissionError" or _DENIED.search(str(exc)):
         return RpcDenied(text)
     if name == "RpcTimeoutError":
-        return RpcFailed(text, "The device took too long to answer.")
+        return RpcTimeout(text)
     if _UNSUPPORTED.search(str(exc)):
         return RpcUnsupported(text)
     return RpcFailed(text)

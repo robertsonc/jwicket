@@ -24,8 +24,9 @@ from jwicket.auth.backends import AuthBackend
 from jwicket.auth.sessions import SessionLimit, SessionStore, WebSession
 from jwicket.auth.throttle import LoginThrottle
 from jwicket.junos import facts
-from jwicket.junos.errors import JunosError, LoginRejected, RpcDenied, RpcUnsupported, SessionLost
+from jwicket.junos.errors import JunosError, LoginRejected, RpcDenied, RpcTimeout, RpcUnsupported, SessionLost
 from jwicket.junos.inventory import SCHEMA, build_inventory, configuration_root, scope_summaries
+from jwicket.junos.xmlutil import local
 from jwicket.junos.session import open_config
 from jwicket.logs import AuditTrail
 from jwicket.web.http import Request, Response, clear_cookie, session_cookie
@@ -210,8 +211,12 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
             raise
         except RpcUnsupported:
             ha = facts.standalone()
-        except JunosError as err:
+        except (RpcDenied, RpcTimeout) as err:
             ha = _panel_error(err)
+        except JunosError as err:
+            # The standalone error wording is not documented, so any other error from the cluster
+            # status RPC means "not a chassis cluster as far as this read can tell", said plainly.
+            ha = {**facts.standalone(), "message": f"Chassis cluster status was not available ({err.public})."}
 
     if config_root is None:
         # Central management is read from the configuration, so it shares the configuration's fate.
@@ -219,6 +224,13 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
     else:
         inventories = build_inventory(config_root)
         management = facts.central_management(config_root)
+        if not any(local(c.tag) == "security" for c in config_root):
+            # Junos may leave out what a login class cannot view rather than refuse the read, so an
+            # empty inventory must not be presented as "nothing is configured".
+            warnings.append(
+                "The configuration J-Wicket read has no security section. Either nothing is configured, "
+                f"or {sess.user}'s login class cannot view it (Junos may leave it out rather than refuse)."
+            )
         if ha.get("mode") == "standalone" and facts.mnha_configured(config_root):
             ha = {"status": "ok", "mode": "mnha", "message": "Multinode High Availability is configured."}
 

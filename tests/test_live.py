@@ -487,6 +487,62 @@ class ModeAndExpressionTests(unittest.TestCase):
         self.assertFalse(got["disabled"])
 
 
+class SnapshotVisibilityTests(unittest.TestCase):
+    """Facts from the research: hidden configuration and undocumented cluster error text."""
+
+    def snapshot(self, device: Any) -> Dict[str, Any]:
+        from jwicket.api import read_snapshot
+
+        app = App(
+            backend=FixtureBackend(FIXTURES / "branch"),  # type: ignore[arg-type]
+            sessions=SessionStore(idle_s=900, absolute_s=3600, max_sessions=4),
+            throttle=LoginThrottle(per_source=5, overall=5),
+            audit=AuditTrail(None),
+            session_idle_s=900,
+        )
+        _token, sess = app.sessions.create(user="viewer", backend="fixture", device=device, source="t")
+        status, payload = read_snapshot(app, sess, "root")
+        self.assertEqual(status, 200)
+        return payload
+
+    def device(self, config: str, cluster_error: Exception) -> Any:
+        class Device:
+            user = "viewer"
+            backend = "fixture"
+
+            def get_configuration(self, filter_xml: str) -> Any:
+                return xml(config)
+
+            def rpc(self, name: str, **params: Any) -> Any:
+                if name == "get-chassis-cluster-status":
+                    raise cluster_error
+                return xml("<software-information><host-name>h</host-name></software-information>")
+
+            def close(self) -> None:
+                return None
+
+        return Device()
+
+    def test_missing_security_section_is_not_presented_as_empty(self) -> None:
+        from jwicket.junos.errors import RpcUnsupported
+
+        payload = self.snapshot(self.device("<configuration><applications/></configuration>", RpcUnsupported("x")))
+        self.assertTrue(any("no security section" in w for w in payload["warnings"]), payload["warnings"])
+        self.assertEqual(payload["ha"]["mode"], "standalone")
+
+    def test_unexpected_cluster_error_reads_as_standalone_with_reason(self) -> None:
+        from jwicket.junos.errors import RpcFailed
+
+        payload = self.snapshot(self.device("<configuration><security/></configuration>", RpcFailed("weird text")))
+        self.assertEqual(payload["ha"]["mode"], "standalone")
+        self.assertIn("not available", payload["ha"]["message"])
+        self.assertFalse(any("no security section" in w for w in payload["warnings"]))
+
+    def test_denied_cluster_status_stays_denied(self) -> None:
+        payload = self.snapshot(self.device("<configuration><security/></configuration>", RpcDenied("no")))
+        self.assertEqual(payload["ha"]["status"], "denied")
+
+
 def _rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = data["sessions"]["rows"]
     return rows

@@ -12,7 +12,7 @@ from helpers import BRANCH, FakeClock, FakeDevice, make_app, xml
 
 from jwicket import api, resources
 from jwicket.auth.sessions import WebSession
-from jwicket.junos.errors import RpcDenied, RpcFailed, RpcUnsupported
+from jwicket.junos.errors import RpcDenied, RpcFailed, RpcTimeout, RpcUnsupported
 from jwicket.junos.session import INVENTORY_FILTER, INVENTORY_FILTER_MINIMAL
 from jwicket.web import http as H
 from jwicket.web.server import Router
@@ -88,7 +88,7 @@ class ReadSnapshotTests(unittest.TestCase):
     def test_each_panel_fails_on_its_own(self) -> None:
         _, payload, _ = self.snapshot({"get-software-information": RpcDenied("no"),
                                        "get-configuration": RpcFailed("timeout"),
-                                       "get-chassis-cluster-status": RpcFailed("boom")})
+                                       "get-chassis-cluster-status": RpcTimeout("boom")})
         self.assertEqual(payload["device"]["status"], "denied")
         self.assertEqual(payload["config"]["status"], "failed")
         self.assertEqual(payload["ha"]["status"], "failed")
