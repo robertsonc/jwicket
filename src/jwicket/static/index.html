@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>J-Wicket</title>
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div id="fixture-banner" class="fixture" hidden>
+  <p><strong>FIXTURE DATA</strong> <span>&mdash; synthetic, not read from a device</span></p>
+</div>
+
+<header class="bar">
+  <div class="wrap bar-in">
+    <div class="mark">
+      <img src="/static/logo.svg" alt="" width="34" height="34">
+      <span class="brand">J-Wicket</span>
+      <span class="tag">Read-only</span>
+    </div>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <div class="tools">
+      <span id="signed-tools" class="tool-group" hidden>
+        <button id="refresh" class="btn" type="button">Refresh</button>
+        <a id="export-json" class="btn" href="/api/export?scope=root&amp;format=json">Export JSON</a>
+        <a id="export-csv" class="btn" href="/api/export?scope=root&amp;format=csv">Export CSV</a>
+      </span>
+      <button id="theme" class="btn" type="button">Light theme</button>
+      <button id="signout" class="btn" type="button" hidden>Sign out</button>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <section id="view-boot" class="wrap boot" aria-label="Loading">
+    <p>Loading J-Wicket&hellip;</p>
+    <noscript><p>J-Wicket needs JavaScript. Everything it runs is served from this device; nothing comes from the internet.</p></noscript>
+  </section>
+
+  <section id="view-signin" class="signin" aria-labelledby="signin-title" hidden>
+    <div class="signin-card">
+      <img class="signin-logo" src="/static/logo.svg" alt="" width="64" height="64">
+      <h1 id="signin-title">Sign in to J-Wicket</h1>
+      <p id="signin-notice" class="notice" hidden></p>
+      <p id="signin-lab" class="warn-box" hidden></p>
+      <form id="signin-form" novalidate>
+        <div id="field-username" class="field">
+          <label for="username">User name</label>
+          <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false">
+        </div>
+        <div id="field-password" class="field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password">
+        </div>
+        <div id="field-token" class="field" hidden>
+          <label for="token">Lab token</label>
+          <input id="token" name="token" type="password" autocomplete="off" spellcheck="false">
+        </div>
+        <p id="signin-error" class="error-box" role="alert" hidden></p>
+        <button id="signin-submit" class="btn primary" type="submit">Sign in</button>
+      </form>
+      <p id="signin-copy" class="mute small">Junos checks your user name and password and applies your login class. J-Wicket does not store them.</p>
+    </div>
+  </section>
+
+  <div id="view-app" hidden>
+    <section class="scope-banner" aria-labelledby="device-title">
+      <div class="wrap">
+        <p class="eyebrow">What you are looking at</p>
+        <h1 id="device-title" class="device-title">&nbsp;</h1>
+        <dl id="facts" class="facts"></dl>
+        <div id="warnings"></div>
+      </div>
+    </section>
+
+    <div class="wrap content">
+      <div id="inventory-state"></div>
+      <div id="inventory" hidden>
+        <div class="tabs" role="tablist" aria-label="Inventory views">
+          <button id="tab-policies" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-policies">Policies <span class="tab-count" id="count-policies"></span></button>
+          <button id="tab-zones" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-zones" tabindex="-1">Zones <span class="tab-count" id="count-zones"></span></button>
+          <button id="tab-books" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-books" tabindex="-1">Address books <span class="tab-count" id="count-books"></span></button>
+          <button id="tab-apps" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-apps" tabindex="-1">Applications <span class="tab-count" id="count-apps"></span></button>
+        </div>
+        <section id="panel-policies" class="panel" role="tabpanel" aria-labelledby="tab-policies"></section>
+        <section id="panel-zones" class="panel" role="tabpanel" aria-labelledby="tab-zones" hidden></section>
+        <section id="panel-books" class="panel" role="tabpanel" aria-labelledby="tab-books" hidden></section>
+        <section id="panel-apps" class="panel" role="tabpanel" aria-labelledby="tab-apps" hidden></section>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <span>Read-only. This build has no code path that changes the device configuration.</span>
+    <span>Nothing read from the device is kept in this browser.</span>
+    <span id="foot-idle"></span>
+    <span id="foot-version" class="data"></span>
+  </div>
+</footer>
+
+<dialog id="detail" class="detail" aria-labelledby="detail-title">
+  <div id="detail-sheet" class="sheet"></div>
+</dialog>
+</body>
+</html>
