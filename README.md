@@ -37,7 +37,7 @@ make dev    # then open http://127.0.0.1:8080/ and sign in as admin, any non-emp
 J-Wicket is a spec-driven project to replace J-Web for customers who want to manage an SRX on the firewall itself: a Junos-managed Python application with an offline-capable browser UI (nothing loads from the internet; [ADR 0007](docs/adr/0007-offline-capable-meaning.md)).
 
 - **Success:** an authorized operator can complete the same tasks as on the reference release, J-Web for SRX Series 24.4, with better tools for reviewing scope, explaining policy decisions and recovering from changes. Progress is tracked row by row in the [parity ledger](docs/parity/README.md).
-- **Usable without knowing Junos:** a binding design rule ([ADR 0010](docs/adr/0010-usable-without-knowing-junos.md)). Every screen explains the Junos concepts it shows and puts the matching command alongside, so operators learn Junos as they go. Parts exist today (decoded log lines, policy order spelled out, copyable `show` commands); in-place explanations of each concept are planned, in a spec still to be written. Installing J-Wicket still takes someone with Junos skills, once per device.
+- **Usable without knowing Junos:** a binding design rule ([ADR 0010](docs/adr/0010-usable-without-knowing-junos.md)). Every screen explains the Junos concepts it shows and puts the matching command alongside, so operators learn Junos as they go. Parts exist today (decoded log lines, policy order spelled out, copyable `show` commands); in-place explanations of each concept are specified in [Spec 005](docs/specs/005-explain-junos-in-place.md) (Draft, not built). Installing J-Wicket still takes someone with Junos skills, once per device.
 - **First slice:** a scoped, read-only policy inventory ([Spec 001](docs/specs/001-policy-inventory.md)).
 - **First planned configuration wizard:** a preview-only Firewall Policy Builder ([Spec 003](docs/specs/003-firewall-policy-builder.md)), with brownfield, group ownership and recovery cases specified up front.
 - **The owner's binding UI requirements** ([Spec 004](docs/specs/004-live-sessions-and-logs.md), read-only):
@@ -353,7 +353,7 @@ A development server on synthetic fixtures with error injection and synthetic li
 | `specified` | Firewall Policy Builder, preview only: add, clone, edit, move or delete a rule and see the result; never commits. J-Web 24.4 has no security-policy wizard ([catalog, key findings](docs/catalog.md#key-findings)) | [Spec 003](docs/specs/003-firewall-policy-builder.md), gate G3 |
 | `specified` | Shared change protocol for every future write: private candidate, diff, confirmed commit that Junos rolls back unless confirmed. Design only; the code has no write path | [Spec 002](docs/specs/002-change-protocol.md), gate G4 |
 | `specified` | AA contrast in both themes and full keyboard reach; unmodelled settings shown on every object type, not only policies; close-reason badges | Specs 001 and 004 |
-| `planned` | Explain Junos in place: each Junos concept explained where it appears, with the matching command alongside (read-only) | [ADR 0010](docs/adr/0010-usable-without-knowing-junos.md); spec to be written |
+| `specified` | Explain Junos in place: each Junos concept explained where it appears, with the matching command alongside (read-only) | [ADR 0010](docs/adr/0010-usable-without-knowing-junos.md); [Spec 005](docs/specs/005-explain-junos-in-place.md) (Draft) |
 | `planned` | Sessions and logs scoped to a logical or tenant system (root only today) | [Spec 004](docs/specs/004-live-sessions-and-logs.md) open questions |
 | `planned` | More device-side session filters and single-session lookup; device-side report summaries for the histogram; stream files, archived and binary logs; PCAP download | Spec 004 out-of-scope table, ledger |
 | `planned` | TLS certificate provisioning spec, then Q-TLS-01 on a lab vSRX | [governance, section 8](docs/governance.md#8-what-ships-next) |
@@ -457,6 +457,7 @@ The documentation map: which document answers which question.
 | What makes a config change safe to apply or undo? | [Spec 002: shared change protocol](docs/specs/002-change-protocol.md) |
 | What will the first wizard do, and not do? | [Spec 003: Firewall Policy Builder, preview only](docs/specs/003-firewall-policy-builder.md) |
 | What can I see live, and how are logs shown? | [Spec 004: live sessions and logs](docs/specs/004-live-sessions-and-logs.md) |
+| How is each Junos concept explained on screen? | [Spec 005: explain Junos in place](docs/specs/005-explain-junos-in-place.md) |
 | Who decides, and what ships next? | [Governance and qualification roadmap](docs/governance.md) |
 | Why was each design decision made? | [Architecture decision records](docs/adr/README.md) |
 | How would it be tried on a lab vSRX? | [Lab deployment procedure](docs/deploy-lab.md) (lab only, never production) |
