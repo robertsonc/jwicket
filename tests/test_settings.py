@@ -34,6 +34,10 @@ class DefaultsTests(unittest.TestCase):
         self.assertLess(got.auth.netconf_port, 1024)
         self.assertLessEqual(got.auth.session_idle_s, got.auth.session_absolute_s)
         self.assertIsNone(got.auth.lab_token_file)
+        self.assertEqual(got.auth.max_sessions_per_user, 2)
+        self.assertEqual(got.auth.login_failures_per_user_per_min, 5)
+        self.assertEqual(got.auth.login_failures_per_source_per_min, 20)
+        self.assertEqual(got.auth.login_concurrent, 2)
 
     def test_inline_comments_and_whitespace(self) -> None:
         got = parse_settings(ini(server="port = 9443 ; operator comment\nmax_connections = 4 # four"))
@@ -161,8 +165,10 @@ class RangeTests(unittest.TestCase):
         ("auth", "session_idle_s", ("59", "3601"), ("60", "3600")),
         ("auth", "session_absolute_s", ("599", "86401"), ("3600", "86400")),
         ("auth", "max_sessions", ("0", "17"), ("1", "16")),
-        ("auth", "login_per_source_per_min", ("0", "61"), ("1", "60")),
-        ("auth", "login_global_per_min", ("0", "601"), ("1", "600")),
+        ("auth", "max_sessions_per_user", ("0", "17"), ("1", "16")),
+        ("auth", "login_failures_per_user_per_min", ("0", "61"), ("1", "60")),
+        ("auth", "login_failures_per_source_per_min", ("0", "601"), ("1", "600")),
+        ("auth", "login_concurrent", ("0", "9"), ("1", "8")),
         ("log", "max_bytes", ("9999", "50000001"), ("10000", "50000000")),
         ("log", "backups", ("0", "21"), ("1", "20")),
     )
@@ -297,16 +303,83 @@ class FileTrustTests(unittest.TestCase):
         """If the path is swapped for another file after it was opened, the read is refused."""
         path = self.write("jwicket.ini", "[server]\nport = 9443\n", 0o644)
         other = self.write("swap.ini", "[server]\nport = 9999\n", 0o644)
-        real_check = S.check_trusted_file
+        real_check = S.check_directories
 
         def check_then_swap(p: Path, **kw: Any) -> None:
             real_check(p, **kw)
             os.replace(other, path)
 
-        swap = mock.patch.object(S, "check_trusted_file", side_effect=check_then_swap)
+        swap = mock.patch.object(S, "check_directories", side_effect=check_then_swap)
         with swap, self.assertRaises(ConfigError) as ctx:
             S.read_trusted_text(path, label="settings file", secret=False)
         self.assertIn("changed", str(ctx.exception))
+
+    def test_owner_and_mode_come_from_the_opened_file(self) -> None:
+        """SECU-9: owner, mode and type are taken from the open file (fstat), not from a fresh lookup of
+        the name, so a name pointed at a good file during the check cannot vouch for the file read."""
+        path = self.write("jwicket.ini", "[server]\nport = 9443\n", 0o644)
+        real_fstat = os.fstat
+
+        def writable_by_others(fd: int) -> os.stat_result:
+            st = real_fstat(fd)
+            values = list(st)
+            values[0] = stat.S_IFREG | 0o666
+            return os.stat_result(values)
+
+        with mock.patch.object(S.os, "fstat", side_effect=writable_by_others), self.assertRaises(ConfigError) as ctx:
+            S.read_trusted_text(path, label="settings file", secret=False)
+        self.assertIn("writable", str(ctx.exception))
+
+    def test_directory_owned_by_another_account_refused(self) -> None:
+        """SECU-9: the owner of a directory can swap the names in it, so every directory above a trusted
+        file must belong to root or to the daemon's account (mode 0755 alone is not enough)."""
+        other = self.dir / "other"
+        other.mkdir(mode=0o755)
+        path = other / "jwicket.ini"
+        path.write_text("[server]\n", encoding="utf-8")
+        os.chmod(path, 0o644)
+        if os.geteuid() == 0:
+            os.chown(other, 1234, 1234)
+        # As root the directory now belongs to uid 1234; as any other user it belongs to that user,
+        # so trusting root alone makes it "another account" either way.
+        with mock.patch.object(S, "_trusted_uids", return_value=frozenset({0})):
+            for call in (
+                lambda: S.load_settings(path),
+                lambda: S.check_trusted_file(path, label="TLS certificate", secret=False),
+            ):
+                with self.assertRaises(ConfigError) as ctx:
+                    call()
+                self.assertIn("directory", str(ctx.exception))
+                self.assertIn("owned by uid", str(ctx.exception))
+        if os.geteuid() == 0:
+            with self.assertRaises(ConfigError) as ctx:
+                S.load_settings(path)
+            self.assertIn(f"directory {other}", str(ctx.exception))
+
+    def test_symlinked_directory_followed_only_when_root_owns_the_link(self) -> None:
+        real = self.dir / "real"
+        real.mkdir(mode=0o700)
+        path = real / "jwicket.ini"
+        path.write_text("[server]\nport = 9443\n", encoding="utf-8")
+        os.chmod(path, 0o644)
+        link = self.dir / "link"
+        link.symlink_to(real)
+        via_link = link / "jwicket.ini"
+        if os.geteuid() == 0:
+            self.assertEqual(S.load_settings(via_link).server.port, 9443)  # root's own link is followed
+            os.lchown(link, 54321, 54321)
+            with self.assertRaises(ConfigError) as ctx:
+                S.load_settings(via_link)
+        else:
+            with self.assertRaises(ConfigError) as ctx:  # a link this user owns is not root's
+                S.load_settings(via_link)
+        self.assertIn("symbolic link owned by uid", str(ctx.exception))
+
+    def test_directory_walk_resolves_dot_dot_like_the_kernel(self) -> None:
+        sub = self.dir / "a"
+        sub.mkdir(mode=0o700)
+        path = self.write("jwicket.ini", "[server]\nport = 9443\n", 0o644)
+        self.assertEqual(S.load_settings(sub / ".." / path.name).server.port, 9443)
 
     def test_lab_token_length_and_mode(self) -> None:
         short = self.write("short.token", "a" * (S.MIN_LAB_TOKEN_LEN - 1) + "\n", 0o600)

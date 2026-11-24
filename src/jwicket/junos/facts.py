@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from jwicket.junos.xmlutil import Element, kid, kids, local, path, text, text_of
+from jwicket.junos.xmlutil import Element, active_path, is_inactive, kid, kids, local, text, text_of
 
 Json = Dict[str, Any]
 
@@ -86,15 +86,21 @@ def standalone() -> Json:
 
 
 def mnha_configured(config: Optional[Element]) -> bool:
-    return path(config, "chassis", "high-availability") is not None
+    """Multinode High Availability is configured and in effect (not deactivated, nor its chassis)."""
+    return active_path(config, "chassis", "high-availability") is not None
 
 
 def central_management(config: Optional[Element]) -> Json:
     """Outbound-SSH clients in the root configuration. Their presence means another system may own
     this configuration. Only the client name and non-secret fields are returned; ``secret`` never is.
+    A deactivated client (or a deactivated outbound-ssh, services or system above it) is listed with
+    ``inactive`` and does not make the device ``managed``.
     """
     clients = []
-    outbound = path(config, "system", "services", "outbound-ssh")
+    system = kid(config, "system")
+    services = kid(system, "services")
+    outbound = kid(services, "outbound-ssh")
+    above_off = any(is_inactive(node) for node in (system, services, outbound))
     for client in kids(outbound, "client"):
         name = text(client, "name")
         if name is None:
@@ -109,6 +115,9 @@ def central_management(config: Optional[Element]) -> Json:
             if address is not None:
                 port = text(child, "port")
                 targets.append(f"{address}:{port}" if port else address)
-        services = [local(s.tag) for s in kids(kid(client, "services"))]
-        clients.append({"client": name, "targets": targets, "services": services})
-    return {"status": "ok", "clients": clients, "managed": bool(clients)}
+        client_services = [local(s.tag) for s in kids(kid(client, "services"))]
+        clients.append({
+            "client": name, "targets": targets, "services": client_services,
+            "inactive": above_off or is_inactive(client),
+        })
+    return {"status": "ok", "clients": clients, "managed": any(not c["inactive"] for c in clients)}

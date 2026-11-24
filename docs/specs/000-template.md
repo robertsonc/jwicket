@@ -220,7 +220,9 @@ hierarchies.*
 *Allowlist impact: list every RPC this spec adds to `ALLOWED_RPCS`. A new RPC needs a recorded
 reply from a lab device and the security reviewer's review ([CONTRIBUTING.md](../../CONTRIBUTING.md)).
 Only read-only RPCs before G4; `test_allowlist_is_read_only` enforces it today through the `get-`
-prefix. No RPC name, attribute, filter or configuration text may be built from request input. A
+prefix. No RPC name, attribute, filter or configuration text may be built from request input; an
+RPC name may only be a constant or come from a fixed list in the code, selected by a parameter
+checked against that list (as Spec 004's report types are). A
 spec whose reads are part of a flow may list them with the flow's steps instead, as Spec 002 does
 in its lifecycle table (6.2), and collect the allowlist impact in a section of its own (Spec 002
 section 14).*

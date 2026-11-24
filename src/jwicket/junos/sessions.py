@@ -6,15 +6,24 @@ thousands of entries on a branch box, millions on a data-centre box. Three rules
 1. Filters go to the device. Every filter that ``get-flow-session-information`` understands is
    validated here and sent as an RPC parameter, so mgd and flowd do the narrowing. The browser
    filters further, but only over what the device returned, and the UI says which is which.
-2. Unbounded pulls are refused. Before fetching rows, the session summary is read; if more sessions
-   are active than ``MAX_UNFILTERED`` and no device-side filter is set, J-Wicket returns the count and
-   asks for a narrower filter instead of pulling the table.
+2. Unbounded pulls are refused. Before fetching rows, a (filtered) session summary is read; if
+   more sessions match the request, filtered or not, than ``MAX_UNFILTERED``, J-Wicket returns the
+   count and asks for a narrower filter instead of pulling the table. It also lists nothing when it
+   cannot tell how many match (the summary failed, or its reply had no count) unless the active
+   session count bounds the match below the limit: the guard fails closed.
 3. Rows are capped (``limit``) after parsing and the response says how many were dropped.
 
+On a chassis cluster every session is held by both nodes (Active on one, Backup on the other), and
+each node reports its own counts, so counts are summed over the SPUs of one node and the largest
+node's figure is used, never the sum over nodes. Both copies of a session are still returned as rows
+(with their node) so the browser can tell Active from Backup.
+
 Reply element names follow J-Wicket's reading of the documentation and are confirmed per release by
-qualification Q-REL-01. The parser is tolerant: it finds ``flow-session`` elements at any depth (so
-per-SPU groupings on high-end SRX and per-node results on chassis clusters both work) and records
-the node or SPU it found them under.
+qualification Q-REL-01. The per-session list XML is inferred from the CLI output; how per-SPU
+groupings on high-end SRX and per-node results on chassis clusters are laid out in it is also
+inferred, and is checked by Q-REL-01 before J-Wicket relies on it. The parser is tolerant: it finds
+``flow-session`` elements at any depth and records the node and SPU label it found them under (an
+SPU label applies to the sessions that follow it inside the same container).
 """
 
 from __future__ import annotations
@@ -28,13 +37,20 @@ from jwicket.junos.xmlutil import Element, kids, local, text, text_of
 Json = Dict[str, Any]
 
 # Above this many matching sessions, J-Wicket refuses to pull rows and asks for a narrower filter.
-# The device sends every matching session from the SPUs to the routing engine for a list request
-# (Juniper KB28956), so this protects the control plane; the count itself is cheap (filtered summary).
+# The device sends every matching session from the SPUs to the routing engine for a list request,
+# so this protects the control plane; the count itself is cheap (filtered summary). Source: Juniper
+# support as quoted in the HPE community thread "info over logs" (https://community.networking.hpe.com/
+# discussion/info-over-logs), which cites KB28956; the KB itself was not retrieved. The threshold is
+# checked by qualification Q-LOAD-02.
 MAX_UNFILTERED = 5000
 DEFAULT_LIMIT = 500
 MAX_LIMIT = 2000
 
-PROTOCOLS = ("tcp", "udp", "icmp", "icmp6", "gre", "esp", "ah", "sctp", "pim", "ospf")
+# The protocol keywords "show security flow session protocol" documents (CLI reference,
+# show-security-flow-session.html), besides a protocol number 0..255.
+PROTOCOLS = (
+    "ah", "egp", "esp", "gre", "icmp", "icmp6", "igmp", "ipip", "ospf", "pim", "rsvp", "sctp", "tcp", "udp",
+)
 _APP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,63}\Z")
 _IFACE = re.compile(r"^[a-z][a-z0-9\-]{1,9}(\d+(/\d+){0,3})?(\.\d{1,5})?\Z")
 
@@ -140,12 +156,16 @@ def _wing(node: Element) -> Json:
 
 
 def _split_policy(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    # Session output shows "policy-name/policy-index" (for example "allow-web/5").
+    # Session output shows "policy-name/policy-index" (for example "allow-web/5"). The CLI reference
+    # also shows "pre-id-default-policy/n": the suffix "n" is split off and its index left unknown,
+    # since its meaning is not documented. "N/A" stays whole.
     if not value:
         return None, None
     name, sep, index = value.rpartition("/")
-    if sep and index.isdigit():
+    if sep and name and index.isdigit():
         return name, index
+    if sep and name and index == "n":
+        return name, None
     return value, None
 
 
@@ -234,37 +254,66 @@ def parse_sessions(reply: Element, limit: int) -> Json:
                 walk(child, [*path, child])
 
     walk(reply, [reply])
-    displayed: List[int] = []
-    for element in reply.iter():
-        if local(element.tag) == "displayed-session-count":
-            value = _int(text_of(element))
-            if value is not None:
-                displayed.append(value)
-    return {
+    per_node = _per_node(reply, ("displayed-session-count",))
+    counts = [n["displayed-session-count"] for n in per_node if n["displayed-session-count"] is not None]
+    out: Json = {
         "status": "ok",
         "rows": rows,
         "returned": total,
         "truncated": total > len(rows),
-        "device_count": sum(displayed) if displayed else None,
+        # Sessions on the device that matched: the largest node's count, since a cluster's nodes
+        # each hold a copy of every session.
+        "device_count": max(counts) if counts else None,
     }
+    if len(per_node) > 1:
+        out["nodes"] = [{"node": n["node"], "device_count": n["displayed-session-count"]} for n in per_node]
+    return out
+
+
+def _per_node(reply: Element, tags: Tuple[str, ...]) -> List[Json]:
+    """For each node (``multi-routing-engine-item``, or the whole reply when there is none), each tag's
+    integer values summed over the node's SPUs; None where the node has no such value."""
+    items = [e for e in reply.iter() if local(e.tag) == "multi-routing-engine-item"]
+    scopes = [(text(item, "re-name"), item) for item in items] if items else [(None, reply)]
+    nodes: List[Json] = []
+    for name, scope in scopes:
+        entry: Json = {"node": name}
+        for tag in tags:
+            values = [v for v in (_int(text_of(e)) for e in scope.iter() if local(e.tag) == tag) if v is not None]
+            entry[tag] = sum(values) if values else None
+        nodes.append(entry)
+    return nodes
 
 
 def parse_summary(reply: Element) -> Json:
-    """Active and maximum sessions, summed over nodes/SPUs when the reply has several."""
-    def total(tag: str) -> Optional[int]:
-        values: List[int] = []
-        for element in reply.iter():
-            if local(element.tag) == tag:
-                value = _int(text_of(element))
-                if value is not None:
-                    values.append(value)
-        return sum(values) if values else None
+    """Active, maximum and failed sessions. Summed over the SPUs of one node; on a chassis cluster the
+    largest node's active, maximum and matching counts are used (each node holds a copy of every
+    session), failed counts are summed (each node fails its own), and ``nodes`` lists each node."""
+    tags = ("active-sessions", "max-sessions", "failed-sessions", "displayed-session-count")
+    per_node = _per_node(reply, tags)
 
-    return {
+    def largest(tag: str) -> Optional[int]:
+        values = [n[tag] for n in per_node if n[tag] is not None]
+        return max(values) if values else None
+
+    failed = [n["failed-sessions"] for n in per_node if n["failed-sessions"] is not None]
+    out: Json = {
         "status": "ok",
-        "active": total("active-sessions"),
-        "max": total("max-sessions"),
-        "failed": total("failed-sessions"),
+        "active": largest("active-sessions"),
+        "max": largest("max-sessions"),
+        "failed": sum(failed) if failed else None,
         # A summary request carrying filters reports how many sessions match them.
-        "matching": total("displayed-session-count"),
+        "matching": largest("displayed-session-count"),
     }
+    if len(per_node) > 1:
+        out["nodes"] = [
+            {
+                "node": n["node"],
+                "active": n["active-sessions"],
+                "max": n["max-sessions"],
+                "failed": n["failed-sessions"],
+                "matching": n["displayed-session-count"],
+            }
+            for n in per_node
+        ]
+    return out

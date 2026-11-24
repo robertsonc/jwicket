@@ -2,8 +2,14 @@
 
 * The browser holds a random token in an HttpOnly cookie; the server keeps only its SHA-256.
 * Idle and absolute timeouts; a hard cap on concurrent sessions (small routing engines, and every
-  session holds a NETCONF session on the device). When the cap is reached, sign-in is refused; no
-  one is evicted.
+  session holds a NETCONF session on the device). When the cap is reached, sign-in is refused.
+* A per-person limit (``max_per_user``, setting default 2): a new sign-in by the same Junos user beyond
+  the limit closes that user's oldest session, so one account cannot hold every slot. The default is 2,
+  not 1, so that one person in two browsers, or two engineers sharing an account, do not keep signing
+  each other out. User names are compared
+  case-insensitively, because RADIUS or TACACS+ may accept case variants of one name. The caller
+  decides which sessions have a person behind them: the lab-token backend's sessions all carry the
+  daemon account's name, so they are not limited this way. Distinct accounts can still fill the cap.
 * Ending a session for any reason closes its device session.
 """
 
@@ -45,6 +51,10 @@ class WebSession:
     # Small per-session cache (for example discovered log files), keyed by name: (stored at, value).
     cache: Dict[str, Tuple[float, Any]] = field(default_factory=dict, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # The per-person limit's key (normalised user name), or None when the session is not limited.
+    user_key: Optional[str] = None
+    # What was last written to the audit trail per kind of read, so repeated polls are not recorded.
+    audit_marks: Dict[str, str] = field(default_factory=dict, repr=False)
 
 
 class SessionStore:
@@ -54,11 +64,13 @@ class SessionStore:
         idle_s: int,
         absolute_s: int,
         max_sessions: int,
+        max_per_user: int = 2,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._idle = idle_s
         self._absolute = absolute_s
         self._max = max_sessions
+        self._per_user = max(1, max_per_user)
         self._clock = clock
         self._lock = threading.Lock()
         self._sessions: Dict[str, WebSession] = {}
@@ -66,7 +78,18 @@ class SessionStore:
     def _expired(self, sess: WebSession, now: float) -> bool:
         return now - sess.last_seen > self._idle or now - sess.created > self._absolute
 
-    def create(self, *, user: str, backend: str, device: DeviceSession, source: str) -> Tuple[str, WebSession]:
+    def create(
+        self,
+        *,
+        user: str,
+        backend: str,
+        device: DeviceSession,
+        source: str,
+        user_key: Optional[str] = None,
+        replaced: Optional[List[WebSession]] = None,
+    ) -> Tuple[str, WebSession]:
+        """Open a session. With ``user_key``, that user's oldest sessions beyond ``max_per_user - 1``
+        are closed first (and appended to ``replaced``); without it only the overall cap applies."""
         expired = self.reap()
         del expired
         now = self._clock()
@@ -80,11 +103,23 @@ class SessionStore:
             source=source,
             created=now,
             last_seen=now,
+            user_key=user_key,
         )
+        evicted: List[WebSession] = []
         with self._lock:
+            if user_key is not None:
+                mine = sorted((s for s in self._sessions.values() if s.user_key == user_key), key=lambda s: s.created)
+                while len(mine) >= self._per_user:
+                    old = mine.pop(0)
+                    del self._sessions[old.key]
+                    evicted.append(old)
             if len(self._sessions) >= self._max:
                 raise SessionLimit(f"{len(self._sessions)} sessions open, limit {self._max}")
             self._sessions[sess.key] = sess
+        for old in evicted:
+            self._close(old, "replaced by a new sign-in for the same user")
+        if replaced is not None:
+            replaced.extend(evicted)
         return token, sess
 
     def get(self, token: Optional[str]) -> Optional[WebSession]:

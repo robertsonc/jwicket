@@ -124,7 +124,8 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(
             got,
             {"status": "ok",
-             "clients": [{"client": "central-mgr", "targets": ["192.0.2.10:7804"], "services": ["netconf"]}],
+             "clients": [{"client": "central-mgr", "targets": ["192.0.2.10:7804"], "services": ["netconf"],
+                          "inactive": False}],
              "managed": True},
         )
         dumped = json.dumps(got)
@@ -143,10 +144,34 @@ class ManagementTests(unittest.TestCase):
         )
         got = F.central_management(cfg)
         self.assertEqual(got["clients"], [{"client": "sdc", "targets": ["192.0.2.20:443", "sd.example.net"],
-                                           "services": ["netconf"]}])
+                                           "services": ["netconf"], "inactive": False}])
         dumped = json.dumps(got)
         for value in ("TOP-SECRET-VALUE", "DEV-ID-VALUE", "NAMELESS-SECRET"):
             self.assertNotIn(value, dumped)
+
+    def test_deactivated_client_is_listed_but_does_not_manage(self) -> None:
+        """JUNO-10: a deactivated outbound-ssh client (or block above it) is not in effect."""
+        client = "<client{a}><name>sdc</name><servers><name>192.0.2.20</name></servers></client>"
+        for doc in (
+            "<configuration><system><services><outbound-ssh>" + client.format(a=' inactive="inactive"')
+            + "</outbound-ssh></services></system></configuration>",
+            '<configuration><system><services><outbound-ssh inactive="inactive">' + client.format(a="")
+            + "</outbound-ssh></services></system></configuration>",
+            '<configuration><system inactive="inactive"><services><outbound-ssh>' + client.format(a="")
+            + "</outbound-ssh></services></system></configuration>",
+        ):
+            with self.subTest(doc=doc[:60]):
+                got = F.central_management(xml(doc))
+                self.assertFalse(got["managed"])
+                self.assertEqual([(c["client"], c["inactive"]) for c in got["clients"]], [("sdc", True)])
+
+    def test_deactivated_mnha_is_not_configured(self) -> None:
+        for doc in ('<configuration><chassis><high-availability inactive="inactive"><local-id>1</local-id>'
+                    "</high-availability></chassis></configuration>",
+                    '<configuration><chassis inactive="inactive"><high-availability><local-id>1</local-id>'
+                    "</high-availability></chassis></configuration>"):
+            with self.subTest(doc=doc[:50]):
+                self.assertFalse(F.mnha_configured(xml(doc)))
 
     def test_unmanaged(self) -> None:
         self.assertEqual(F.central_management(None), {"status": "ok", "clients": [], "managed": False})

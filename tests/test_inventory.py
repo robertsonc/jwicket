@@ -120,7 +120,8 @@ class BranchFixtureTests(unittest.TestCase):
         pairs = {(p["from"], p["to"]): p for p in self.inv["root"]["policies"]["zone_pairs"]}
         self.assertEqual(
             pairs[("trust", "untrust")],
-            {"from": "trust", "to": "untrust", "count": 3, "inactive": 1, "permit": 2, "deny": 0, "reject": 0},
+            {"from": "trust", "to": "untrust", "count": 3, "inactive": 1, "permit": 2, "deny": 0, "reject": 0,
+             "comment": None},
         )
         self.assertEqual(next(iter(pairs)), ("trust", "untrust"))  # config order
         self.assertEqual(len(pairs), 5)
@@ -161,7 +162,8 @@ class BranchFixtureTests(unittest.TestCase):
             [
                 {"name": "junos-http", "predefined": True},
                 {"name": "junos-https", "predefined": True},
-                {"name": "tcp-8443", "protocol": "tcp", "destination_port": "8443", "source_port": None, "terms": 0},
+                {"name": "tcp-8443", "protocol": "tcp", "destination_port": "8443", "source_port": None, "terms": 0,
+                 "unmodeled": []},
             ],
         )
         self.assertEqual(web["unresolved"], [])
@@ -199,11 +201,13 @@ class BranchFixtureTests(unittest.TestCase):
                     "warnings"):
             self.assertIn(key, scope)
         for key in ("status", "rows", "default_policy", "default_policy_group", "policy_rematch",
-                    "pre_id_default_policy", "zone_pairs", "global_count"):
+                    "pre_id_default_policy", "zone_pairs", "global_count", "default_policy_inactive",
+                    "policy_rematch_inactive", "pre_id_default_policy_inactive"):
             self.assertIn(key, scope["policies"])
         row_keys = {"id", "scope", "kind", "seq", "from", "to", "name", "description", "match", "action",
                     "application_services", "tunnel", "log", "count", "scheduler", "inactive", "inactive_reason",
-                    "group", "inherited", "groups", "unmodeled", "inactive_parts", "resolved"}
+                    "group", "inherited", "groups", "unmodeled", "inactive_parts", "resolved", "comment",
+                    "part_comments", "pair_comment"}
         for row in rows(self.inv):
             self.assertEqual(set(row), row_keys)
 
@@ -220,7 +224,8 @@ class BranchFixtureTests(unittest.TestCase):
         for row in rows(inv):
             for entry in row["resolved"]["source"] + row["resolved"]["destination"]:
                 with self.subTest(policy=row["name"], name=entry["name"], kind=entry["kind"]):
-                    self.assertEqual(set(entry), {"name", "kind", "book", "leaves", "truncated", "unresolved"})
+                    self.assertEqual(set(entry), {"name", "kind", "book", "leaves", "truncated", "unresolved",
+                                                  "inactive_skipped"})
 
 
 class ClusterLsysFixtureTests(unittest.TestCase):
@@ -288,6 +293,16 @@ class ConfigurationRootTests(unittest.TestCase):
                 I.configuration_root(xml(text))
         with self.assertRaises(ValueError):
             I.build_inventory(xml("<rpc-reply/>"))
+
+    def test_no_configuration_is_a_failed_read(self) -> None:
+        """CONS-02: callers that map JunosError to a panel state show "failed", not an HTTP 500."""
+        from jwicket.junos.errors import JunosError, MalformedReply
+
+        with self.assertRaises(MalformedReply) as ctx:
+            I.configuration_root(xml("<rpc-reply><ok/></rpc-reply>"))
+        self.assertIsInstance(ctx.exception, JunosError)
+        self.assertEqual(ctx.exception.kind, "failed")
+        self.assertTrue(ctx.exception.public)
 
     def test_empty_configuration(self) -> None:
         inv = I.build_inventory(xml("<configuration/>"))
@@ -481,6 +496,271 @@ class UnmodeledTests(unittest.TestCase):
         self.assertEqual(by_name(inv, "p")["unmodeled"], [])
 
 
+class DeactivatedStatementTests(unittest.TestCase):
+    """Deactivated statements are written down but not in effect (JUNO-2, -3, -4, -8, -10)."""
+
+    def test_deactivated_default_policy_rematch_and_pre_id(self) -> None:
+        for default in ('<default-policy inactive="inactive"><permit-all/></default-policy>',
+                        '<default-policy><permit-all inactive="inactive"/></default-policy>'):
+            with self.subTest(default=default):
+                inv = I.build_inventory(config(
+                    "<policies>" + pair("a", "b", pol("p")) + default + '<policy-rematch inactive="inactive"/>'
+                    '<pre-id-default-policy inactive="inactive"><then><log><session-close/></log></then>'
+                    "</pre-id-default-policy></policies>"
+                ))
+                policies = inv["root"]["policies"]
+                self.assertIsNone(policies["default_policy"])
+                self.assertEqual(policies["default_policy_inactive"], "permit-all")
+                self.assertEqual((policies["policy_rematch"], policies["policy_rematch_inactive"]), (False, True))
+                self.assertEqual((policies["pre_id_default_policy"], policies["pre_id_default_policy_inactive"]),
+                                 (False, True))
+                warnings = inv["root"]["warnings"]
+                self.assertTrue(any("deny-all" in w and "deactivated" in w for w in warnings), warnings)
+                self.assertFalse(any("shows its presence" in w for w in warnings))
+
+    def test_active_settings_are_unchanged(self) -> None:
+        inv = I.build_inventory(config("<policies>" + pair("a", "b", pol("p"))
+                                       + "<default-policy><permit-all/></default-policy><policy-rematch/>"
+                                       "</policies>"))
+        policies = inv["root"]["policies"]
+        self.assertEqual((policies["default_policy"], policies["default_policy_inactive"]), ("permit-all", None))
+        self.assertEqual((policies["policy_rematch"], policies["policy_rematch_inactive"]), (True, False))
+
+    def test_deactivated_policies_or_security_makes_every_rule_inactive(self) -> None:
+        body = pair("trust", "untrust", pol("allow-all")) + "<default-policy><permit-all/></default-policy>"
+        cases = (
+            ("policies", xml(f'<configuration><security><policies inactive="inactive">{body}</policies>'
+                             "</security></configuration>")),
+            ("security", xml(f'<configuration><security inactive="inactive"><policies>{body}</policies>'
+                             "</security></configuration>")),
+        )
+        for reason, doc in cases:
+            with self.subTest(reason=reason):
+                inv = I.build_inventory(doc)
+                row = by_name(inv, "allow-all")
+                self.assertEqual((row["inactive"], row["inactive_reason"]), (True, reason))
+                pairs = inv["root"]["policies"]["zone_pairs"]
+                self.assertEqual((pairs[0]["permit"], pairs[0]["inactive"]), (0, 1))
+                self.assertIsNone(inv["root"]["policies"]["default_policy"])
+                self.assertTrue(any("is deactivated" in w for w in inv["root"]["warnings"]))
+
+    def test_rules_in_a_deactivated_logical_system_are_inactive(self) -> None:
+        doc = xml('<configuration><logical-systems inactive="inactive"><name>LS1</name><security><policies>'
+                  + pair("a", "b", pol("ls-allow")) + "</policies></security></logical-systems></configuration>")
+        inv = I.build_inventory(doc)
+        row = by_name(inv, "ls-allow", "lsys:LS1")
+        self.assertEqual((row["inactive"], row["inactive_reason"]), (True, "scope"))
+        self.assertEqual(inv["lsys:LS1"]["policies"]["zone_pairs"][0]["permit"], 0)
+
+    def test_the_nearest_deactivated_statement_is_the_reason(self) -> None:
+        doc = xml('<configuration><security><policies inactive="inactive">'
+                  + pair("a", "b", pol("p", attrs=' inactive="inactive"')) + "</policies></security></configuration>")
+        self.assertEqual(by_name(I.build_inventory(doc), "p")["inactive_reason"], "policy")
+
+    def test_deactivated_global_zone_values_are_not_in_effect(self) -> None:
+        doc = config("<policies><global><policy><name>g1</name><match><source-address>any</source-address>"
+                     "<destination-address>any</destination-address><application>any</application>"
+                     '<from-zone inactive="inactive">trust</from-zone><from-zone>dmz</from-zone></match>'
+                     "<then><permit/></then></policy></global></policies>")
+        row = by_name(I.build_inventory(doc), "g1")
+        self.assertEqual(row["from"], ["dmz"])
+        self.assertIn("match from-zone trust", row["inactive_parts"])
+
+    def test_host_inbound_except_and_deactivated_entries(self) -> None:
+        hit = ("<host-inbound-traffic><system-services><name>all</name></system-services>"
+               "<system-services><name>telnet</name><except/></system-services>"
+               '<system-services inactive="inactive"><name>ssh</name></system-services>'
+               "<protocols><name>all</name></protocols><protocols><name>bgp</name><except/></protocols>"
+               "</host-inbound-traffic>")
+        doc = config(f"<zones><security-zone><name>untrust</name>{hit}<interfaces><name>ge-0/0/0.0</name>{hit}"
+                     "</interfaces></security-zone></zones>")
+        inv = I.build_inventory(doc)["root"]
+        zone = inv["zones"]["rows"][0]
+        for item in (zone, zone["interfaces"][0]):
+            with self.subTest(item=item["name"]):
+                self.assertEqual(item["services"], ["all"])
+                self.assertEqual(item["services_except"], ["telnet"])
+                self.assertEqual(item["inactive_services"], ["ssh"])
+                self.assertEqual((item["protocols"], item["protocols_except"]), (["all"], ["bgp"]))
+        self.assertIn("Zone untrust: host-inbound system services all, except telnet.", inv["warnings"])
+        self.assertTrue(any("interface ge-0/0/0.0" in w and "except bgp" in w for w in inv["warnings"]))
+
+    def test_resolution_skips_deactivated_members_entries_books_and_attach(self) -> None:
+        doc = config(
+            "<address-book><name>global</name>"
+            "<address><name>web</name><ip-prefix>192.0.2.10/32</ip-prefix></address>"
+            "<address><name>web1</name><ip-prefix>192.0.2.11/32</ip-prefix></address>"
+            "<address><name>web2</name><ip-prefix>192.0.2.12/32</ip-prefix></address>"
+            "<address><name>db</name><ip-prefix>192.0.2.20/32</ip-prefix></address>"
+            '<address-set><name>web-servers</name><address><name>web1</name></address><address inactive="inactive">'
+            "<name>web2</name></address></address-set></address-book>"
+            '<address-book><name>trust-book</name><address inactive="inactive"><name>web</name>'
+            "<ip-prefix>10.0.0.10/32</ip-prefix></address><attach><zone><name>trust</name></zone></attach>"
+            "</address-book>"
+            '<address-book><name>off-book</name><address><name>db</name><ip-prefix>10.9.9.9/32</ip-prefix></address>'
+            '<attach><zone inactive="inactive"><name>trust</name></zone></attach></address-book>'
+            "<policies>" + pair("trust", "untrust", pol("p", src="web", dst="web-servers"))
+            + pair("trust", "untrust", pol("q", src="db")) + "</policies>"
+        )
+        inv = I.build_inventory(doc)
+        resolved = by_name(inv, "p")["resolved"]
+        src = resolved["source"][0]
+        self.assertEqual((src["book"], src["leaves"][0]["value"]), ("global", "192.0.2.10/32"))
+        self.assertEqual(src["inactive_skipped"], ["trust-book:web"])
+        self.assertEqual([leaf["name"] for leaf in resolved["destination"][0]["leaves"]], ["web1"])
+        db = by_name(inv, "q")["resolved"]["source"][0]
+        self.assertEqual((db["book"], db["leaves"][0]["value"]), ("global", "192.0.2.20/32"))
+        books = {b["name"]: b for b in inv["root"]["address_books"]["rows"]}
+        self.assertEqual((books["off-book"]["attach"], books["off-book"]["inactive_attach"]), ([], ["trust"]))
+        sets = {x["name"]: x for x in books["global"]["sets"]}
+        self.assertEqual((sets["web-servers"]["addresses"], sets["web-servers"]["inactive_members"]),
+                         (["web1"], ["web2"]))
+        warnings = inv["root"]["warnings"]
+        self.assertTrue(any("web-servers" in w and "web2" in w for w in warnings), warnings)
+        self.assertTrue(any("off-book" in w and "attach" in w for w in warnings), warnings)
+
+    def test_deactivated_book_is_not_used(self) -> None:
+        doc = config('<address-book inactive="inactive"><name>global</name><address><name>h</name>'
+                     "<ip-prefix>192.0.2.1/32</ip-prefix></address></address-book>"
+                     "<policies>" + pair("a", "b", pol("p", src="h")) + "</policies>")
+        self.assertEqual(by_name(I.build_inventory(doc), "p")["resolved"]["source"][0]["kind"], "unresolved")
+
+    def test_deactivated_application_set_members_and_applications(self) -> None:
+        apps = ("<application><name>a1</name><protocol>tcp</protocol><destination-port>1</destination-port>"
+                "</application><application><name>a2</name><protocol>tcp</protocol><destination-port>2"
+                '</destination-port></application><application inactive="inactive"><name>a3</name>'
+                "<protocol>tcp</protocol></application>"
+                '<application-set><name>s</name><application><name>a1</name></application><application inactive='
+                '"inactive"><name>a2</name></application></application-set>')
+        inv = I.build_inventory(config("<policies>" + pair("a", "b", pol("p", app="s"))
+                                       + pair("a", "b", pol("q", app="a3")) + "</policies>", applications=apps))
+        leaves = by_name(inv, "p")["resolved"]["application"][0]["leaves"]
+        self.assertEqual([leaf["name"] for leaf in leaves], ["a1"])
+        a3 = by_name(inv, "q")["resolved"]["application"][0]
+        self.assertEqual((a3["kind"], a3["inactive_skipped"]), ("unresolved", ["a3"]))
+        rows_by_name = {a["name"]: a for a in inv["root"]["applications"]["rows"]}
+        self.assertEqual((rows_by_name["s"]["members"], rows_by_name["s"]["inactive_members"]), (["a1"], ["a2"]))
+
+
+class UnifiedPolicyTests(unittest.TestCase):
+    """JUNO-5: application junos-defaults and the implicit application of unified policies."""
+
+    def build(self, *policies: str) -> Dict[str, Any]:
+        return I.build_inventory(config("<policies>" + pair("trust", "untrust", "".join(policies)) + "</policies>"))
+
+    @staticmethod
+    def unified(name: str, app: str, dyn: str) -> str:
+        app_xml = f"<application>{app}</application>" if app else ""
+        return (f"<policy><name>{name}</name><match><source-address>any</source-address>"
+                f"<destination-address>any</destination-address>{app_xml}"
+                f"<dynamic-application>{dyn}</dynamic-application></match><then><permit/></then></policy>")
+
+    def test_junos_defaults_is_its_own_kind(self) -> None:
+        row = by_name(self.build(self.unified("web", "junos-defaults", "junos:HTTP")), "web")
+        self.assertEqual(row["match"]["application"], ["junos-defaults"])
+        self.assertFalse(row["match"]["application_implicit"])
+        got = row["resolved"]["application"][0]
+        self.assertEqual((got["kind"], got["unresolved"]), ("dynamic-defaults", []))
+
+    def test_implicit_application(self) -> None:
+        inv = self.build(self.unified("fb", "", "junos:FACEBOOK-ACCESS"), self.unified("all", "", "any"))
+        fb = by_name(inv, "fb")
+        self.assertEqual((fb["match"]["application"], fb["match"]["application_implicit"]), (["junos-defaults"], True))
+        self.assertEqual(fb["resolved"]["application"][0]["kind"], "dynamic-defaults")
+        everything = by_name(inv, "all")
+        self.assertEqual((everything["match"]["application"], everything["match"]["application_implicit"]),
+                         (["any"], True))
+
+    def test_plain_policy_has_no_implicit_application(self) -> None:
+        row = by_name(self.build(pol("p")), "p")
+        self.assertEqual((row["match"]["application"], row["match"]["application_implicit"]), (["any"], False))
+
+
+class CommentTests(unittest.TestCase):
+    """JUNO-12: configuration comments are attached, never reported as unmodeled settings."""
+
+    def test_comments_on_rules_contexts_and_objects(self) -> None:
+        doc = config(
+            "<junos:comment>/* book note */</junos:comment>"
+            "<address-book><name>global</name><junos:comment>/* host note */</junos:comment>"
+            "<address><name>h</name><ip-prefix>192.0.2.1/32</ip-prefix></address></address-book>"
+            "<policies><junos:comment>/* CHG-1234 internet edge */</junos:comment>"
+            "<policy><from-zone-name>trust</from-zone-name><to-zone-name>untrust</to-zone-name>"
+            "<junos:comment>/* owner: web team, ticket CHG-42 */</junos:comment>"
+            "<policy><name>allow-web</name><match><source-address>h</source-address>"
+            "<destination-address>any</destination-address><application>junos-https</application></match>"
+            "<junos:comment># temporary, remove after migration</junos:comment><then><permit/></then></policy>"
+            "</policy></policies>"
+            "<zones><junos:comment>/* zone note */</junos:comment><security-zone><name>trust</name></security-zone>"
+            "</zones>",
+            applications="<junos:comment>/* app note */</junos:comment><application><name>x</name>"
+                         "<protocol>tcp</protocol></application>",
+        )
+        inv = I.build_inventory(doc)["root"]
+        row = inv["policies"]["rows"][0]
+        self.assertEqual(row["comment"], "/* owner: web team, ticket CHG-42 */")
+        self.assertEqual(row["part_comments"], [{"before": "then", "text": "# temporary, remove after migration"}])
+        self.assertEqual(row["pair_comment"], "/* CHG-1234 internet edge */")
+        self.assertEqual(inv["policies"]["zone_pairs"][0]["comment"], "/* CHG-1234 internet edge */")
+        self.assertEqual(row["unmodeled"], [])
+        self.assertEqual(inv["warnings"], [])
+        book = inv["address_books"]["rows"][0]
+        self.assertEqual((book["comment"], book["addresses"][0]["comment"]), ("/* book note */", "/* host note */"))
+        self.assertEqual(inv["zones"]["rows"][0]["comment"], "/* zone note */")
+        self.assertEqual(inv["applications"]["rows"][0]["comment"], "/* app note */")
+        self.assertEqual(inv["applications"]["rows"][0]["unmodeled"], [])
+
+
+class ObjectUnmodeledTests(unittest.TestCase):
+    """CONS-03: settings the model does not show are listed for objects too, not only for policies."""
+
+    def test_application_settings(self) -> None:
+        apps = ("<application><name>app1</name><protocol>icmp</protocol><icmp-type>8</icmp-type>"
+                "<application-protocol>ftp</application-protocol><inactivity-timeout>5</inactivity-timeout>"
+                "</application><application-set><name>s</name><application><name>app1</name></application>"
+                "<future-knob/></application-set>")
+        inv = I.build_inventory(config("<policies>" + pair("a", "b", pol("p", app="app1")) + "</policies>",
+                                       applications=apps))
+        rows_by_name = {a["name"]: a for a in inv["root"]["applications"]["rows"]}
+        self.assertEqual(rows_by_name["app1"]["unmodeled"], ["icmp-type", "application-protocol", "inactivity-timeout"])
+        self.assertEqual(rows_by_name["s"]["unmodeled"], ["future-knob"])
+        leaf = by_name(inv, "p")["resolved"]["application"][0]["leaves"][0]
+        self.assertEqual(leaf["unmodeled"], ["icmp-type", "application-protocol", "inactivity-timeout"])
+        warnings = inv["root"]["warnings"]
+        self.assertIn("Application app1 has settings J-Wicket does not display yet: icmp-type, "
+                      "application-protocol, inactivity-timeout.", warnings)
+        self.assertTrue(any("Application set s" in w and "future-knob" in w for w in warnings))
+
+    def test_zone_interface_and_address_settings(self) -> None:
+        doc = config(
+            "<address-book><name>global</name><address><name>h</name><ip-prefix>192.0.2.1/32</ip-prefix>"
+            "<future-address-knob/></address><address-set><name>s</name><address><name>h</name></address>"
+            "<future-set-knob/></address-set><future-book-knob/></address-book>"
+            "<zones><security-zone><name>a</name><tcp-rst/><application-tracking/><source-identity-log/>"
+            "<host-inbound-traffic><future-hit-knob/></host-inbound-traffic>"
+            "<interfaces><name>ge-0/0/0.0</name><future-ifc-knob/></interfaces></security-zone></zones>"
+        )
+        inv = I.build_inventory(doc)["root"]
+        zone = inv["zones"]["rows"][0]
+        self.assertEqual(zone["unmodeled"], ["tcp-rst", "application-tracking", "source-identity-log",
+                                             "host-inbound-traffic future-hit-knob"])
+        self.assertEqual(zone["interfaces"][0]["unmodeled"], ["future-ifc-knob"])
+        book = inv["address_books"]["rows"][0]
+        self.assertEqual(book["unmodeled"], ["future-book-knob"])
+        self.assertEqual(book["addresses"][0]["unmodeled"], ["future-address-knob"])
+        self.assertEqual(book["sets"][0]["unmodeled"], ["future-set-knob"])
+        warnings = inv["warnings"]
+        for needle in ("Zone a has settings", "tcp-rst", "interface ge-0/0/0.0", "future-book-knob",
+                       "Address h in book global", "Address set s in book global"):
+            with self.subTest(needle=needle):
+                self.assertTrue(any(needle in w for w in warnings), warnings)
+
+    def test_branch_fixture_has_no_object_warnings(self) -> None:
+        inv = I.build_inventory(load(BRANCH / "config.xml"))
+        self.assertFalse(any(w.startswith(("Zone", "Address", "Application")) for w in inv["root"]["warnings"]),
+                         inv["root"]["warnings"])
+
+
 BOOKS = """
 <address-book><name>global</name>
   <address><name>h</name><ip-prefix>192.0.2.1/32</ip-prefix></address>
@@ -657,7 +937,7 @@ class ApplicationResolutionTests(unittest.TestCase):
         got = self.resolve("multi")
         self.assertEqual(got["kind"], "application")
         self.assertEqual(got["leaves"], [{"name": "multi", "protocol": None, "destination_port": None,
-                                          "source_port": None, "terms": 2}])
+                                          "source_port": None, "terms": 2, "unmodeled": []}])
 
     def test_nested_sets_with_cycle_predefined_and_unresolved_members(self) -> None:
         got = self.resolve("outer")
@@ -666,7 +946,7 @@ class ApplicationResolutionTests(unittest.TestCase):
             got["leaves"],
             [
                 {"name": "udp-53", "protocol": "udp", "destination_port": "53", "source_port": "1024-65535",
-                 "terms": 0},
+                 "terms": 0, "unmodeled": []},
                 {"name": "junos-ssh", "predefined": True},
             ],
         )

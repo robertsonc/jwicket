@@ -14,7 +14,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 DEFAULT_CONFIG_PATH = Path("/var/db/jwicket/jwicket.ini")
 
@@ -31,7 +31,8 @@ KNOWN_KEYS = {
     }),
     "auth": frozenset({
         "backend", "netconf_host", "netconf_port", "rpc_timeout_s", "session_idle_s", "session_absolute_s",
-        "max_sessions", "login_per_source_per_min", "login_global_per_min", "lab_token_file",
+        "max_sessions", "max_sessions_per_user", "login_failures_per_user_per_min", "login_failures_per_source_per_min",
+        "login_concurrent", "lab_token_file",
     }),
     "log": frozenset({"level", "file", "audit_file", "max_bytes", "backups"}),
 }
@@ -70,8 +71,16 @@ class AuthSettings:
     session_idle_s: int = 900
     session_absolute_s: int = 28800
     max_sessions: int = 4
-    login_per_source_per_min: int = 5
-    login_global_per_min: int = 20
+    # Sessions one Junos user may hold at once; a new sign-in closes that user's oldest (netconf only).
+    max_sessions_per_user: int = 2
+    # Failed sign-ins per minute for one user name from one source address.
+    login_failures_per_user_per_min: int = 5
+    # Failed sign-ins per minute from one source address over all user names (behind the SSH tunnel
+    # every client is 127.0.0.1, so for tunnel users this is a daemon-wide budget). Successful
+    # sign-ins and requests that never reach Junos do not count.
+    login_failures_per_source_per_min: int = 20
+    # Sign-ins the backend checks at once; more at the same moment get 429.
+    login_concurrent: int = 2
     lab_token_file: Optional[Path] = None
 
 
@@ -94,25 +103,20 @@ class Settings:
 
 # --- file trust ---------------------------------------------------------------------------------
 
+MAX_SYMLINK_HOPS = 40
 
-def check_trusted_file(path: Path, *, label: str, secret: bool) -> None:
-    """Refuse files another local account could have written (or, for secrets, read).
 
-    Rules: a regular file, not a symlink, owned by this process's user or root, not writable by
-    group or other, and for secrets not readable by group or other. The parent directory must not
-    be writable by group or other unless it is sticky (like /var/tmp), in which case the owner
-    rule above is what protects the file.
-    """
-    try:
-        st = os.lstat(path)
-    except OSError as exc:
-        raise ConfigError(f"{label} {path} cannot be read: {exc.strerror or exc}") from exc
+def _trusted_uids() -> FrozenSet[int]:
+    """Accounts that may own a settings, token or TLS file and every directory above it."""
+    return frozenset({0, os.geteuid()})
+
+
+def _check_file_stat(st: os.stat_result, path: Path, *, label: str, secret: bool) -> None:
     if stat.S_ISLNK(st.st_mode):
         raise ConfigError(f"{label} {path} is a symbolic link; point the setting at the real file")
     if not stat.S_ISREG(st.st_mode):
         raise ConfigError(f"{label} {path} is not a regular file")
-    allowed_owners = {os.geteuid(), 0}
-    if st.st_uid not in allowed_owners:
+    if st.st_uid not in _trusted_uids():
         raise ConfigError(
             f"{label} {path} is owned by uid {st.st_uid}; it must belong to the account J-Wicket "
             f"runs as (uid {os.geteuid()}) or to root"
@@ -122,20 +126,94 @@ def check_trusted_file(path: Path, *, label: str, secret: bool) -> None:
         raise ConfigError(f"{label} {path} is writable by other accounts (mode {mode:o}); use 0600 or 0644")
     if secret and mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise ConfigError(f"{label} {path} must be mode 0600, found {mode:o}")
-    parent = path.parent
-    try:
-        pst = parent.stat()
-    except OSError as exc:
-        raise ConfigError(f"directory {parent} for {label} cannot be read: {exc.strerror or exc}") from exc
-    pmode = stat.S_IMODE(pst.st_mode)
-    if pmode & (stat.S_IWGRP | stat.S_IWOTH) and not pmode & stat.S_ISVTX:
+
+
+def _check_directory_stat(st: os.stat_result, directory: Path, label: str) -> None:
+    if st.st_uid not in _trusted_uids():
         raise ConfigError(
-            f"directory {parent} holding {label} is writable by other accounts (mode {pmode:o})"
+            f"directory {directory} above {label} is owned by uid {st.st_uid}; every directory above it "
+            f"must belong to root or to the account J-Wicket runs as (uid {os.geteuid()})"
         )
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & (stat.S_IWGRP | stat.S_IWOTH) and not mode & stat.S_ISVTX:
+        raise ConfigError(f"directory {directory} above {label} is writable by other accounts (mode {mode:o})")
+
+
+def check_directories(path: Path, *, label: str) -> None:
+    """Every directory above ``path`` must be one that no other account can rearrange.
+
+    The directories are walked from ``/`` with ``lstat``, resolving symbolic links as the kernel
+    would: each directory must belong to root or to the daemon's account and must not be writable
+    by group or other unless it is sticky (like /tmp, where only an entry's owner may rename it); a
+    symbolic link on the way is followed only if root owns it. Under these rules nobody else can
+    swap a name between a check and a later open, so path-based checks hold for the settings file,
+    the lab token and the TLS files, which ``ssl`` loads by path.
+    """
+    # Not os.path.abspath: it removes "x/.." as text, while the kernel resolves x first.
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    pending = list(absolute.parent.parts[1:])
+    current = Path("/")
+    hops = 0
+
+    def lstat_of(target: Path) -> os.stat_result:
+        try:
+            return os.lstat(target)
+        except OSError as exc:
+            raise ConfigError(f"directory {target} above {label} cannot be read: {exc.strerror or exc}") from exc
+
+    _check_directory_stat(lstat_of(current), current, label)
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        st = lstat_of(candidate)
+        if stat.S_ISLNK(st.st_mode):
+            if st.st_uid != 0:
+                raise ConfigError(
+                    f"{candidate} above {label} is a symbolic link owned by uid {st.st_uid}; only a link "
+                    "owned by root is followed"
+                )
+            hops += 1
+            if hops > MAX_SYMLINK_HOPS:
+                raise ConfigError(f"too many symbolic links above {label} {path}")
+            try:
+                link = candidate.readlink()
+            except OSError as exc:
+                raise ConfigError(f"{candidate} above {label} cannot be read: {exc.strerror or exc}") from exc
+            if link.is_absolute():
+                current = Path("/")
+                pending = list(link.parts[1:]) + pending
+            else:
+                pending = list(link.parts) + pending
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            raise ConfigError(f"{candidate} above {label} {path} is not a directory")
+        _check_directory_stat(st, candidate, label)
+        current = candidate
+
+
+def check_trusted_file(path: Path, *, label: str, secret: bool) -> None:
+    """Refuse files another local account could have written (or, for secrets, read).
+
+    Rules: a regular file, not a symlink, owned by this process's user or root, not writable by
+    group or other, and for secrets not readable by group or other; and every directory above it
+    passes :func:`check_directories`.
+    """
+    check_directories(path, label=label)
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise ConfigError(f"{label} {path} cannot be read: {exc.strerror or exc}") from exc
+    _check_file_stat(st, path, label=label, secret=secret)
 
 
 def read_trusted_text(path: Path, *, label: str, secret: bool) -> str:
-    """Open first, then check the opened file, so the checked file is the file that is read."""
+    """Open first, then check the opened file itself (``fstat``), so the checked file is the file
+    that is read; then require the name to still lead to that same file (device and inode)."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -143,10 +221,13 @@ def read_trusted_text(path: Path, *, label: str, secret: bool) -> str:
         raise ConfigError(f"{label} {path} cannot be opened: {exc.strerror or exc}") from exc
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ConfigError(f"{label} {path} is not a regular file")
-        check_trusted_file(path, label=label, secret=secret)
-        if os.fstat(fd).st_ino != os.lstat(path).st_ino:
+        _check_file_stat(st, path, label=label, secret=secret)
+        check_directories(path, label=label)
+        try:
+            now = os.lstat(path)
+        except OSError as exc:
+            raise ConfigError(f"{label} {path} changed while it was being read") from exc
+        if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
             raise ConfigError(f"{label} {path} changed while it was being read")
         with os.fdopen(os.dup(fd), "r", encoding="utf-8") as handle:
             return handle.read(1_000_000)
@@ -237,8 +318,10 @@ def parse_settings(text: str, source: Optional[Path] = None) -> Settings:
         session_idle_s=_get_int(a, "session_idle_s", 900, 60, 3600),
         session_absolute_s=_get_int(a, "session_absolute_s", 28800, 600, 86400),
         max_sessions=_get_int(a, "max_sessions", 4, 1, 16),
-        login_per_source_per_min=_get_int(a, "login_per_source_per_min", 5, 1, 60),
-        login_global_per_min=_get_int(a, "login_global_per_min", 20, 1, 600),
+        max_sessions_per_user=_get_int(a, "max_sessions_per_user", 2, 1, 16),
+        login_failures_per_user_per_min=_get_int(a, "login_failures_per_user_per_min", 5, 1, 60),
+        login_failures_per_source_per_min=_get_int(a, "login_failures_per_source_per_min", 20, 1, 600),
+        login_concurrent=_get_int(a, "login_concurrent", 2, 1, 8),
         lab_token_file=_get_path(a, "lab_token_file"),
     )
 

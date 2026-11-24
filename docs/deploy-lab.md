@@ -126,7 +126,17 @@ start, and says which file and why, unless:
   (`<user>`) or root, and not writable by group or other: use `0600`;
 - its directory is not writable by group or other: use `0700`, owned by `<user>`. A root-owned `0700`
   directory would lock the daemon out of its own settings;
+- every directory from `/` down to the file belongs to root or `<user>` and is not writable by group
+  or other unless it is sticky (like `/tmp`); a symbolic link on the way is followed only if root
+  owns it. The same rule applies to the directories above a token or TLS file. Check the chain with
+  `ls -ld / /var /var/db /var/db/jwicket`; who owns `/var` and `/var/db` on Junos has not been
+  recorded (Q-RT-02 records it). A refusal names the directory and its owner;
 - a token or TLS key file, if you use one, is mode `0600`; every path in the file is absolute.
+
+The settings file and the token are opened first and checked through the open file, and their
+names must still lead to the same file afterwards. TLS files are checked and then loaded by path,
+because Python's `ssl` takes only a path; the directory rule above is what keeps another account
+from swapping them in between.
 
 In the shell, as `<user>`:
 
@@ -166,7 +176,9 @@ tls_key =
 allowed_hosts = 127.0.0.1:8443, localhost:8443
 # Concurrent connections, 2..64. Default 8. Over the cap, new connections are closed at once.
 max_connections = 8
-# Per-connection socket timeout in seconds, 2..60. Default 10.
+# Seconds, 2..60. Default 10. Each socket read times out after this long, and the TLS handshake,
+# request line, headers and body together must arrive within it, or the connection is shut down
+# without an answer. The request line and headers are capped at 16 KiB in total.
 socket_timeout_s = 10
 # Largest request body in bytes, 1024..65536. Default 8192.
 max_body_bytes = 8192
@@ -187,11 +199,20 @@ rpc_timeout_s = 30
 # 600..86400. The idle limit cannot exceed the absolute one. Defaults 900 and 28800.
 session_idle_s = 900
 session_absolute_s = 28800
-# Signed-in operators at once, 1..16 (each holds a NETCONF session). Default 4.
+# Signed-in operators at once, 1..16 (each holds a NETCONF session). Default 4. A sign-in over the
+# cap is refused; nobody else is signed out.
 max_sessions = 4
-# Sign-in attempts per minute from one address (1..60) and in total (1..600). Defaults 5 and 20.
-login_per_source_per_min = 5
-login_global_per_min = 20
+# Sessions one Junos user may hold at once, 1..16. Default 2: a sign-in beyond that by the same user
+# (compared case-insensitively) closes that user's oldest session. Not applied to lab-token.
+max_sessions_per_user = 2
+# Only sign-ins that reached Junos and failed count. Failed sign-ins per minute for one user name
+# from one address (1..60), and from one address over all user names (1..600); behind the SSH
+# tunnel every client is 127.0.0.1, so the second is shared by everyone on the tunnel. A success
+# clears that user name's failures from that address. Defaults 5 and 20.
+login_failures_per_user_per_min = 5
+login_failures_per_source_per_min = 20
+# Sign-ins checked by Junos at once, 1..8. Default 2. More at the same moment get HTTP 429.
+login_concurrent = 2
 # lab-token backend only: absolute path of a file holding the token (at least 32 characters, ASCII,
 # mode 0600). Default: unset.
 lab_token_file =
@@ -203,7 +224,9 @@ level = INFO
 # daemonized app's stderr goes is not known.
 file = /var/db/jwicket/jwicket.log
 # Audit trail, one JSON object per line: who did what, from where, when. Default: unset (written
-# to the diagnostic log). Lab: its own file, which is qualification evidence.
+# to the diagnostic log, which by default is stderr only). Lab: its own file, which is
+# qualification evidence. A failed sign-in is recorded with a keyed hash of the user name
+# (user_hash), never the name; refusals of clients without a session are counted per minute.
 audit_file = /var/db/jwicket/audit.jsonl
 # Rotate each file at this size in bytes (10000..50000000) and keep this many old copies (1..20).
 # Defaults 1000000 and 3.
@@ -211,8 +234,10 @@ max_bytes = 1000000
 backups = 3
 ```
 
-Check it on the workstation first; the check applies the same file rules, so give the file mode
-`0600` in a directory only you can write:
+Check it on the workstation first. The check applies the settings-file rules (owner, mode and the
+directories above it, so give the file mode `0600` in a directory only you can write) and validates
+every value; token and TLS files are checked only when the daemon starts on the device, where they
+live:
 
 ```
 chmod 600 jwicket.ini
@@ -308,8 +333,11 @@ Expect `TLS is off; listening on loopback only (127.0.0.1)` and
 `commit`. If not, do not confirm: let the change roll back, and use "Debugging" below. A refused start
 writes its reason (`startup refused: ...`) to stderr, and also to `/var/db/jwicket/startup-refused.txt`
 when that directory exists, because the log file is opened only after the settings are accepted:
-`file show /var/db/jwicket/startup-refused.txt`. Junos stops restarting an application that keeps
-exiting ("thrashing, not restarted", verified).
+`file show /var/db/jwicket/startup-refused.txt`. One refusal happens before the settings are read:
+if a module was loaded from the bundle's own directory, the bundle prints `jwicket: refusing to
+start: code was loaded from this file's directory: ...` to stderr only and exits with status 2;
+remove the file it names from `/var/db/scripts/jet/`. Junos stops restarting an application that
+keeps exiting ("thrashing, not restarted", verified).
 
 ## 7. Open the UI through an SSH tunnel only
 
@@ -324,6 +352,12 @@ listener stays on the device's loopback: nothing listens on fxp0 or a revenue po
 changes, and `junos/zone-access.set` is not needed. Plain HTTP is acceptable only because both ends
 are loopback and the hop between them is SSH. Keep the local port at 8443, or change `allowed_hosts`
 to match.
+
+Cookies are not separated by port (RFC 6265, section 8.5): any other service your browser reaches
+on `127.0.0.1` while you are signed in, including another tunnel's far end, receives the J-Wicket
+session cookie. Use a browser profile that opens nothing else on `127.0.0.1` during a lab session.
+The cookie's name (`jwicket-<8 hex>`) changes at each daemon start, so two J-Wicket tunnels do not
+overwrite each other's cookie, and a restart signs everyone out.
 
 Unverified: whether this release's SSH service allows TCP forwarding (Q-NET-03 records it). If the
 tunnel reports `administratively prohibited`, the statement to look for is

@@ -128,6 +128,43 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual((d1.closed, d2.closed), (1, 0))
         self.assertIsNotNone(self.store.get(t2))
 
+    def test_one_session_per_user_the_new_sign_in_replaces_the_oldest(self) -> None:
+        """SECU-5: one account cannot hold every slot; a new sign-in by the same user closes its oldest."""
+        store = SessionStore(idle_s=100, absolute_s=300, max_sessions=4, max_per_user=1, clock=self.clock)
+        devices = [FakeDevice("auditor") for _ in range(4)]
+        tokens = []
+        replaced: List[Any] = []
+        for dev in devices:
+            token, _ = store.create(user="auditor", backend="netconf", device=dev, source="127.0.0.1",
+                                    user_key="auditor", replaced=replaced)
+            tokens.append(token)
+            self.clock.advance(1)
+        self.assertEqual(store.count(), 1)
+        self.assertEqual([d.closed for d in devices], [1, 1, 1, 0])
+        self.assertEqual(len(replaced), 3)
+        self.assertIsNone(store.get(tokens[0]))
+        self.assertIsNotNone(store.get(tokens[-1]))
+        # Another person can still sign in.
+        store.create(user="admin", backend="netconf", device=FakeDevice("admin"), source="127.0.0.1", user_key="admin")
+        self.assertEqual(store.count(), 2)
+
+    def test_per_user_limit_above_one_keeps_the_newest(self) -> None:
+        store = SessionStore(idle_s=100, absolute_s=300, max_sessions=4, max_per_user=2, clock=self.clock)
+        devices = [FakeDevice("a") for _ in range(3)]
+        for dev in devices:
+            store.create(user="a", backend="netconf", device=dev, source="s", user_key="a")
+            self.clock.advance(1)
+        self.assertEqual([d.closed for d in devices], [1, 0, 0])
+
+    def test_sessions_without_a_user_key_are_not_limited_per_user(self) -> None:
+        """Lab-token sessions all carry the daemon account's name: only the overall cap applies."""
+        store = SessionStore(idle_s=100, absolute_s=300, max_sessions=2, max_per_user=1, clock=self.clock)
+        store.create(user="svc", backend="lab-token", device=FakeDevice("svc"), source="s")
+        store.create(user="svc", backend="lab-token", device=FakeDevice("svc"), source="s")
+        self.assertEqual(store.count(), 2)
+        with self.assertRaises(SessionLimit):
+            store.create(user="svc", backend="lab-token", device=FakeDevice("svc"), source="s")
+
     def test_failing_device_close_does_not_break_the_store(self) -> None:
         dev = ExplodingDevice("x")
         token, _ = self.store.create(user="x", backend="netconf", device=dev, source="127.0.0.1")
@@ -139,68 +176,92 @@ class SessionStoreTests(unittest.TestCase):
 
 
 class ThrottleTests(unittest.TestCase):
+    """SECU-3: only failed sign-ins that reached the backend count; per (source, user name), with a
+    looser cap per source; concurrency instead of a daemon-wide per-minute budget."""
+
     def setUp(self) -> None:
         self.clock = FakeClock(0.0)
 
-    def test_per_source_limit_and_retry_after(self) -> None:
-        t = LoginThrottle(per_source=3, overall=100, clock=self.clock)
+    def test_per_name_limit_and_retry_after(self) -> None:
+        t = LoginThrottle(per_name=3, per_source=100, clock=self.clock)
         for _ in range(3):
-            self.assertIsNone(t.attempt("192.0.2.1"))
+            self.assertIsNone(t.check("192.0.2.1", "alice"))
+            t.failed("192.0.2.1", "alice")
             self.clock.advance(1)
         self.clock.now = 10.0
-        wait = t.attempt("192.0.2.1")
+        wait = t.check("192.0.2.1", "alice")
         self.assertIsNotNone(wait)
-        self.assertAlmostEqual(wait or 0, 50.0)  # the oldest attempt (t=0) leaves the 60 s window at t=60
-        self.assertIsNone(t.attempt("192.0.2.2"))  # another source is unaffected
+        self.assertAlmostEqual(wait or 0, 50.0)  # the oldest failure (t=0) leaves the 60 s window at t=60
+        self.assertIsNone(t.check("192.0.2.2", "alice"))  # another source is unaffected
+        self.assertIsNone(t.check("192.0.2.1", "bob"))  # so is another user name from the same source
 
-    def test_refused_attempts_do_not_extend_the_wait(self) -> None:
-        t = LoginThrottle(per_source=1, overall=100, clock=self.clock)
-        self.assertIsNone(t.attempt("a"))
-        for when in (10.0, 30.0, 59.0):
-            self.clock.now = when
-            self.assertIsNotNone(t.attempt("a"))
+    def test_user_names_compare_case_insensitively(self) -> None:
+        t = LoginThrottle(per_name=1, per_source=100, clock=self.clock)
+        t.failed("a", "Alice")
+        self.assertIsNotNone(t.check("a", "ALICE"))
+
+    def test_checking_records_nothing(self) -> None:
+        t = LoginThrottle(per_name=1, per_source=1, clock=self.clock)
+        for _ in range(50):
+            self.assertIsNone(t.check("a", "alice"))
+
+    def test_success_clears_that_names_failures(self) -> None:
+        t = LoginThrottle(per_name=2, per_source=100, clock=self.clock)
+        t.failed("a", "alice")
+        t.succeeded("a", "alice")
+        t.failed("a", "alice")
+        self.assertIsNone(t.check("a", "alice"))
+
+    def test_source_cap_over_all_names(self) -> None:
+        t = LoginThrottle(per_name=5, per_source=3, clock=self.clock)
+        for i in range(3):
+            t.failed("192.0.2.9", f"user{i}")
+        self.clock.now = 15.0
+        self.assertAlmostEqual(t.check("192.0.2.9", "fresh-name") or 0, 45.0)
+        self.assertIsNone(t.check("192.0.2.10", "fresh-name"))  # other sources are unaffected
         self.clock.now = 60.0
-        self.assertIsNone(t.attempt("a"))
+        self.assertIsNone(t.check("192.0.2.9", "fresh-name"))
 
     def test_window_expiry(self) -> None:
-        t = LoginThrottle(per_source=2, overall=100, clock=self.clock)
-        self.assertIsNone(t.attempt("a"))
-        self.assertIsNone(t.attempt("a"))
-        self.assertIsNotNone(t.attempt("a"))
+        t = LoginThrottle(per_name=2, per_source=100, clock=self.clock)
+        t.failed("a", "u")
+        t.failed("a", "u")
+        self.assertIsNotNone(t.check("a", "u"))
         self.clock.advance(60)
-        self.assertIsNone(t.attempt("a"))
+        self.assertIsNone(t.check("a", "u"))
 
     def test_retry_after_is_at_least_one_second(self) -> None:
-        t = LoginThrottle(per_source=1, overall=100, clock=self.clock)
-        t.attempt("a")
+        t = LoginThrottle(per_name=1, per_source=100, clock=self.clock)
+        t.failed("a", "u")
         self.clock.now = 59.9
-        self.assertEqual(t.attempt("a"), 1.0)
+        self.assertEqual(t.check("a", "u"), 1.0)
 
-    def test_overall_limit_across_sources(self) -> None:
-        t = LoginThrottle(per_source=10, overall=3, clock=self.clock)
-        for i in range(3):
-            self.assertIsNone(t.attempt(f"192.0.2.{i}"))
-        self.clock.now = 15.0
-        wait = t.attempt("192.0.2.99")
-        self.assertAlmostEqual(wait or 0, 45.0)
-        self.clock.now = 60.0
-        self.assertIsNone(t.attempt("192.0.2.99"))
+    def test_concurrent_backend_checks_are_capped(self) -> None:
+        t = LoginThrottle(per_name=5, per_source=5, concurrent=2, clock=self.clock)
+        self.assertTrue(t.begin())
+        self.assertTrue(t.begin())
+        self.assertFalse(t.begin())
+        t.end()
+        self.assertTrue(t.begin())
 
-    def test_tracked_sources_are_capped(self) -> None:
-        with mock.patch.object(throttle_mod, "MAX_TRACKED_SOURCES", 8):
-            t = LoginThrottle(per_source=5, overall=10_000, clock=self.clock)
+    def test_tracked_sources_and_names_are_capped(self) -> None:
+        with mock.patch.object(throttle_mod, "MAX_TRACKED_SOURCES", 8), \
+                mock.patch.object(throttle_mod, "MAX_TRACKED_NAMES", 8):
+            t = LoginThrottle(per_name=5, per_source=10_000, clock=self.clock)
             for i in range(50):
-                t.attempt(f"198.51.100.{i}")
+                t.failed(f"198.51.100.{i}", f"u{i}")
             self.assertLessEqual(len(t._sources), 8)
+            self.assertLessEqual(len(t._names), 8)
             # The most recently seen sources are the ones kept.
             self.assertIn("198.51.100.49", t._sources)
             self.assertNotIn("198.51.100.0", t._sources)
 
     def test_default_cap_bounds_memory(self) -> None:
-        t = LoginThrottle(per_source=5, overall=10_000_000, clock=self.clock)
-        for i in range(throttle_mod.MAX_TRACKED_SOURCES + 200):
-            t.attempt(f"src-{i}")
+        t = LoginThrottle(per_name=5, per_source=10_000_000, clock=self.clock)
+        for i in range(throttle_mod.MAX_TRACKED_NAMES + 200):
+            t.failed(f"src-{i % (throttle_mod.MAX_TRACKED_SOURCES + 100)}", f"u{i}")
         self.assertLessEqual(len(t._sources), throttle_mod.MAX_TRACKED_SOURCES)
+        self.assertLessEqual(len(t._names), throttle_mod.MAX_TRACKED_NAMES)
 
 
 class UsernameTests(unittest.TestCase):

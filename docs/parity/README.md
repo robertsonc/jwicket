@@ -38,8 +38,9 @@ release ([charter](../charter.md), [ADR 0008](../adr/0008-release-scoped-parity.
 [ADR 0008](../adr/0008-release-scoped-parity.md) records the choice (Proposed until the owner
 accepts it, [governance D11](../governance.md#25-decisions-pending)). "Parity" without a named
 release and an itemised list cannot be tested and will drift. J-Web's structure moves between releases: the
-25.2 guide's table of contents has 277 topics against 24.4's 453 and adds a "Shared Objects and
-Identity" section (**verified**, as recorded in
+25.2 guide's table of contents has 276 topics against 24.4's 453 (both counted as unique topic URLs,
+without `index.html` and the PDF), adds a "Shared Objects and Identity" section and has no top-level
+"Security Policies and Objects" or "Security Services" section (**verified**, as recorded in
 [governance 2.3](../governance.md#23-the-parity-reference-release)). A ledger keyed to a moving
 target cannot measure progress.
 

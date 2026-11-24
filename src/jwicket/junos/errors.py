@@ -43,6 +43,17 @@ class RpcFailed(JunosError):
     kind = "failed"
 
 
+class MalformedReply(RpcFailed, ValueError):
+    """The device answered, but not in a shape J-Wicket can read (for example no <configuration>).
+
+    A failed read like any other, so every caller that maps JunosError to a panel state shows
+    "failed" instead of an HTTP error. Also a ValueError, for callers that parse replies directly.
+    """
+
+    def __init__(self, message: str, public: str = "") -> None:
+        super().__init__(message, public or "The device's reply could not be read.")
+
+
 class RpcTimeout(RpcFailed):
     """The device did not answer in time. A failure of the read, never evidence about the device."""
 

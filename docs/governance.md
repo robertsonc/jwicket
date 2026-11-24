@@ -173,8 +173,10 @@ one row per page or operation.
 qualified on 22.4 while measuring parity against J-Web 24.4.
 
 **Why the reference stays pinned.** J-Web's structure changes between releases. The 25.2 guide's
-table of contents has 277 topics against 24.4's 453, and adds a "Shared Objects and Identity"
-section (**verified**, the 25.2 and 24.4 guide tables of contents, read 2026-11-24). A ledger keyed
+table of contents has 276 topics against 24.4's 453 (each counted as unique topic URLs, without
+`index.html` and the PDF), adds a "Shared Objects and Identity" section, and has no top-level
+"Security Policies and Objects" or "Security Services" section (**verified**, the 25.2 and 24.4
+guide tables of contents, `__toc.js`, read 2026-11-24). A ledger keyed
 to a moving target cannot measure progress.
 
 **How it changes.** Only the owner moves the reference, and only through these steps:
@@ -263,7 +265,7 @@ earlier than G5. **Proposed** placement, for the owner (D7):
 | --- | --- | --- |
 | Q-NET-03 SSH local forwarding | G1 | Every G1 lab test reaches the UI through the tunnel ([ADR 0003](adr/0003-tls-off-loopback.md)); this is a precondition, not a feature |
 | Q-RT-04 survives reboot | G2 (G5 already names it) | SEs' lab devices reboot. G5 requires it in any case |
-| Q-AUTH-04 lockout versus throttle | G2 | Before several SEs share a lab device; behind the tunnel every operator shares one sign-in budget ([architecture, gap 3](architecture.md#15-known-gaps-in-the-current-code)) |
+| Q-AUTH-04 lockout versus throttle | G2 | Before several SEs share a lab device; behind the tunnel every operator shares one per-source failure budget, and a named account can be locked out deliberately ([architecture, gap 3](architecture.md#15-known-gaps-in-the-current-code)) |
 | Q-NET-01 reachability on hardware | G2 | Needed before any non-loopback listener on hardware; the tunnel needs none |
 | Q-NET-02 8443 collision | G2 | Before 8443 is relied on as the default port on hardware |
 
@@ -401,8 +403,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   `/var/db/jwicket/jwicket.log` for `listening on 127.0.0.1:8443 tls=False backend=...`, then
   confirm. Stop the process with `kill`, then with `kill -9`, and time each restart. Commit a change
   to the application's statements and check it restarts. Start once with a bad settings file and
-  check `startup-refused.txt` and Junos's "thrashing, not restarted". Record resident and virtual
-  memory after ten idle minutes, and with one signed-in operator.
+  check `startup-refused.txt` and Junos's "thrashing, not restarted". Record where a daemonized
+  app's standard error goes, because with `[log] file` and `[log] audit_file` unset (the defaults)
+  the diagnostic log and the audit trail go only there. Record resident and virtual memory after
+  ten idle minutes, and with one signed-in operator.
 - **Pass:** the daemon listens with no arguments; it restarts without operator action after both
   kills; a refused start writes its reason where `file show` can read it; the self-test digest
   matches the build; idle memory is recorded (the budget for small routing engines is Q-HW-01's).
@@ -433,8 +437,14 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   deploy-lab.md step 2 requires. Register each without `daemonize` and run it with
   `request extension-service start`. Record the output, any veriexec line in the kernel log, and
   `cscript` messages. If the lab owner has the tooling, also try the unsigned package form.
+  Also record `sys.path` as Junos starts the app (`cscript -mjet ... -f <file>`, spike evidence):
+  whether the script's directory is on it. The bundle removes that directory before any other
+  import and refuses to start if a module was loaded from it; its self-test reports
+  `path_removed` and `foreign_modules`, so run the `jwicket_selftest.py` copy with a harmless
+  lab-only `json.py` beside it and record both fields.
 - **Pass:** a recorded answer, with the exact error if imports fail. Either answer passes. "Imports
   work" makes the bundle optional, not wrong ([ADR 0001](adr/0001-on-box-pure-python-single-file.md)).
+  The self-test with a planted `json.py` reports no foreign module.
 - **Platforms:** lab vSRX on each release; one hardware platform.
 - **Status:** not run.
 
@@ -454,10 +464,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 #### Q-RT-05 Survives a Junos upgrade
 
 - **Purpose:** record what happens to `/var/db/scripts/jet/`, `/var/db/jwicket/` and the
-  extension-service statements across an upgrade. No Juniper page read says
-  (**unknown**). `respawn-on-normal-exit` is described as restarting an app that exits normally
-  "such as during an upgrade", a hint that apps are expected to survive some upgrades
-  (**inferred**).
+  extension-service statements across an upgrade. No Juniper page read says (**unknown**). The
+  `file (JET)` statement page describes `respawn-on-normal-exit` as restarting an app "after you
+  exit the application normally, such as when you upgrade the JET application" (**verified**,
+  [`file (JET)`](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/file-edit-system-jet.html));
+  that is an upgrade of the app, not of Junos, and says nothing about Junos upgrades.
 - **Method:** with J-Wicket running on release N, upgrade to N+1 by the platform's documented
   procedure, recorded verbatim. After the reboot, check the files, owner, mode, SHA-256, the
   configuration statements and the daemon; run Q-RT-01 on the new release. Repeat a downgrade.
@@ -478,13 +489,20 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Method:** [deploy-lab.md](deploy-lab.md) steps 5 to 7: `set system services netconf ssh`,
   backend `netconf`, the SSH tunnel. Sign in once with a super-user account and once with a
   lab-only account in a read-only class. For each, record the J-Wicket audit records, the device's
-  `UI_NETCONF_CMD` lines, and what the UI shows. Sign in with a wrong password. Sign out, let a
-  session time out, and check each time that the device session is gone. Fill the session cap
-  (`max_sessions`).
+  `UI_NETCONF_CMD` lines, and what the UI shows. Sign in with a wrong password. Then give the
+  daemon account an SSH key that the lab account accepts (in its `~/.ssh`, and named in its
+  `~/.ssh/config`) and sign in as that account with a wrong password: J-Wicket tells PyEZ not to
+  offer keys or read the SSH config (`look_for_keys=False`, `ssh_config` set to `/dev/null`), but
+  PyEZ ignores keyword arguments it does not know, so only this test shows that the on-box PyEZ
+  honours them. Remove the key afterwards. Sign out, let a session time out, and check each time
+  that the device session is gone. Sign in three times as the same account and check that the first
+  session is closed (`max_sessions_per_user`, default 2, `session_replaced`). Fill the session cap
+  (`max_sessions`) with distinct accounts.
 - **Pass:** both accounts sign in; the device attributes every J-Wicket RPC to the signed-in
   operator, not to the daemon's account; a wrong password is refused by Junos and shown as an
-  operator-safe message; sign-out and timeout end the device session; no password appears in any
-  J-Wicket file.
+  operator-safe message, also when the daemon account holds an accepted key; sign-out, timeout and
+  a second sign-in by the same account end the device session; no password appears in any
+  J-Wicket file, and a failed sign-in appears in the audit trail as `user_hash`, not as the name.
 - **Platforms:** lab vSRX on each release; one hardware platform.
 - **Status:** not run. The spike's reads ran as the daemon's account (`jcluser`, class
   `j-super-user`) through a no-argument local `Device()` session. That is not this test.
@@ -525,15 +543,23 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 
 #### Q-AUTH-04 Junos lockout and J-Wicket's throttle
 
-- **Purpose:** J-Wicket's sign-in throttle (5 attempts per minute per source and 20 overall, by
-  default) and Junos's own login retry and lockout options interact predictably.
+- **Purpose:** J-Wicket's sign-in limits and Junos's own login retry and lockout options interact
+  predictably. By default J-Wicket counts only failed sign-ins that reached Junos: 5 a minute for
+  one user name from one source address (`login_failures_per_user_per_min`), 20 a minute from one source
+  address over all names (`login_failures_per_source_per_min`), with at most 2 sign-ins checked at once
+  (`login_concurrent`) ([architecture section 3.2](architecture.md#32-sign-in)). Behind the tunnel
+  every source is `127.0.0.1`, so the per-source budget is shared, and a named account can be
+  locked out on purpose by failing its sign-in, as Junos retry options allow.
 - **Method:** configure Junos's login retry options under `[edit system login]` (the exact
   statements are recorded from the device with `?`). From one tunnel, then from two operators on
-  the same tunnel, send wrong passwords. Record J-Wicket's 429 responses, Junos's lockout, the
-  error a locked account's NETCONF sign-in returns, and the message J-Wicket shows.
-- **Pass:** the interaction is recorded; no sequence of requests from one operator locks out
-  another account; each case shows an operator-safe message; the throttle defaults are confirmed or
-  changed from the record.
+  the same tunnel, send wrong passwords for one account, then for many names. Send requests that
+  never reach Junos (bad JSON, empty fields, a cross-origin `Origin`) and check they cost nothing.
+  Record J-Wicket's 429 responses (with `retry_after_s`), Junos's lockout, the error a locked
+  account's NETCONF sign-in returns, and the message J-Wicket shows.
+- **Pass:** the interaction is recorded; requests that never reach Junos lock nobody out; failures
+  for one account do not block another account's sign-in from a different name, except through
+  the shared per-source budget, which is recorded; each case shows an operator-safe message; the
+  defaults are confirmed or changed from the record.
 - **Platforms:** lab vSRX.
 - **Status:** not run.
 
@@ -551,8 +577,9 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   handshake time. Then try the candidate on-device paths (the Junos PKI local certificate store,
   and a certificate J-Wicket generates). Record the settings refusals for wrong owner and mode.
 - **Pass:** TLS 1.2 handshakes succeed (TLS 1.3 recorded if the on-box OpenSSL offers it); TLS 1.0
-  and 1.1 are refused; the `Secure` cookie, the `__Host-` cookie name and HSTS are present; bad file
-  modes refuse the start; one provisioning path is documented, and a spec chooses it.
+  and 1.1 are refused; the `Secure` cookie, the `__Host-jwicket-<8 hex>` cookie name and HSTS are
+  present; bad file modes, and a directory above a TLS file that another account owns or can
+  write, refuse the start; one provisioning path is documented, and a spec chooses it.
 - **Platforms:** lab vSRX on each release; hardware under Q-HW-01 for handshake cost.
 - **Status:** not run. The spike's T8 (TLS) was not run.
 
@@ -564,8 +591,13 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   one; then bind to a revenue interface in a zone with only
   `host-inbound-traffic system-services webapi-ssl` ([`junos/zone-access.set`](evidence/2026-11-23-vsrx-spike/junos/zone-access.set)).
   Test from a host in that zone; confirm it fails with no host-inbound statement; record what else
-  the setting admits. Record per model whether it has a dedicated management port: the notebook
-  treats the SRX300 class as having no fxp0, and this repository has not checked that per model.
+  the setting admits. Record per model whether it has a dedicated management port. The J-Web
+  24.4 guide's Table 1 (factory defaults,
+  [j-web-security-starting.html](https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/topics/topic-map/j-web-security-starting.html))
+  gives SRX300 and SRX320 management through ge-0/0/1 to ge-0/0/6, and SRX340, SRX345 and SRX380
+  through MGMT/fxp0 (**verified** as factory defaults); that SRX300 and SRX320 have no dedicated
+  management port at all is **inferred** from that table. The spike notebook treats the whole
+  SRX300 class as having no fxp0, which the table contradicts for SRX340, SRX345 and SRX380.
   **Proposed** by [Spec 003](specs/003-firewall-policy-builder.md#15-qualification-needed): also
   record whether security policies with `to-zone junos-host` affect management access through fxp0
   or a revenue zone, and J-Wicket's own loopback NETCONF session.
@@ -578,8 +610,9 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   `system-services all` did not admit the custom port, `any-service` did (too broad to ship), and
   on TCP 8443 `webapi-ssl` alone admitted it. That filtering is by port is **inferred** from that
   one observation.
-  - Met for the revenue zone on that vSRX: reachable with exactly `webapi-ssl`, and not without a
-    host-inbound statement.
+  - Met for the revenue zone on that vSRX: reachable on TCP 8443 with exactly `webapi-ssl`.
+    "Not without a host-inbound statement" was observed on TCP 3000 only (notebook, T4 at 04:15);
+    it is not recorded for 8443.
   - Not met: the listener was clear text, not TLS (Q-TLS-01 has not run); the daemon bound
     `0.0.0.0`, not the fxp0 address, and reached fxp0 only through vLabs forwarding; only TCP 8443
     was checked, so whether `webapi-ssl` opens any other port is not known; nothing was recorded on
@@ -650,12 +683,14 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 
 - **Purpose:** validate `MAX_UNFILTERED = 5000` in
   [`junos/sessions.py`](../src/jwicket/junos/sessions.py). A full session-table pull makes the data
-  plane send every session to the routing engine (community report quoting Juniper KB28956).
+  plane send every session to the routing engine (a 2015 community-forum reply quoting the title
+  of Juniper KB28956; the KB was not read).
 - **Method:** drive 1,000, 5,000 and 20,000 sessions through the lab device from lab-only hosts.
   For each, measure routing-engine CPU, mgd and time for the summary and list reads exactly as
   J-Wicket sends them, at the default poll interval, with and without device-side filters. On a
-  cluster, check whether counts double ([architecture, gap 2](architecture.md#15-known-gaps-in-the-current-code)).
-  Record what happens when the summary read fails, for Spec 004 open question 1.
+  cluster, record each node's counts and whether a node's count includes its Backup copies
+  (J-Wicket now takes the largest node's count; [architecture, gap 2](architecture.md#15-known-gaps-in-the-current-code)).
+  Record what happens when the summary read fails (J-Wicket now lists nothing: `count-unknown`).
 - **Pass:** at 5,000 matching sessions the list read at the default interval stays within the
   budget (D9); above the threshold J-Wicket refuses before pulling; the threshold is confirmed or
   changed per platform class.
@@ -693,7 +728,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   [Spec 004](specs/004-live-sessions-and-logs.md#11-qualification-needed) list (namespaces,
   `junos:group` placement, `default-policy` encoding, cluster `device-stats` layout, the standalone
   cluster error, session list and summary on a branch device, a cluster and a multi-SPU platform,
-  `get-log` encoding, the report wrapper), and what
+  `get-log` encoding, the report wrapper, where an SPU label sits in a per-SPU session list, whether
+  the narrowed inventory filter returns only the selected `[edit security]` children and each
+  logical or tenant system's key and `inactive` attribute, where `junos:comment` elements sit),
+  and what
   [Spec 003](specs/003-firewall-policy-builder.md#15-qualification-needed) lists for its ownership
   read. **Proposed** (Spec 001 open question 1, Spec 003 section 15): record
   `show security match-policies` and `show security shadow-policies` for the lab rule base, so the
@@ -725,8 +763,8 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   what each node's J-Wicket does to signed-in operators; record `get-chassis-cluster-status` and
   the session Active and Backup copies on each node for Q-REL-01.
 - **Pass:** a verified placement procedure written into the lab procedure; each node's J-Wicket runs
-  or fails closed; after failover, operators can sign in on the new primary; the double-count
-  question settled.
+  or fails closed; after failover, operators can sign in on the new primary; whether one node's
+  session count includes its Backup copies settled (J-Wicket takes the largest node's count).
 - **Platforms:** a lab chassis-cluster pair (vSRX if the lab supports it); a hardware pair before
   G5.
 - **Status:** not run.
@@ -746,9 +784,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 #### Q-HA-03 Multinode High Availability
 
 - **Purpose:** detect Multinode High Availability (MNHA) and define J-Wicket's behaviour on each
-  node. MNHA nodes "appear as independent nodes to the rest of the network", and Juniper recommends
-  configuration groups with `commit peers-synchronize` (**verified**, Juniper MNHA page). J-Wicket
-  detects MNHA from configuration presence only (**inferred** to be enough).
+  node. MNHA is two firewalls "presenting themselves as independent nodes to the rest of the
+  network", and Juniper recommends configuration groups with `commit peers-synchronize`
+  (**verified**, Juniper MNHA page). J-Wicket detects MNHA from the presence of an active (not
+  deactivated) `chassis high-availability` only (**inferred** to be enough).
 - **Method:** on a lab MNHA pair: capture the `chassis high-availability` configuration and, with
   lab-only tooling, `get-chassis-high-availability-information` (not allowlisted); run J-Wicket on
   each node; record session fields, and whether `commit peers-synchronize` is configured.
@@ -780,13 +819,16 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Purpose:** know where security logs are for each security log mode and platform, so the Logs
   view never shows an unexplained empty pane ([Spec 004](specs/004-live-sessions-and-logs.md),
   [architecture section 9](architecture.md#9-security-logging-modes)). The on-box reporting platform
-  list does not include the SRX5000 line, and J-Web 24.4's log pages are "available on all the SRX
-  Series Firewalls except the SRX5000 line" (**verified**); that on-box reporting is absent there is
-  **inferred**.
+  list does not include the SRX5000 line, and J-Web 24.4's six log grids (not its System log page)
+  are "available on all the SRX Series Firewalls except the SRX5000 line" (**verified**); that
+  on-box reporting is absent there is **inferred**. J-Wicket still offers a configured report there,
+  and in event mode, with a note.
 - **Method:** for each cell: record the effective default mode (the vSRX default is documented two
   ways, Spec 004 open question 12), what lands in the routing-engine buffer in event mode, whether
-  on-box reporting exists, which report types accept `expression`, how `count` orders records, and
-  the time zone of report times. Compare with J-Wicket's sources card.
+  on-box reporting exists, which report types accept `expression`, how `count` orders records with
+  and without `descending` (J-Wicket sends `descending` on a first read, on the inference that the
+  default is oldest first), and the time zone of report times. Compare with J-Wicket's sources
+  card.
 - **Pass:** the matrix is recorded; the sources card matches it on every cell; the default-mode
   table in [`junos/logs.py`](../src/jwicket/junos/logs.py) is corrected from it.
 - **Platforms:** every platform in the matrix, the SRX5000 line in particular.
@@ -1035,5 +1077,6 @@ to the same path on `networkingdocs.hpe.com`.
   <https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/topics/task/j-web-security-basic-settings-configuring.html>
 - System Log Explorer, `UI_NETCONF_CMD`:
   <https://apps.juniper.net/syslog-explorer/messageDetails?msg=UI_NETCONF_CMD>
-- Session-table pull cost, community thread quoting KB28956:
+- Session-table pull cost, a 2015 community-forum reply quoting the title of KB28956 (the KB itself
+  was not read):
   <https://community.networking.hpe.com/discussion/info-over-logs>

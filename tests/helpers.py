@@ -133,8 +133,9 @@ def make_app(
     clock: Optional[FakeClock] = None,
     *,
     max_sessions: int = 4,
+    max_per_user: int = 1,
+    per_name: int = 100,
     per_source: int = 100,
-    overall: int = 100,
     audit: Optional[AuditTrail] = None,
     fixture: bool = True,
     warnings: Optional[List[str]] = None,
@@ -142,8 +143,10 @@ def make_app(
     clock = clock or FakeClock()
     return App(
         backend=backend,
-        sessions=SessionStore(idle_s=900, absolute_s=3600, max_sessions=max_sessions, clock=clock),
-        throttle=LoginThrottle(per_source=per_source, overall=overall, clock=clock),
+        sessions=SessionStore(
+            idle_s=900, absolute_s=3600, max_sessions=max_sessions, max_per_user=max_per_user, clock=clock
+        ),
+        throttle=LoginThrottle(per_name=per_name, per_source=per_source, clock=clock),
         audit=audit or AuditTrail(None),
         session_idle_s=900,
         fixture=fixture,

@@ -141,14 +141,20 @@ ADR first.
 ### Device access and the RPC allowlist
 
 - Only [`junos/session.py`](src/jwicket/junos/session.py) sends anything to Junos.
-- RPCs come only from `ALLOWED_RPCS`. Configuration reads use fixed filter constants, from the
+- RPCs come only from `ALLOWED_RPCS`, and every name is checked against it before it is sent. An
+  RPC name is a constant, or comes from a fixed module-level list selected by a parameter that was
+  checked against that list (today only the report reads, `REPORT_TYPES`); never text from a
+  request. Configuration reads go through a separate method with fixed filter constants, from the
   committed database with inheritance and group annotations
-  ([ADR 0005](docs/adr/0005-committed-config-with-provenance.md)). No RPC name, attribute, filter
-  or configuration text is ever built from request input.
-- Read the narrowest subtree the feature needs. Never `system login` or other secret-bearing
-  hierarchies.
+  ([ADR 0005](docs/adr/0005-committed-config-with-provenance.md)). No attribute, filter or
+  configuration text is ever built from request input.
+- Read the narrowest subtree the feature needs: the children you parse, not their parent. Never
+  `system login`, all of `[edit security]` (IKE pre-shared keys), a whole logical system, or other
+  secret-bearing hierarchies.
 - Parsers match local names (namespaces ignored), tolerate what they do not know, and report it
-  (`unmodeled`, warnings). Nothing is dropped silently. A denied read is `denied`, never empty.
+  (`unmodeled` on the object, and a warning). Nothing is dropped silently. Configuration comments
+  are not settings. A deactivated statement is never treated as in effect. A denied read is
+  `denied`, never empty; a reply in an unexpected shape is `failed`, never an HTTP 500.
 - **Adding an RPC to `ALLOWED_RPCS` is a reviewed change.** The pull request must:
   1. name the spec section that needs it, and update that spec's data-sources table;
   2. include a recorded reply from a lab device (the reply, the request, the release and the
@@ -232,8 +238,19 @@ ADR first.
   `^[a-z]+$` accepts `"bob\n"`; the independent test suite found exactly that in the username
   check. Anchor every pattern with `^...\Z`, bound its length, and validate before anything
   reaches Junos.
-- **Operator messages are fixed text.** Device error text goes to the diagnostic log, not to the
-  browser, unless a spec says otherwise and the security reviewer agreed.
+- **Operator messages are fixed text.** Device error text goes to the diagnostic log (INFO, cut to
+  500 characters), not to the browser, unless a spec says otherwise and the security reviewer
+  agreed. The diagnostic handlers escape control characters in every message; keep it that way for
+  any handler you add (`escape_handlers` in [`logs.py`](src/jwicket/logs.py)).
+- **The audit trail records people, not guesses.** A failed sign-in is recorded under a keyed hash
+  of the submitted name (`user_hash`), never the name, because a password typed into the user-name
+  field is the commonest wrong value. Refusals of clients without a session go through
+  `record_refusal`, which aggregates them, so nobody can rotate the audit history away with
+  unauthenticated requests. Polled reads are recorded when what was read changes, not per poll.
+- **The bundle imports nothing from its own directory.** The generated file removes that
+  directory from `sys.path` before any other import, using built-in modules only. Keep it that
+  way: nothing above the scrub in [`tools/bundle.py`](tools/bundle.py) may import a module that is
+  read from disk, and the generated file has no `from __future__` import.
 - **The listener fails closed.** Do not add a plaintext switch, a non-loopback default, or a way
   around the settings file-trust rules ([ADR 0003](docs/adr/0003-tls-off-loopback.md),
   [`settings.py`](src/jwicket/settings.py)).

@@ -80,7 +80,15 @@ class FixtureSession:
             reply = ElementTree.Element("file-content", {"filename": f"/var/log/{filename}"})
             reply.text = body
             return reply
-        return self._load(f"{name}.xml")
+        loaded = self._load(f"{name}.xml")
+        if name.startswith("get-sec-log-report-detail-") and params.get("descending"):
+            # Emulates the inferred device behaviour (newest first when ``descending`` is sent); the
+            # fixture files hold records oldest first, like the documented sample output.
+            for element in loaded.iter():
+                if element.text and "\n" in element.text.strip():
+                    rows = element.text.strip("\n").split("\n")
+                    element.text = "\n" + "\n".join(reversed(rows)) + "\n"
+        return loaded
 
     def close(self) -> None:
         self.closed = True

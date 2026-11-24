@@ -8,25 +8,118 @@ Differences from the spike, each closing a specific gap:
 * TLS handshakes happen in the worker thread with a socket timeout. Wrapping the listening socket
   (as the spike did) runs every handshake inside ``accept()`` on the single accept thread, so one
   slow client stalls everyone.
-* HTTP/1.0, one request per connection, so a connection slot is never held idle.
+* HTTP/1.0, one request per connection.
+* One deadline for reading the whole request: the TLS handshake, request line, headers and body
+  together must arrive within ``socket_timeout_s``, or the connection is shut down. A per-read
+  socket timeout alone restarts with every byte, so a client trickling one byte at a time could
+  hold a connection slot for ever. The deadline ends once the request is read: answering it may
+  take as long as the device read it asks for.
+* The request line and headers together are capped at ``MAX_HEAD_BYTES`` (the standard library
+  allows 64 KiB per line and 100 headers).
 * Request bodies are capped and need a Content-Length; chunked bodies are refused.
 * Optional Host allowlist; no version in the Server header; errors never carry stack traces.
 """
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import logging
 import socket
 import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
 from jwicket.web.http import BASE_HEADERS, HSTS, Request, Response, parse_query
 
 LOG = logging.getLogger("jwicket.web")
 
 Route = Callable[[Request], Response]
+
+# Request line plus headers. Browsers send a few KiB; the cap keeps a slot from pinning megabytes.
+MAX_HEAD_BYTES = 16 * 1024
+
+
+class HeadTooLarge(http.client.HTTPException):
+    """The request line and headers together exceed MAX_HEAD_BYTES."""
+
+
+class _HeadLimitedReader:
+    """The handler's ``rfile``: ``readline`` (request line and headers) shares one byte budget;
+    ``read`` (the body, whose length is checked separately) is passed through."""
+
+    def __init__(self, raw: BinaryIO, limit: int) -> None:
+        self._raw = raw
+        self._left = limit
+
+    def readline(self, size: int = -1) -> bytes:
+        if self._left <= 0:
+            raise HeadTooLarge(f"request head over {MAX_HEAD_BYTES} bytes")
+        want = self._left + 1 if size is None or size < 0 else min(size, self._left + 1)
+        line = self._raw.readline(want)
+        self._left -= len(line)
+        if self._left < 0:
+            raise HeadTooLarge(f"request head over {MAX_HEAD_BYTES} bytes")
+        return line
+
+    def read(self, size: int = -1) -> bytes:
+        return self._raw.read(size)
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
+class _ReadDeadline:
+    """Shuts a connection down if its request has not been read by the deadline."""
+
+    def __init__(self, seconds: float) -> None:
+        self._lock = threading.Lock()
+        self._sock: Optional[socket.socket] = None
+        self._done = False
+        self.fired = False
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+
+    def start(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sock = sock
+        self._timer.start()
+
+    def retarget(self, sock: socket.socket) -> None:
+        """After the TLS wrap: the wrapped socket now owns the file descriptor."""
+        with self._lock:
+            self._sock = sock
+            fired = self.fired
+        if fired:
+            _shutdown(sock)
+
+    def _fire(self) -> None:
+        with self._lock:
+            if self._done:
+                return
+            self.fired = True
+            sock = self._sock
+        if sock is not None:
+            _shutdown(sock)
+
+    def cancel(self) -> bool:
+        """Stop the deadline. False if it had already fired (the connection is being shut down)."""
+        with self._lock:
+            self._done = True
+            fired = self.fired
+        self._timer.cancel()
+        return not fired
+
+
+def _shutdown(sock: socket.socket) -> None:
+    # The plain socket method, also for an SSLSocket: it ends both directions on the descriptor
+    # without touching the TLS object the handler thread may be reading through.
+    with contextlib.suppress(OSError):
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
 
 
 class Router:
@@ -85,7 +178,14 @@ class JWicketServer(ThreadingHTTPServer):
         self.max_body_bytes = max_body_bytes
         self.allowed_hosts = tuple(h.lower() for h in allowed_hosts)
         self._slots = threading.BoundedSemaphore(max_connections)
+        self._local = threading.local()
         super().__init__(address, Handler)
+
+    def request_read(self) -> bool:
+        """Called by the handler once the whole request has been read: ends the read deadline.
+        False if the deadline had already fired, in which case the request must not be served."""
+        deadline: Optional[_ReadDeadline] = getattr(self._local, "deadline", None)
+        return True if deadline is None else deadline.cancel()
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._slots.acquire(blocking=False):
@@ -99,17 +199,26 @@ class JWicketServer(ThreadingHTTPServer):
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
+        deadline = _ReadDeadline(self.socket_timeout_s)
         try:
             request.settimeout(self.socket_timeout_s)
+            deadline.start(request)
             if self.tls is not None:
                 try:
-                    request = self.tls.wrap_socket(request, server_side=True)
+                    # Wrap first, then hand the deadline the wrapped socket (which now owns the file
+                    # descriptor), then shake hands: a client trickling its handshake is cut off too.
+                    request = self.tls.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+                    deadline.retarget(request)
+                    request.do_handshake()
                 except (ssl.SSLError, OSError) as exc:
                     LOG.info("TLS handshake with %s failed: %s", client_address[0], exc)
                     self.shutdown_request(request)
                     return
+            self._local.deadline = deadline
             super().process_request_thread(request, client_address)
         finally:
+            deadline.cancel()
+            self._local.deadline = None
             self._slots.release()
 
 
@@ -120,6 +229,21 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     def version_string(self) -> str:
         return self.server_version
+
+    def setup(self) -> None:
+        super().setup()
+        self.rfile = _HeadLimitedReader(self.rfile, MAX_HEAD_BYTES)  # type: ignore[assignment]
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except HeadTooLarge:
+            # Only the request line gets here: parse_request answers an oversized header block (431).
+            self.requestline = ""
+            self.request_version = "HTTP/1.0"
+            self.command = ""
+            self.close_connection = True
+            self.send_error(414, "request line too long")
 
     def parse_request(self) -> bool:
         ok = super().parse_request()
@@ -200,6 +324,8 @@ class Handler(BaseHTTPRequestHandler):
             if read is None:
                 return
             body = read
+        if not self.server.request_read():
+            return  # the read deadline fired: the connection is already being shut down
         try:
             query = parse_query(raw_query)
         except ValueError:

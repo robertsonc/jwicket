@@ -23,7 +23,7 @@ from jwicket.api import App, build_router
 from jwicket.auth.backends import AuthBackend, LabTokenBackend, NetconfBackend
 from jwicket.auth.sessions import SessionStore
 from jwicket.auth.throttle import LoginThrottle
-from jwicket.logs import AuditTrail, setup_logging
+from jwicket.logs import AuditTrail, escape_handlers, setup_logging
 from jwicket.settings import (
     DEFAULT_CONFIG_PATH,
     ConfigError,
@@ -75,9 +75,16 @@ def build_app(
     return App(
         backend=backend,
         sessions=SessionStore(
-            idle_s=auth.session_idle_s, absolute_s=auth.session_absolute_s, max_sessions=auth.max_sessions
+            idle_s=auth.session_idle_s,
+            absolute_s=auth.session_absolute_s,
+            max_sessions=auth.max_sessions,
+            max_per_user=auth.max_sessions_per_user,
         ),
-        throttle=LoginThrottle(per_source=auth.login_per_source_per_min, overall=auth.login_global_per_min),
+        throttle=LoginThrottle(
+            per_name=auth.login_failures_per_user_per_min,
+            per_source=auth.login_failures_per_source_per_min,
+            concurrent=auth.login_concurrent,
+        ),
         audit=AuditTrail(settings.log.audit_file, settings.log.max_bytes, settings.log.backups),
         session_idle_s=auth.session_idle_s,
         fixture=fixture,
@@ -112,6 +119,7 @@ def serve(settings: Settings, app: App) -> int:
     def reaper() -> None:
         while not stop.wait(REAP_INTERVAL_S):
             app.sessions.reap()
+            app.audit.flush()  # repeat counts of aggregated refusals whose window has ended
 
     threading.Thread(target=reaper, name="jwicket-reaper", daemon=True).start()
 
@@ -132,6 +140,7 @@ def serve(settings: Settings, app: App) -> int:
         stop.set()
         httpd.server_close()
         app.sessions.close_all()
+        app.audit.flush(force=True)
         app.audit.record("stop", user=None, source="local")
     return 0
 
@@ -167,6 +176,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         settings = load_settings(args.config)
     except ConfigError as exc:
         logging.basicConfig(level=logging.INFO)
+        escape_handlers(logging.getLogger().handlers)
         LOG.error("startup refused: %s", exc)
         record_startup_refusal(args.config, str(exc))
         return 2

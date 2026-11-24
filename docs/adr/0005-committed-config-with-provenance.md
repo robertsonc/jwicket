@@ -13,13 +13,18 @@ object came from. Other users' uncommitted candidate changes are not in effect.
 ## Decision
 
 - Reads use `<get-configuration database="committed" inherit="inherit" groups="groups">`, filtered to
-  the subtrees the inventory needs (security, applications, logical systems, tenants, outbound-ssh,
-  Multinode HA). Never the whole configuration: the rest holds password hashes and secrets.
+  the subtrees the inventory needs (security policies, zones and address books, and applications,
+  for the root and each logical and tenant system; outbound-ssh; Multinode HA). Never the whole
+  configuration, and never all of `[edit security]`: the rest holds password hashes and secrets such
+  as IKE pre-shared keys.
 - Parsers match element and attribute local names, so `junos:group` is found whether or not PyEZ
   has stripped namespaces.
 - Every object carries `group` (the group it came from, if any), `inherited` (which of its parts
   came from elsewhere) and `inactive` with a reason.
-- Nothing is dropped silently: configuration the model does not understand is listed per object.
+- Nothing is dropped silently: configuration the model does not understand is listed per object
+  (policies, zones, interfaces, address entries, sets and books, applications and application sets)
+  and warned per scope. Configuration comments are attached to what they annotate, not listed.
+  Deactivated statements are never treated as in effect.
 
 ## Consequences
 

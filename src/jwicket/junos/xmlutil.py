@@ -12,7 +12,7 @@ xml.etree in tests); only ``.tag``, ``.attrib``, ``.text`` and iteration are use
 
 from __future__ import annotations
 
-from typing import Any, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 Element = Any  # lxml.etree._Element or xml.etree.ElementTree.Element
 
@@ -129,3 +129,91 @@ def present(node: Optional[Element], name: str) -> bool:
 
 def child_tags(node: Optional[Element]) -> List[str]:
     return [local(child.tag) for child in kids(node)]
+
+
+# --- deactivated statements -----------------------------------------------------------------------
+# A deactivated statement stays in the configuration but is not in effect ("deactivated statements
+# ... do not take effect when you issue the commit command", Junos CLI user guide, modifying the
+# configuration). These helpers separate what is in effect from what is only written down.
+
+
+def active_kids(node: Optional[Element], name: Optional[str] = None) -> Iterator[Element]:
+    """Children that are not deactivated (their own ``inactive`` attribute only)."""
+    for child in kids(node, name):
+        if not is_inactive(child):
+            yield child
+
+
+def active_kid(node: Optional[Element], name: str) -> Optional[Element]:
+    return next(active_kids(node, name), None)
+
+
+def active_path(node: Optional[Element], *names: str) -> Optional[Element]:
+    """Like :func:`path`, but None when the node or any step on the way is deactivated."""
+    if node is None or is_inactive(node):
+        return None
+    for name in names:
+        node = active_kid(node, name)
+        if node is None:
+            return None
+    return node
+
+
+def split_names(node: Optional[Element], name: str) -> Tuple[List[str], List[str]]:
+    """A keyed list split into (active keys, deactivated keys)."""
+    active: List[str] = []
+    inactive: List[str] = []
+    for child in kids(node, name):
+        key = text(child, "name")
+        if key is not None:
+            (inactive if is_inactive(child) else active).append(key)
+    return active, inactive
+
+
+# --- configuration comments -----------------------------------------------------------------------
+# ``annotate`` writes a comment that Junos XML returns as <junos:comment> on the line before the
+# statement it annotates (Junos XML protocol guide, configuration mapping to JSON). Namespaces are
+# matched by local name, so it is the element named "comment". It is not configuration: it is never
+# reported as an unmodelled setting, and it is attached to the statement that follows it.
+
+COMMENT = "comment"
+
+
+def statement_tags(node: Optional[Element]) -> List[str]:
+    """Child element names that are configuration statements (comments left out)."""
+    return [tag for tag in child_tags(node) if tag != COMMENT]
+
+
+def comments_before(node: Optional[Element]) -> Dict[int, str]:
+    """For each child of ``node`` that follows one or more comments: id(child) -> their text."""
+    found: Dict[int, str] = {}
+    pending: List[str] = []
+    for child in kids(node):
+        if local(child.tag) == COMMENT:
+            value = text_of(child)
+            if value is not None:
+                pending.append(value)
+            continue
+        if pending:
+            found[id(child)] = "\n".join(pending)
+            pending = []
+    return found
+
+
+def inner_comments(node: Optional[Element]) -> List[Dict[str, Optional[str]]]:
+    """Every comment inside ``node`` with the statement it annotates (``before``: that statement's
+    name, or None when it ends its block)."""
+    out: List[Dict[str, Optional[str]]] = []
+    if node is None:
+        return out
+    for parent in node.iter():
+        children = list(kids(parent))
+        for index, child in enumerate(children):
+            if local(child.tag) != COMMENT:
+                continue
+            value = text_of(child)
+            if value is None:
+                continue
+            following = next((local(c.tag) for c in children[index + 1:] if local(c.tag) != COMMENT), None)
+            out.append({"before": following, "text": value})
+    return out

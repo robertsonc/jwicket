@@ -19,9 +19,9 @@ only**. The per-session XML element names are J-Wicket's inference; no recorded 
 
 | Part | State | Evidence |
 | --- | --- | --- |
-| `/api/sessions`: validated device-side filters, filtered count, refusal, row cap, cluster and SPU locations | Implemented | `test_live.py`: `SessionFilterTests`, `SessionParseTests`, `LiveHttpTests`: pass |
-| `/api/logs/sources`: syslog files, security log mode, streams, on-box reporting, RE buffer | Implemented | `LogSourceTests`, `ModeAndExpressionTests`, `LiveHttpTests`, `ReportHttpTests`: pass |
-| `/api/logs`: file tail with cursor and rotation, report reads with `expression`, buffer reads | Implemented | `TailTests`, `ReportHttpTests`, `ModeAndExpressionTests`: pass |
+| `/api/sessions`: validated device-side filters, filtered count, a guard that fails closed, row cap, cluster and SPU locations | Implemented | `test_live.py`: `SessionFilterTests`, `SessionParseTests`, `LiveHttpTests`, `SessionGuardTests`: pass |
+| `/api/logs/sources`: syslog files, security log mode, streams, on-box reporting, RE buffer, deactivated statements, a cached failure | Implemented | `LogSourceTests`, `LogSourceStateTests`, `ModeAndExpressionTests`, `LiveHttpTests`, `ReportHttpTests`, `LogSourcesFailureTests`: pass |
+| `/api/logs`: parameters checked before any device read, file tail with cursor and rotation, report reads with `expression`, buffer reads | Implemented | `TailTests`, `ReportHttpTests`, `ReportReleaseTests`, `ModeAndExpressionTests`, `LogSourcesFailureTests`, `MalformedReplyTests`: pass |
 | Query language and pushdown planner (`query.js`) | Implemented | `tests/js/query.test.mjs`: pass (2026-11-24) |
 | Log tokeniser, parser, decoder, self-read detection (`logparse.js`) | Implemented | `tests/js/logparse.test.mjs`: pass (2026-11-24) on 46 verbatim documentation lines and the development-server corpus |
 | Sessions view, Logs view, flow diagram, histogram, query bar widget | **Built in the working tree, not yet committed, not yet checked in a browser** (AC-004-20 not met) | None yet: no browser check has run |
@@ -42,9 +42,10 @@ how much is it moving, and why did that other one close or get denied? The CLI a
 `show security flow session` and `show log`, but:
 
 - **Listing sessions is expensive for the device.** For a list request the data plane sends every
-  matching session to the routing engine. A Juniper support reply citing KB28956 describes
-  routing-engine CPU at "Idle 0 percent" after `show security flow session`. There is no option
-  to cap the number of sessions returned (section 7.4).
+  matching session to the routing engine. A 2015 community-forum reply about an SRX3600 on
+  12.1X44 quotes the title of Juniper KB28956, "[SRX] Control Plane CPU is high ("Idle 0 percent")
+  after "show security flow session" command is issued"; the KB itself was not read. There is no
+  option to cap the number of sessions returned (section 7.4).
 - **Logs are in different places depending on configuration.** In stream mode traffic logs leave
   the box and are not stored locally unless on-box reporting or a stream file is configured; in
   event mode they go through the routing engine's syslog (section 7.7). An empty log pane that
@@ -126,9 +127,10 @@ Common responses:
 | Status | When | Body |
 | --- | --- | --- |
 | 200 | Any completed read, including failed device reads | Payload with explicit states (below) |
-| 400 | A parameter failed validation | `{error}` saying which value or parameter failed |
-| 401 | No session; or the device session was lost during the read | `{error}`; `signed_out: true` in the second case |
-| 429 | Same operator, same endpoint (for logs: same `source`) within 1.5 s | `{error, retry_after_s}` and `Retry-After` |
+| 400 | A parameter failed validation. Every parameter is checked before any device read, so this costs no RPC and no read slot. Only whether a `file:<name>` is configured is checked after the (cached) sources read | `{error}` saying which value or parameter failed |
+| 401 | No session; or the device session was lost during the read; or the session was closed because the same user signed in again | `{error}`; `signed_out: true` in the second case |
+| 429 | Same operator, same endpoint (for logs: same `source`; while the sources cannot be read, one bucket for all sources) within 1.5 s | `{error, retry_after_s}` and `Retry-After` |
+| 429 | Another read on the same operator's device session is still running after 5 s (every Spec 004 endpoint, and Spec 001's) | `{error: "Another read for your session is still running. Try again shortly.", retry_after_s: 2}` and `Retry-After: 2` |
 
 Every response's `meta` has `read_at`, `read_as {user, backend}`, `fixture` and
 `suggested_interval_s` (5).
@@ -143,7 +145,7 @@ other key is ignored):
 | `src` | `source-prefix` | IPv4/IPv6 address or prefix; host bits are cleared (`10.10.3.4/16` becomes `10.10.0.0/16`); a bare address becomes /32 or /128 |
 | `dst` | `destination-prefix` | Same |
 | `sport`, `dport` | `source-port`, `destination-port` | 0 to 65535 |
-| `proto` | `protocol` | `tcp udp icmp icmp6 gre esp ah sctp pim ospf`, or 0 to 255 |
+| `proto` | `protocol` | `ah egp esp gre icmp icmp6 igmp ipip ospf pim rsvp sctp tcp udp` (the keywords the CLI reference lists, any case), or 0 to 255 |
 | `app` | `application` | `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` |
 | `iface` | `interface` | `^[a-z][a-z0-9-]{1,9}(\d+(/\d+){0,3})?(\.\d{1,5})?$` |
 | `limit` | (not sent) | Rows returned to the browser: default 500, clamped to 1..2000 |
@@ -155,27 +157,38 @@ other key is ignored):
 flowchart TD
     Q["GET /api/sessions with validated filters"] --> T{"Throttle: 1.5 s since this operator's last sessions read?"}
     T -- no --> E429["429 Retry-After"]
-    T -- yes --> S1["RPC 1: get-flow-session-information summary + filters<br/>gives the matching count"]
+    T -- yes --> W{"Device session free within 5 s?"}
+    W -- no --> B429["429 Retry-After: 2"]
+    W -- yes --> S1["RPC 1: get-flow-session-information summary + filters<br/>gives the matching count"]
     S1 --> F{"Any device-side filter?"}
     F -- no --> G1["Gauge = this summary (cache it)"]
     F -- yes --> GC{"Cached gauge younger than 30 s?"}
     GC -- yes --> G2["Gauge = cached"]
     GC -- no --> G3["Extra RPC: unfiltered summary (cache it)"]
-    G1 --> M{"matching count known and above MAX_UNFILTERED (5000)?"}
-    G2 --> M
-    G3 --> M
-    M -- yes --> R["sessions.status = refused, rows = [ ]"]
-    M -- "no, or count unknown" --> L["RPC 2: get-flow-session-information + filters<br/>parse, keep first limit rows"]
+    G1 --> D{"summary denied or unsupported?"}
+    G2 --> D
+    G3 --> D
+    D -- yes --> DS["sessions.status = that state, rows = [ ], no list RPC"]
+    D -- no --> M{"matching count known?"}
+    M -- "yes, at most 5000" --> L["RPC 2: get-flow-session-information + filters<br/>parse, keep first limit rows"]
+    M -- "yes, above 5000" --> R["sessions.status = refused, rows = [ ]"]
+    M -- no --> A{"filtered, and the gauge's active count at most 5000?"}
+    A -- yes --> L
+    A -- no --> CU["sessions.status = count-unknown, rows = [ ]"]
 ```
 
 The matching count is the summary's `displayed-session-count` (what a filtered summary returns);
-with no filters and no such element, it is the summary's `active-sessions`. Both are summed over
-nodes and SPUs.
+with no filters and no such element, it is the summary's `active-sessions`. Each is summed over the
+SPUs of one node; on a chassis cluster the largest node's value is used, because each node holds a
+copy of every session (section 7.5).
 
-**Known gap (fail-open).** When the count is unknown, the list is pulled anyway. That happens when
-the summary RPC fails (denied, unsupported, timeout) or when its reply lacks the expected count
-element. On a loaded device a summary timeout followed by an unbounded list is the case the
-refusal exists to prevent. Open question 1.
+**The guard fails closed** ([`live._guard`](../../src/jwicket/live.py)). A denied or unsupported
+summary gives `sessions` `{status: denied | unsupported, message, rows: []}` and no list RPC: the
+list is the same RPC at the same privilege. When the match count is unknown (the summary failed, for
+example by timing out, or its reply had no count), the answer is the status `count-unknown` with a
+message saying why and no list RPC. The one exception is a filtered request whose gauge active
+count is known and at most 5,000: every match is an active session, so the match is bounded too.
+This closes open question 1.
 
 **Response:**
 
@@ -192,14 +205,18 @@ refusal exists to prevent. Open question 1.
 
 - `summary` is the table-wide gauge (`active`, `max`, `failed`, `matching` from the reply that
   produced it) or a panel error `{status, message}`. On a filtered poll it may be up to 30 s old;
-  the response does not say how old (open question 10).
+  the response does not say how old (open question 10). `active`, `max` and `matching` are the
+  largest node's values; `failed` is summed across nodes. With more than one node it also has
+  `nodes: [{node, active, max, failed, matching}]`.
 - `matching` is the count used for the refusal decision, or `null`.
-- `sessions.status` is `ok`, `refused` (with `message` and the count), `denied`, `unsupported` or
-  `failed` (with `message`). `rows` is always present.
+- `sessions.status` is `ok`, `refused` (with `message` and the count), `count-unknown` (with
+  `message`), `denied`, `unsupported` or `failed` (with `message`). `rows` is always present.
 - `returned` counts every `flow-session` in the reply; `truncated` is true when that exceeds
-  `limit`; `device_count` sums the reply's `displayed-session-count` values, or `null`. The full
-  reply is still transferred and parsed before the cap, so `limit` bounds the browser's work, not
-  the device's.
+  `limit`; `device_count` is the reply's `displayed-session-count`, summed over one node's SPUs, of
+  the largest node, or `null`; with more than one node the list also has
+  `nodes: [{node, device_count}]`. Both copies of a cluster session are still returned as rows. The
+  full reply is still transferred and parsed before the cap, so `limit` bounds the browser's work,
+  not the device's.
 
 **Session row** ([`sessions._session`](../../src/jwicket/junos/sessions.py)):
 
@@ -208,7 +225,7 @@ refusal exists to prevent. Open question 1.
 | `id` | `<location>:<session-id>` when a location is known, else the session id; unique within a reply even when both cluster nodes report the same session |
 | `session_id`, `location` | Device session id; `node0`, `node1`, an SPU label such as `on FPC0 PIC1:`, or both |
 | `status`, `state` | From `status` and `session-state` |
-| `policy`, `policy_index` | `name/index` split on the last `/`; index `null` when absent |
+| `policy`, `policy_index` | `name/index` split on the last `/`; index `null` when absent. The documented `name/n` form (for example `pre-id-default-policy/n`) gives policy `name` and index `null`, since what `n` means is not documented; `N/A` stays whole |
 | `timeout`, `configured_timeout`, `start_time`, `duration` | Integers where parseable; `start_time` raw |
 | `application` | `application`, else `dynamic-application-name` |
 | `in`, `out` | Wings: `{direction, src, sport, dst, dport, proto, iface, packets, bytes, tunnel}`. `in` is the wing whose direction starts "In" (else the first wing); `out` the one starting "Out", or `null` for one-winged sessions |
@@ -217,9 +234,14 @@ refusal exists to prevent. Open question 1.
 
 ### 5.3 Log sources
 
-`GET /api/logs/sources` reads `get-software-information` (model, cached 10 minutes) and the
-configuration with `LOGS_FILTER` (`system/syslog`, `security/log`), then caches the result for
-60 s per web session. It is not throttled; the cache bounds it.
+`GET /api/logs/sources` reads `get-software-information` (model and release, cached 10 minutes,
+a failure too) and the configuration with `LOGS_FILTER` (`system/syslog`, `security/log`), then
+caches the result for 60 s per web session. A failed read is cached per web session as well:
+`denied` or `unsupported` for 60 s, any other failure for 10 s, a lost device session never. It
+has no read floor of its own; the success and failure caches bound it, so a class that cannot read
+the log configuration sends one configuration read per minute, not one per request. A
+configuration reply with no `<configuration>` element is a failed read ("The device's reply could
+not be read."), not an HTTP 500.
 
 ```json
 {
@@ -227,12 +249,12 @@ configuration with `LOGS_FILTER` (`system/syslog`, `security/log`), then caches 
   "sources": {
     "status": "ok",
     "files": [
-      {"id": "file:messages", "name": "messages", "contents": ["any notice", "authorization info"], "match": null, "structured_data": false, "group": null},
-      {"id": "file:traffic-log", "name": "traffic-log", "contents": ["any any"], "match": "RT_FLOW_SESSION", "structured_data": true, "group": null}
+      {"id": "file:messages", "name": "messages", "contents": ["any notice", "authorization info"], "match": null, "structured_data": false, "group": null, "inactive": false},
+      {"id": "file:traffic-log", "name": "traffic-log", "contents": ["any any"], "match": "RT_FLOW_SESSION", "structured_data": true, "group": null, "inactive": false}
     ],
-    "traffic": {"mode": "event", "effective_mode": "event", "mode_basis": "set in the configuration",
-                "streams": [], "report": false, "format": null,
-                "where": "Traffic logs are handled by the routing engine: they appear in the security log buffer and in any syslog file that takes them (for example one matching RT_FLOW)."},
+    "traffic": {"mode": "event", "mode_inactive": null, "effective_mode": "event", "mode_basis": "set in the configuration",
+                "streams": [], "report": false, "report_inactive": false, "format": null, "disabled": false,
+                "where": "Traffic logs are handled by the routing engine: they are expected in the security log buffer and in any syslog file that takes them (for example one matching RT_FLOW). Inferred from the documentation; not yet confirmed on a device."},
     "databases": [{"id": "buffer", "name": "Security log buffer (routing engine)"}],
     "self_noise": "Junos logs every NETCONF request as UI_NETCONF_CMD, ..."
   }
@@ -240,20 +262,42 @@ configuration with `LOGS_FILTER` (`system/syslog`, `security/log`), then caches 
 ```
 
 - `files`: one per `system syslog file` whose name matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`;
-  path-like names are dropped. If none is named `messages`, a `messages` entry is added with
-  `assumed: true`. `contents` is `"<facility> <severity>"`. `group` is always `null` today.
-- `traffic.mode` is the configured mode or `null`; `effective_mode` and `mode_basis` fall back to
-  the documented default for the model: `event` for vSRX; `stream` for model names starting
-  `srx3`, `srx5`, `srx1500`, `srx4100`, `srx4200`; otherwise `null` with "the default for this
-  model is not documented".
-- `traffic.where` is one sentence for the operator. Stream: "Traffic logs are streamed off the
-  device to `<hosts>`; they are not stored here." (plus "On-box reporting keeps a local copy." when
-  `report` is set). Stream-event: streamed, ending with a full stop, plus the on-box note. Event:
-  as in the example. Unknown: "The security log mode is not set and `<basis>`; check 'show
-  security log' on the device."
-- `databases` holds `report` (with `types`) when `security log report` is set, the effective mode
-  is `stream` or `stream-event`, and the model does not start with `srx54`, `srx56` or `srx58`; and
-  `buffer` when the effective mode is `event` or `stream-event`.
+  path-like names are dropped. A deactivated file (or a deactivated `system` or `syslog`) is still
+  listed, with `inactive: true`: Junos no longer writes it, but it may still be on disk and
+  readable. If none is named `messages`, a `messages` entry is added with `assumed: true`.
+  `contents` is `"<facility> <severity>"`. `group` is always `null` today.
+- `traffic.mode` is the configured mode, or `null` when it is unset or deactivated; a deactivated
+  mode is named in `mode_inactive`. `effective_mode` and `mode_basis` fall back to the documented
+  default ([`logs.default_mode`](../../src/jwicket/junos/logs.py)), by exact model name: `event` on
+  vSRX (the basis also mentions the conflicting general statement); `event` on SRX100, SRX110,
+  SRX210, SRX220, SRX240 and SRX650; `stream` on SRX1400, SRX3400, SRX3600, SRX4100, SRX4200,
+  SRX5400, SRX5600 and SRX5800; on SRX300, SRX320, SRX340, SRX345, SRX550 and SRX550M `event`
+  before 18.3R3 and in 18.4R1, 18.4R2, 19.1 and 19.2R1, `stream` otherwise; on SRX1500 `event`
+  below 15.1X49-D140, `stream` otherwise. Models the reference does not name (SRX380, SRX1600,
+  SRX2300, SRX4120, SRX4300, SRX4600, SRX4700 and others), and release-dependent models whose
+  release is unknown, get `null` with the reason.
+- `traffic.streams[]`: `{name, host, port, file, radius, format, category, inactive}`. `file` is a
+  local stream file (the XML tag J-Wicket reads, `localfilename` or `name`, is unverified);
+  `radius` a RADIUS destination's primary address.
+- `traffic.report_inactive` is true when `security log report` is deactivated; `traffic.disabled`
+  when `security log disable` is in effect.
+- `traffic.where` is one sentence for the operator. Disabled: "Security logging is disabled in the
+  configuration (security log disable), so the device writes no new security logs. Records written
+  before it was disabled may still be readable below." Stream: "Traffic logs are streamed off the
+  device to `<hosts>`", "sent to the RADIUS server(s) `<addresses>`" and "written to local stream
+  file(s) `<files>` on this device (J-Wicket cannot read stream files yet)", joined with "and",
+  ending "; they are not stored here." in pure stream mode without a local file (plus "On-box
+  reporting keeps a local copy." when `report` is set). Stream-event: the same, ending with a full
+  stop. Event: as in the example, marked inferred. Unknown: "The security log mode is not set and
+  `<basis>`; check 'show security log' on the device." A deactivated mode adds "The configured mode
+  `<mode>` is deactivated, so it is not in effect."
+- `databases` holds `report` (with `types`) whenever `security log report` is configured and active,
+  in any mode and on any model: hiding a configured database would make "not shown" look like "not
+  there". Where Feature Explorer 8049 does not cover the model or the mode (anything but `stream` on
+  vSRX, the SRX300 line, SRX380, SRX1500, SRX1600, SRX2300 and the SRX4000 line), it carries a
+  `note` that reads may fail. Before 23.1R1 it has `supported: false` and a `note` saying the
+  in-detail queries were introduced then. `buffer` is there when the effective mode is `event` or
+  `stream-event`. Both carry `disabled: true` under `security log disable`.
 - On failure `sources` is `{status: denied | unsupported | failed, message}`.
 
 ### 5.4 Reading logs
@@ -299,10 +343,17 @@ stateDiagram-v2
 selects RPC `get-sec-log-report-detail-<type>`. Parameters: `count` (default 500, 1..2000),
 `start` and `stop` (`YYYY-MM-DDTHH:MM:SS`), `expression` (at most 256 bytes of
 `A-Z a-z 0-9 _ . : / = ! < > & | ( ) -` and space). They are sent as RPC parameters
-`count`, `start_time`, `stop_time`, `expression`, never as CLI text. The response's `log` is
-`{status, lines (newest 2000), type, cursor: null, reset: false}`. There is no cursor: the browser
-moves `start` to the newest line's time and removes duplicates. `source=report` is accepted even
-when `sources.databases` does not offer it; the device's answer then decides the state.
+`count`, `start_time`, `stop_time`, `expression`, never as CLI text. A first read (no `start`)
+also sends `descending`, so that `count` takes the newest records, and puts the lines back in time
+order, oldest first; with `start` (live polls) the device's default order is kept. The detail
+RPCs have a `descending` leaf ("Sorted in descending order", **verified** for
+`get-sec-log-report-detail-session-all` in the 24.4R2 security RPC YANG); that the default order is
+oldest first is **inferred** (Q-LOG-01). The response's `log` is `{status, lines (newest 2000),
+type, cursor: null, reset: false}`. There is no cursor: the browser moves `start` to the newest
+line's time and removes duplicates. `source=report` is accepted even when `sources.databases` does
+not offer it; the device's answer then decides the state. When the sources say the release is
+before 23.1R1 (`supported: false`), the answer is `{status: "unsupported", message, lines: []}`
+without an RPC.
 
 **RE buffer** (`source=buffer`): `since` (`YYYY-MM-DD.HH:MM:SS`) is sent as `newer_than` to
 `get-security-log-information`. The response's `log` is `{status, cursor: null, reset: false,
@@ -315,37 +366,47 @@ the reply carries `security-logs-disabled`.
 
 | State | Where it shows |
 | --- | --- |
-| `denied`, `unsupported`, `failed` | `sources.status`, or `log.status` with `lines: []` and `message` |
+| `denied`, `unsupported`, `failed` | `sources.status`, or `log.status` with `lines: []` and `message`. While the sources read fails, every `/api/logs` request answers 200 with that state (one 1.5 s bucket for all sources) |
 | `reset: true` | File rotated or rewritten; the browser must say so |
 | `dropped > 0` | More lines matched than were returned |
 | `assumed: true` | `messages` is not in the configuration; reading it may fail |
-| `disabled: true` | Security logging is disabled (buffer) |
-| No `report` / no `buffer` in `databases` | Not configured or not offered on this model; `traffic.where` explains |
+| `disabled: true` | Security logging is disabled: in the buffer reply, in `traffic`, and on the `report` and `buffer` sources |
+| `inactive: true` on a file or stream; `mode_inactive`, `report_inactive` | Deactivated in the configuration, so not in effect |
+| `note` on `report`; `supported: false` | The documentation does not cover this model or mode; the release is before 23.1R1 |
+| No `report` / no `buffer` in `databases` | Not configured (report), or not event or stream-event mode (buffer); `traffic.where` explains |
 | `effective_mode: null` | Mode not set and the model's default is not documented |
-| 400 | Unknown file, bad cursor, too many terms, bad report type, time or expression |
+| 400 | Unknown source, bad file name, bad cursor, `lines` or `count`, too many terms, bad report type, time or expression, bad buffer `since`: all before any device read. A well-formed file name that is not configured: after the sources read |
 
 ### 5.5 Rate limits and device cost
 
 | Read | Minimum interval (server) | RPCs per poll |
 | --- | --- | --- |
-| Sessions, unfiltered | 1.5 s per operator | 2 (summary, list); 1 when refused |
-| Sessions, filtered | 1.5 s per operator | 2, plus 1 unfiltered summary at most every 30 s |
-| Log file | 1.5 s per operator per source | 1 `get-log` (whole file), plus the sources refresh: 1 configuration read every 60 s and 1 software read every 10 min |
-| Report, buffer | 1.5 s per operator per source | 1, plus the sources refresh |
-| Sources | cache 60 s | 2 on a cache miss |
+| Sessions, unfiltered | 1.5 s per operator | 2 (summary, list); 1 when refused, `count-unknown`, denied or unsupported |
+| Sessions, filtered | 1.5 s per operator | 2, plus 1 unfiltered summary at most every 30 s (so up to 3) |
+| Log file | 1.5 s per operator per source | 1 `get-log` (whole file), plus the sources refresh: 1 configuration read at most every 60 s and 1 software read at most every 10 min (so up to 3) |
+| Report, buffer | 1.5 s per operator per source | 1, plus the sources refresh; 0 for a report on a release before 23.1R1 |
+| Logs while the sources read fails | 1.5 s per operator, one bucket for all sources | 0 within the failure cache (60 s denied or unsupported, 10 s otherwise), else 1 configuration read |
+| Sources | no floor; success cache 60 s, failure cache 60 s or 10 s | 1 configuration read on a cache miss, plus 1 software read at most every 10 min |
 
 The browser polls at `suggested_interval_s` (5 s) by default, offers 2, 5, 10 and 30 s, and never
 goes below `meta.min_interval_s`. Each RPC can add a `UI_NETCONF_CMD` line on the device (7.12). Each
-operator's reads are serialised on their session lock, and the session cap (`max_sessions`,
-default 4) bounds concurrency.
+operator's reads are serialised on their session lock; a request that cannot have it within 5 s
+gets 429 instead of queuing. The session cap (`max_sessions`, default 4) bounds concurrency.
 
 ### 5.6 Audit
 
-- `read_sessions` on **every** sessions poll: user, source address, the device filters, row count,
-  status. At 5 s that is 720 records an hour per open Sessions view (open question 9).
+- `read_sessions` when the device filters or the sessions status change, not on every poll: user,
+  source address, the device filters, row count, status. A Sessions view polling with the same
+  filters writes one record, plus one each time the outcome changes (for example `ok` to `refused`).
+  This answers open question 9. Before, every poll wrote a record of about 165 bytes (720 an hour
+  at 5 s), so a 4 MB audit file kept about 34 hours of history with one operator polling and about
+  8 hours with four (review measurement with the fixture backend).
 - `read_log` on the first read of a source only (no `cursor`, `start` or `since`): user, source,
   log source, status.
 - `session_lost` when the device session ends during a read.
+- Retention: with `[log] audit_file` unset (the default) the audit trail goes to the diagnostic
+  log; with it set, it is a rotated file of about 4 MB at the defaults. How long that lasts is
+  unmeasured ([SECURITY.md, known gap 9](../../SECURITY.md#known-gaps)).
 
 ## 6. Data sources
 
@@ -359,8 +420,12 @@ default 4) bounds concurrency.
 | Log configuration | `get-configuration` committed with `LOGS_FILTER` | as configuration | `system syslog file` tree **verified**; `security log` leaves (`mode`, `report`, `stream/host`, `format`) **verified** in YANG; the XML form of `stream host` (J-Wicket reads `ipaddr`, `name` or text) **inferred** |
 | Model | `get-software-information` | not recorded | as Spec 001 |
 
-All of these are in `ALLOWED_RPCS` ([`session.py`](../../src/jwicket/junos/session.py)); every
-entry starts with `get-`.
+Every RPC above except the configuration read is in `ALLOWED_RPCS`
+([`session.py`](../../src/jwicket/junos/session.py)), and every entry starts with `get-`. The
+configuration read is a separate method (`get_configuration`) that takes only constant filters
+(`LOGS_FILTER` here); `get-configuration` is not in `ALLOWED_RPCS`. The report RPC name is the
+constant prefix plus a `<type>` from `REPORT_TYPES`, chosen only after the request's value is found
+in that list, and the name is checked against `ALLOWED_RPCS` before it is sent.
 
 ## 7. Junos semantics this feature depends on
 
@@ -403,9 +468,13 @@ lists two different `flow-session` definitions, so the shape varies by context. 
 ### 7.4 Cost of listing, and the refusal threshold
 
 - For a list request the SPUs send every matching session to the routing engine, which can drive
-  RE CPU to idle 0 percent: **verified** as a Juniper support quote of KB28956 in a
-  [community thread](https://community.networking.hpe.com/discussion/info-over-logs) (KB28956
-  itself is behind the support portal and was not read).
+  RE CPU to idle 0 percent. The source is a 2015
+  [community-forum reply](https://community.networking.hpe.com/discussion/info-over-logs) about an
+  SRX3600 on 12.1X44-D45, by a user with no Juniper support marking, which explains the mechanism
+  and quotes the title of Juniper KB28956, "[SRX] Control Plane CPU is high ("Idle 0 percent")
+  after "show security flow session" command is issued". KB28956 itself is behind the support
+  portal and was not read. That this applies to current releases and platforms is **inferred**
+  (Q-LOAD-02).
 - The summary is cheap compared with the list: **inferred** (Juniper's own monitoring polls it).
 - `MAX_UNFILTERED = 5000` is J-Wicket's choice, not a Junos number. Despite its name it applies to
   the matching count with or without filters. Q-LOAD-02 measures list cost at 1k, 5k and 20k
@@ -420,11 +489,16 @@ lists two different `flow-session` definitions, so the shape varies by context. 
   the browser. Which XML element carries Active/Backup is **unknown**; it lands in `extra` if it is
   a scalar. J-Wicket does not send `node primary` or `node local`, so cluster lists transfer both
   copies.
-- `parse_summary` sums `active-sessions` over nodes. Whether a node's count includes its backup
-  copies is **unknown**; if it does, the gauge and the refusal count double on a cluster.
-  Q-HA-01.
-- On multi-SPU platforms a `flow-fpc-pic-id` label (text starting "on FPC") groups the sessions
-  that follow it: **verified** label, pairing by document order **inferred**.
+- `parse_summary` sums each count over the SPUs of one node and takes the largest node's `active`,
+  `max` and `matching` (each node holds a copy of every session), sums `failed` across nodes, and
+  lists the nodes in `nodes`. Before, it summed over nodes, which could double the gauge and the
+  refusal count. Whether a node's count includes its backup copies is still **unknown** (Q-HA-01).
+- On multi-SPU platforms a `flow-fpc-pic-id` label (text starting "on FPC") is **verified** for the
+  summary reply. J-Wicket labels only the sessions that follow such a label inside the same
+  container. Juniper's HealthBot XPaths pair a summary's SPU label with a following sibling element
+  instead, so a list reply laid out that way would lose the label. How per-SPU and per-node results
+  are laid out in a session list is **inferred**, and Q-REL-01 records a real per-SPU list reply
+  before J-Wicket relies on it.
 - Four-node Multinode HA adds `HA State: Warm` and domain/node ids: **verified** in CLI samples,
   not parsed (Q-HA-03).
 
@@ -448,9 +522,9 @@ mode is inferred (7.10).
 
 | Effective mode | Traffic logs on the box | J-Wicket sources |
 | --- | --- | --- |
-| `event` | Through the routing engine: the security log buffer, and any syslog file whose contents take them | `buffer`; syslog files (for example one with `match RT_FLOW`) |
-| `stream` | Not on the RE. Sent to the stream hosts. Kept locally only by on-box reporting (`security log report`) or a stream `file` destination | `report` when configured and not SRX5000; otherwise none, and `where` says so |
-| `stream-event` | Both | `report` (if configured) and `buffer` |
+| `event` | Through the routing engine: the security log buffer, and any syslog file whose contents take them (**inferred**) | `buffer`; syslog files (for example one with `match RT_FLOW`); `report` with a `note` if configured |
+| `stream` | Not on the RE. Sent to the stream hosts or a RADIUS destination. Kept locally only by on-box reporting (`security log report`) or a local stream `file` destination | `report` when configured (with a `note` on models Feature Explorer 8049 does not list, such as SRX5000); otherwise none, and `where` says so |
+| `stream-event` | Both | `report` (if configured, with a `note`) and `buffer` |
 | unknown | Not stated | none; `where` asks the operator to check `show security log` |
 
 - `mode (event | stream | stream-event)`; stream-event from 20.2R1: **verified**
@@ -459,14 +533,16 @@ mode is inferred (7.10).
   SRX3600, SRX4100, SRX4200, SRX5400, SRX5600, SRX5800; stream on SRX300, SRX320, SRX340, SRX345,
   SRX550, SRX550M from 18.3R3 except in 18.4R1, 18.4R2, 19.1 and 19.2R1: **verified** (same page).
   A general statement elsewhere says "The default logging mode is stream mode": **verified**, and
-  contradicts the vSRX line. SRX1600, SRX2300, SRX4120, SRX4300, SRX4600, SRX4700 are not named.
-  J-Wicket shows the documented default with its basis and never presents it as configured.
-  Q-LOG-01 records the effective behaviour per platform.
+  contradicts the vSRX line. SRX380, SRX1600, SRX2300, SRX4120, SRX4300, SRX4600 and SRX4700 are not
+  named, and J-Wicket gives them no default. J-Wicket shows the documented default with its basis
+  and never presents it as configured. Q-LOG-01 records the effective behaviour per platform.
 - On-box reporting needs `security log mode stream` and `security log report`: **verified**
   ([Feature Explorer 8049](https://apps.juniper.net/feature-explorer/feature/8049),
   [SRX1600 logging](https://networkingdocs.hpe.com/documentation/us/en/software/platform/srx1600-srx4120-srx4300-configuration-essentials/topics/concept/srx1600-srx4120-srx4300-logging-snmp-telemetry.html)).
-  SRX5000 is not in its platform list, and J-Web's Logs pages are not available on SRX5000:
-  **verified**. Without an SSD the database lives in memory and is lost at reboot; cluster nodes do
+  SRX5000 is not in its platform list, and J-Web's six log grids (Session, Threats, Web Filtering,
+  ATP, VPN, All Events; not the System page) are not available on SRX5000: **verified**. That
+  on-box reporting does not work on SRX5000 is **inferred**; J-Wicket still offers a configured
+  report there, with a note (Q-LOG-01). Without an SSD the database lives in memory and is lost at reboot; cluster nodes do
   not synchronise it: **verified**
   ([system logging for a security device](https://networkingdocs.hpe.com/documentation/us/en/software/junos/network-mgmt/topics/topic-map/system-logging-for-a-security-device.html)).
   Factory default since 19.3R1 does not include it: **verified** (the same page also says the
@@ -475,12 +551,15 @@ mode is inferred (7.10).
 ```mermaid
 flowchart TD
     C["security log mode (configured, else documented default for the model)"] --> E{"Mode"}
-    E -- event --> EV["Offer RE buffer; RT_FLOW lines appear in syslog files that take them"]
-    E -- stream --> ST{"security log report set and not SRX5000?"}
+    C --> DIS{"security log disable?"}
+    DIS -- yes --> DD["Say so; mark the on-box sources disabled"]
+    E -- event --> EV["Offer RE buffer; RT_FLOW lines expected in syslog files that take them (inferred)"]
+    E -- stream --> ST{"security log report configured and active?"}
     E -- stream-event --> SE["Offer RE buffer"]
+    EV --> ST
     SE --> ST
-    ST -- yes --> RP["Offer on-box report"]
-    ST -- no --> OFF["Say: streamed to the listed hosts, not stored here"]
+    ST -- yes --> RP["Offer on-box report; a note unless stream mode on a Feature Explorer 8049 model; unsupported before 23.1R1"]
+    ST -- no --> OFF["No report source; in stream modes, say where streams go: hosts, RADIUS, local stream files"]
     E -- unknown --> UK["Say: mode not set, default not documented, check show security log"]
 ```
 
@@ -523,8 +602,9 @@ flowchart TD
   "the 'all' option does not have any filter except start-time and stop-time". Which types accept
   `expression` is **unknown** (open question 5).
 - `count` is 1..65535 and `start-time` / `stop-time` are `YYYY-MM-DDTHH:MM:SS`: **verified** (YANG).
-  Which records `count` returns without `start-time` (oldest or newest first), and the time zone
-  of `start-time`: **unknown** (open question 6).
+  Which records `count` returns without `start-time` (oldest or newest first) is **inferred** to be
+  the oldest, so J-Wicket sends `descending` on a first read (section 5.4); the time zone of
+  `start-time` is **unknown** (open question 6).
 - Report output is RFC 5424-style text with no SD-ID, values sometimes unquoted, addresses
   sometimes with `/len`: **verified** samples (including the device's `RT_LOG_SELF_TEST` lines with
   fake values).
@@ -535,8 +615,9 @@ flowchart TD
 ([show security log](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-security-log.html)).
 `security log limit`, "Limit number of security log entries to keep in memory", defaults to
 10000: **verified** (YANG). That `show security log` reads that routing-engine buffer, and that the
-buffer holds traffic events only in event or stream-event mode: **inferred**. Whether stream-event puts RT_FLOW there:
-**unknown** (Q-LOG-01).
+buffer holds traffic events only in event or stream-event mode: **inferred**. Whether stream-event
+puts RT_FLOW there: **unknown** (Q-LOG-01). The operator-facing `where` text for event mode says
+"expected" and "Inferred from the documentation; not yet confirmed on a device".
 
 ### 7.11 RT_FLOW fields and close reasons
 
@@ -588,7 +669,7 @@ are built in the working tree, not yet committed, and no requirement has been ch
 | --- | --- | --- |
 | UI-004-10 | Header strip: active-of-max gauge from `summary`; sessions-per-poll sparkline; new and ended since the last poll; "device returned N of M (limit)" when `truncated`; the device filters in force | Open (gauge and sparkline widgets exist) |
 | UI-004-11 | `sessions.status == "refused"`: a card with the matching count, why J-Wicket refused (the data-plane-to-RE transfer), and one-click narrowing suggestions; never an empty table | Open |
-| UI-004-12 | `summary` or `sessions` in `denied`, `unsupported` or `failed`: a state card with the server message; never an empty table | Open |
+| UI-004-12 | `summary` or `sessions` in `denied`, `unsupported`, `failed` or `count-unknown`: a state card with the server message; never an empty table | Open |
 | UI-004-13 | Virtualised table, smooth at 2,000 rows: status dot, ID, policy (link to the policy in Spec 001's view), zones from to (from the inventory's policy-to-zone map), protocol, source ip:port, destination ip:port, NAT badge (SNAT translated source, DNAT translated destination), application, in and out interfaces, bytes each way, packets, live rate from deltas between polls, duration, remaining timeout. Sortable, with a "hold order" toggle so rows do not jump; column chooser; density toggle | Open |
 | UI-004-14 | Click any value to filter by it, Alt/Option-click to exclude; hover shows `=` and `≠` buttons | Open |
 | UI-004-15 | Live diff keyed by `id`: new rows flash; rows gone from the latest poll stay one poll as "ended", struck through, then leave. Per-session byte history is kept in memory for this tab only | Open |
@@ -601,8 +682,8 @@ are built in the working tree, not yet committed, and no requirement has been ch
 
 | ID | Requirement | Status |
 | --- | --- | --- |
-| UI-004-30 | Source picker from `sources.files` (name, contents, match, structured-data, assumed) and `sources.databases` | Open |
-| UI-004-31 | A "Where are my traffic logs?" card from `sources.traffic`: mode, whether configured or the documented default and its basis, streams with hosts, on-box reporting, and the `where` sentence. Off-box streaming is said plainly with the stream host | Open |
+| UI-004-30 | Source picker from `sources.files` (name, contents, match, structured-data, assumed, inactive) and `sources.databases` (with `note`, `supported` and `disabled`) | Open |
+| UI-004-31 | A "Where are my traffic logs?" card from `sources.traffic`: mode, whether configured or the documented default and its basis, a deactivated mode or report, `disabled`, streams with hosts, RADIUS servers and local stream files, on-box reporting, and the `where` sentence. Off-box streaming is said plainly with the stream host | Open |
 | UI-004-32 | Toolbar: query bar; event family toggles with counts (Flow create, Flow close, Flow deny, Screen, IDP, VPN (KMD), Commit/CLI (UI_*), Auth (sshd/login), SNMP, Chassis, Other); Follow; wrap; pause; lines in window | Engine (`FAMILIES`); view open |
 | UI-004-33 | Histogram above the stream, events per time bucket stacked by family, in SVG; brushing adds a `time` filter, double-click clears | Open |
 | UI-004-34 | Virtualised monospace stream; every visible line tokenised by `logparse.tokenize` and highlighted by token type (`ts host daemon pid tag sdid key val ip port arrow proto zone policy iface nat num str bad good user text pri`); tokens concatenate back to the exact line | Engine; view open |
@@ -612,7 +693,7 @@ are built in the working tree, not yet committed, and no requirement has been ch
 | UI-004-38 | File tail: when not following, a "N new lines" pill; `reset: true` shows a visible rotation notice; `dropped > 0` says how many matching lines were not returned | Open |
 | UI-004-39 | Report and buffer: live by moving `start` (or `since`) to the newest line's time and removing duplicates | Open |
 | UI-004-40 | The signed-in user's own `UI_NETCONF_CMD` lines hidden by default with a counter ("N of your own J-Wicket reads hidden · show") and the `self_noise` text; other users' lines are never hidden | Engine (`isSelfRead`); view open |
-| UI-004-41 | Log states: `denied` says the Junos `trace` permission is needed for syslog files; `unsupported`, `failed`, `disabled`, `assumed`, `effective_mode: null` each have a card | Open |
+| UI-004-41 | Log states: `denied` says the Junos `trace` permission is needed for syslog files; `unsupported`, `failed`, `disabled`, `assumed`, `inactive`, a report `note`, `effective_mode: null` each have a card | Open |
 | UI-004-42 | Beat the J-Web 24.4 baseline: live tail, highlighting, typed query with autocomplete, no export cap, saved queries, NAT and session drill-down | Open |
 
 **Accessibility and performance** (both views): keyboard everything (`/` focus query, `space`
@@ -629,8 +710,9 @@ per poll under about 8 ms for 2,000 rows on a laptop.
   becomes an RPC parameter (addresses through `ipaddress`, ports and protocol numbers as integers,
   names through strict patterns). PyEZ sends parameters as XML elements; J-Wicket never builds CLI
   text. Browser regular expressions never reach the device; substring filters run in the daemon.
-- **No file paths from requests.** A log file is read only if its name is in the device's own
-  `system syslog file` configuration and matches a strict pattern (`test_validate_file_allowlist`,
+- **No file paths from requests.** A log file is read only if its name matches a strict pattern and
+  is either in the device's own `system syslog file` configuration or is the assumed `messages`
+  file (section 5.3) (`test_validate_file_allowlist`, `test_messages_assumed_when_not_configured`,
   `test_log_file_allowlist_and_validation`).
 - **Logs are attacker-influenced text.** Hostnames, URLs in web-filter logs and user names from
   failed logins can be chosen by an attacker. Control characters are stripped server-side
@@ -644,10 +726,12 @@ per poll under about 8 ms for 2,000 rows on a laptop.
   is why that backend is loopback-only and labelled.
 - **Protecting the routing engine.** Refusal above 5,000 matching sessions; row cap 2,000; log
   window 5,000 lines; returned lines capped at 2,000; 1.5 s minimum per endpoint and source per
-  operator; one RPC at a time per operator; session cap. Known weaknesses: the refusal fails open
-  when the count is unknown (open question 1); `get-log` moves the whole file every poll with no
-  size cap in J-Wicket (open question 7).
-- **Audit volume.** Sessions polling writes one audit record per poll (open question 9).
+  operator, also while the log sources cannot be read; a failed sources read cached; every
+  parameter checked before any device read; one RPC at a time per operator, waiting at most 5 s;
+  session cap. The refusal fails closed when the count is unknown (section 5.2). Known weakness:
+  `get-log` moves the whole file every poll with no size cap in J-Wicket (open question 7).
+- **Audit volume.** Sessions polling writes one audit record per change of filters or outcome, not
+  per poll (section 5.6).
 - **Browser storage.** No device data in storage; per-session history lives in memory for the
   tab; exports are explicit downloads ([ADR 0007](../adr/0007-offline-capable-meaning.md)). The one
   thing kept is query text the operator saved (UI-004-05), which can still name addresses,
@@ -665,19 +749,19 @@ in [`test_live.py`](../../tests/test_live.py) unless another file is named.
 
 | ID | Criterion | Tests | Status |
 | --- | --- | --- | --- |
-| AC-004-01 | Filters map to RPC parameters, host bits normalised, bad values refused (400), unknown keys ignored, limit clamped | `SessionFilterTests.test_valid_filters_map_to_rpc_parameters`, `.test_host_bits_are_normalised_not_rejected`, `.test_bad_values_are_refused`, `.test_limit`, `LiveHttpTests.test_sessions_pushdown_filters`, `.test_sessions_bad_filter_is_400` | Met (fixtures). Element names: Q-REL-01 |
-| AC-004-02 | Rows are refused when the matching count exceeds `MAX_UNFILTERED`, and allowed when a narrower filter brings it under | `LiveHttpTests.test_refusal_follows_the_matching_count` | Met (fixtures). Threshold: Q-LOAD-02. Fail-open when the count is unknown is **not** tested (open question 1) |
+| AC-004-01 | Filters map to RPC parameters, host bits normalised, bad values refused (400), unknown keys ignored, limit clamped, every documented protocol keyword accepted | `SessionFilterTests.test_valid_filters_map_to_rpc_parameters`, `.test_host_bits_are_normalised_not_rejected`, `.test_bad_values_are_refused`, `.test_limit`, `SessionParseTests.test_documented_protocol_keywords`, `LiveHttpTests.test_sessions_pushdown_filters`, `.test_sessions_bad_filter_is_400` | Met (fixtures). Element names: Q-REL-01 |
+| AC-004-02 | Rows are listed only when the matching count is known to be at most `MAX_UNFILTERED` (or, for a filtered request with no count, when the gauge's active count is), refused above it, and allowed when a narrower filter brings it under; a summary that fails or has no count gives `count-unknown` and no list RPC; a denied or unsupported summary gives that state and no list RPC | `LiveHttpTests.test_refusal_follows_the_matching_count`, `SessionGuardTests.test_summary_timeout_sends_no_list`, `.test_summary_without_a_count_sends_no_list`, `.test_filtered_summary_without_a_count_is_bounded_by_the_active_count`, `.test_denied_or_unsupported_summary_is_that_state_without_a_list`, `.test_known_small_count_lists` | Met (fixtures). Threshold: Q-LOAD-02 |
 | AC-004-03 | A filtered read keeps the table-wide gauge | `LiveHttpTests.test_filtered_read_keeps_the_table_wide_gauge` | Met (fixtures) |
-| AC-004-04 | Wings, policy name and index, source NAT, cluster and SPU locations with distinct ids, truncation stated, summary summed over nodes | `SessionParseTests.test_wings_policy_and_source_nat`, `.test_cluster_and_spu_locations_keep_ids_distinct`, `.test_limit_truncates_and_says_so`, `.test_policy_without_index`, `.test_summary_sums_nodes` | Met (fixtures) on **inferred** element names |
-| AC-004-05 | Sign-in required; 1.5 s rate limit with `Retry-After`; non-root scope refused | `LiveHttpTests.test_requires_sign_in`, `.test_sessions_read_and_rate_limit`, `.test_sessions_scope_other_than_root_refused` | Met (fixtures) |
-| AC-004-06 | Denied reads are explicit states for sources, log lines and sessions | `LiveHttpTests.test_denied_log_read_is_an_explicit_state` | Met (fixtures). Real denial wording: Q-AUTH-03 |
-| AC-004-07 | Sources: configured files only, path-like names dropped, `messages` assumed, structured-data flag, stream mode explained with its host | `LogSourceTests.test_files_and_stream_mode`, `.test_messages_assumed_when_not_configured`, `.test_validate_file_allowlist`, `ReportHttpTests.test_sources_explain_stream_mode`, `LiveHttpTests.test_log_sources_and_tail` | Met (fixtures) |
-| AC-004-08 | Documented default mode per model; `null` where undocumented | `ModeAndExpressionTests.test_default_modes` | Met (unit). Effective behaviour: Q-LOG-01 |
-| AC-004-09 | `report` offered only when configured in stream mode; `buffer` in event mode | `LiveHttpTests.test_report_source_is_offered_only_when_configured`, `.test_event_mode_buffer_source`, `ReportHttpTests.test_sources_explain_stream_mode` | Met (fixtures) |
+| AC-004-04 | Wings, policy name and index (the documented `/n` suffix split off), source NAT, cluster and SPU locations with distinct ids, truncation stated, counts summed over one node's SPUs and the largest node used on a cluster | `SessionParseTests.test_wings_policy_and_source_nat`, `.test_cluster_and_spu_locations_keep_ids_distinct`, `.test_limit_truncates_and_says_so`, `.test_policy_without_index`, `.test_documented_n_suffix_is_split_off`, `.test_summary_sums_spus_within_one_node`, `.test_cluster_summary_uses_the_largest_node` | Met (fixtures) on **inferred** element names |
+| AC-004-05 | Sign-in required; 1.5 s rate limit with `Retry-After`; non-root scope refused; a read that waits more than 5 s for the operator's device session gets 429 with `Retry-After: 2` and sends no RPC | `LiveHttpTests.test_requires_sign_in`, `.test_sessions_read_and_rate_limit`, `.test_sessions_scope_other_than_root_refused`, `SessionGuardTests.test_busy_device_session_is_429_not_a_queue` | Met (fixtures) |
+| AC-004-06 | Denied reads are explicit states: the sources; log lines when the sources read is denied; the session summary and list | `LiveHttpTests.test_denied_log_read_is_an_explicit_state`, `SessionGuardTests.test_denied_or_unsupported_summary_is_that_state_without_a_list`, `LogSourcesFailureTests.test_denied_sources_are_read_once_per_ttl` | Met (fixtures) for those cases. A `get-log`, report or buffer read denied **after** a successful sources read (the common case for a class without `trace`, section 7.8) is not tested: every test device that denies `get-log` also denies the configuration read. Real denial wording: Q-AUTH-03 |
+| AC-004-07 | Sources: configured files only, path-like names dropped, deactivated files listed and marked, `messages` assumed, structured-data flag, stream mode explained with its hosts, RADIUS servers and local stream files, deactivated mode, report, stream and `security log` reported as not in effect, `security log disable` reported | `LogSourceTests.test_files_and_stream_mode`, `.test_messages_assumed_when_not_configured`, `.test_validate_file_allowlist`, `LogSourceStateTests.*` (8 tests), `ReportHttpTests.test_sources_explain_stream_mode`, `LiveHttpTests.test_log_sources_and_tail` | Met (fixtures) |
+| AC-004-08 | Documented default mode per exact model name and, where it depends on it, the release; `null` where undocumented or where the release is unknown | `ModeAndExpressionTests.test_default_modes`, `.test_release_parsing` | Met (unit). Effective behaviour: Q-LOG-01 |
+| AC-004-09 | `report` offered whenever `security log report` is configured and active, with a `note` outside stream mode on a Feature Explorer 8049 model and `supported: false` before 23.1R1, and not offered when report is not configured or is deactivated; `buffer` in event and stream-event mode | `LogSourceStateTests.test_report_is_shown_whenever_configured_with_a_note_where_undocumented`, `.test_report_queries_need_23_1`, `.test_deactivated_mode_report_and_stream`, `LiveHttpTests.test_report_source_is_offered_only_when_configured` (branch fixture: event mode, no report), `.test_event_mode_buffer_source`, `ReportHttpTests.test_sources_explain_stream_mode` | Met (fixtures). The note cases tested are stream-event mode and unlisted models (SRX550, SRX5800); report in plain event mode is not tested on its own |
 | AC-004-10 | Tail: last N on first read; only new lines after; window slide found by digest; rotation is a reset; substring filters with drop count; cursor and term validation; control characters removed; reply text shapes | `TailTests.*` (8 tests) | Met (unit) |
-| AC-004-11 | Unknown files, bad cursors, bad `lines` refused with 400 | `LiveHttpTests.test_log_file_allowlist_and_validation` | Met (fixtures) |
+| AC-004-11 | Unknown sources and files, bad cursors, bad `lines`, report types, expressions and buffer times refused with 400, all except file membership before any device read and without using up a read slot | `LiveHttpTests.test_log_file_allowlist_and_validation`, `LogSourcesFailureTests.test_bad_parameters_are_400_before_any_device_read`, `.test_a_bad_request_does_not_use_up_the_read_slot` | Met (fixtures) |
 | AC-004-12 | `contains` filters on the server side of the wire | `LiveHttpTests.test_log_contains_filter_pushdown` | Met (fixtures) |
-| AC-004-13 | Report read; type, expression length and characters, times and count validated | `ReportHttpTests.test_report_read_and_validation`, `ModeAndExpressionTests.test_expression_validation` | Met (fixtures). Reply wrapper: Q-REL-01 |
+| AC-004-13 | Report read; type, expression length and characters, times and count validated; a first read sends `descending` and returns the lines oldest first; on a release before 23.1R1 the answer is `unsupported` without an RPC | `ReportHttpTests.test_report_read_and_validation`, `.test_first_report_read_asks_for_the_newest_records`, `ReportReleaseTests.test_old_release_report_read_is_unsupported_without_an_rpc`, `ModeAndExpressionTests.test_expression_validation` | Met (fixtures). Reply wrapper: Q-REL-01. Default order: Q-LOG-01 |
 | AC-004-14 | Buffer events and rendered lines; `since` format enforced; `self_noise` present | `ModeAndExpressionTests.test_buffer_events_shape`, `LiveHttpTests.test_event_mode_buffer_source` | Met (fixtures) |
 | AC-004-15 | Query language, typed comparisons, CIDR matching, sessions/logs/policies fields | [`query.test.mjs`](../../tests/js/query.test.mjs): "terms: key:value, key=value, comparisons, bare values", "CIDR-aware address matching (IPv4 and IPv6)", "sizes, durations and integer comparisons", "logs fields over parsed lines: severity order, NAT, time and age", "FIELDS cover each view with typed keys and getters", and the rest of the file | Met (unit) |
 | AC-004-16 | Pushdown planner for sessions, log files and reports, with the 256-byte AND-prefix fallback | `query.test.mjs`: "sessions pushdown: positive top-level AND-ed ":"/"=" terms on device keys", "sessions pushdown keeps negations, ORs, alternatives, wildcards, ranges and bad values in the browser", "logs file pushdown: contains / exclude, at most 4 terms of 120 characters", "logs report pushdown: the J-Web expression syntax", "logs report pushdown falls back to the largest AND-prefix within 256 bytes", "time terms set report start/stop and the buffer "since", and stay in the browser" | Met (unit) |
@@ -687,6 +771,9 @@ in [`test_live.py`](../../tests/test_live.py) unless another file is named.
 | AC-004-20 | UI requirements UI-004-01 to UI-004-42 in a browser against the development server (`branch`: event mode, syslog files, buffer; `cluster-lsys`: cluster, stream mode, on-box report; `auditor`), with no console errors or CSP violations, and smooth at 2,000 rows | Browser check against the development server, by hand or driven by an external, development-only browser tool ([CONTRIBUTING, browser rules](../../CONTRIBUTING.md#browser)), screenshots at desktop and phone widths | **Not met**: the views are built in the working tree, not yet committed, and not yet checked in a browser |
 | AC-004-21 | AC-004-01 to -14 pass against recorded replies from a qualified platform, including a cluster and a multi-SPU platform | Q-REL-01 recorded fixtures | **Not met**: no recorded reply exists |
 | AC-004-22 | On a qualified platform, listing up to `MAX_UNFILTERED` sessions at the default interval keeps RE CPU and mgd within the Q-LOAD-02 pass criterion | Q-LOAD-02 | **Not met** |
+| AC-004-23 | A failed sources read is cached per web session (denied or unsupported 60 s, other failures 10 s); while it fails, `/api/logs` answers 200 with the state and repeats within 1.5 s get 429 | `LogSourcesFailureTests.test_denied_sources_are_read_once_per_ttl`, `.test_other_failures_are_retried_sooner` | Met (fixtures) |
+| AC-004-24 | A configuration reply with no `<configuration>` is a `failed` panel on `/api/logs/sources` and `/api/logs` (and on Spec 001's endpoints), not HTTP 500 | `MalformedReplyTests.test_every_configuration_reader_reports_failed` | Met (fixtures) |
+| AC-004-25 | Repeated session polls with the same filters and outcome write one `read_sessions` audit record | `SessionGuardTests.test_repeated_polls_are_audited_once` | Met (fixtures) |
 
 ## 11. Qualification needed
 
@@ -694,12 +781,12 @@ Definitions, methods and pass criteria are in [governance.md](../governance.md).
 
 | Test | What it settles for Spec 004 |
 | --- | --- |
-| Q-REL-01 | Recorded `get-flow-session-information` replies: list (brief), summary, filtered summary, on a branch device, a cluster and a multi-SPU platform; `\| display xml rpc` for each filter used; `get-log` reply encoding; the `get-sec-log-report-detail-*` reply wrapper; `get-security-log-information` reply; the error each returns when denied or unsupported |
+| Q-REL-01 | Recorded `get-flow-session-information` replies: list (brief), summary, filtered summary, on a branch device, a cluster and a multi-SPU platform (where the SPU label sits in a list reply); `\| display xml rpc` for each filter used; `get-log` reply encoding; the `get-sec-log-report-detail-*` reply wrapper; `get-security-log-information` reply; the error each returns when denied or unsupported |
 | Q-LOAD-02 | List cost at 1k, 5k and 20k sessions; whether `MAX_UNFILTERED = 5000` stands, per platform class |
 | Q-LOAD-01 | Sustained polling of sessions and of `get-log` on a 1 MB and a larger file: RE CPU, memory, mgd |
 | Q-LOAD-03 | `UI_NETCONF_CMD` lines per minute per open view at 2, 5, 10, 30 s |
-| Q-LOG-01 | Log source matrix per security log mode and platform: effective default mode, what lands in the buffer, report availability (none on SRX5000), which report types accept `expression`, `count` ordering, time zone |
-| Q-AUTH-03 | `read-only` class on `get-log` (denied, and how); `view`-only class on the report RPCs and on `get-security-log-information` |
+| Q-LOG-01 | Log source matrix per security log mode and platform: effective default mode, what lands in the buffer, report availability (including SRX5000 and event mode), which report types accept `expression`, `count` ordering with and without `descending`, time zone |
+| Q-AUTH-03 | `read-only` class on `get-log` (denied, and how) while it can read the log configuration; `view`-only class on the report RPCs and on `get-security-log-information` |
 | Q-AUTH-01 | Reads run as the signed-in operator, so the permission results above are the operator's |
 | Q-HA-01, Q-HA-02, Q-HA-03 | Active/Backup copies and their XML; summary counts per node; which node serves the page; MNHA session fields |
 | Q-HW-01 | Parsing a 2,000-row list and a 1 MB log on an SRX300-class RE |
@@ -709,15 +796,15 @@ Definitions, methods and pass criteria are in [governance.md](../governance.md).
 
 | # | Question | Who decides | Settled by |
 | --- | --- | --- | --- |
-| 1 | Close the fail-open: when the matching count is unknown (summary failed or count element missing), refuse the list, or allow it only with a device-side filter? | Security reviewer, then contributors | Unit test, Q-LOAD-02 |
+| 1 | **Answered in the code (2026-11-24):** when the matching count is unknown the list is refused (`count-unknown`), except for a filtered request whose active count is at most 5,000 (section 5.2). The security reviewer confirms at Q-SEC-01 | Security reviewer | `SessionGuardTests`, Q-LOAD-02 |
 | 2 | Is 5,000 the right refusal threshold, the same on every platform? The documentation review suggested about 2,000 as an example | Owner | Q-LOAD-02 |
 | 3 | Add `node primary` or `node local` on clusters to halve the transfer, and more device filters (`policy-id`, `zone`, `nat`, ranges)? Each needs its `\| display xml rpc` recorded | Owner, then contributors | Q-REL-01, Q-HA-01 |
 | 4 | Sessions and logs for logical and tenant systems | Owner | Q-REL-01, Q-AUTH-03 |
 | 5 | Which report types accept `expression`? J-Wicket sends it to any of the ten types | Contributors | Q-LOG-01 |
-| 6 | Report reads without `start`: which records does `count` return, and should J-Wicket send `descending`? What time zone do `start-time` and `stop-time` use? | Contributors | Q-LOG-01 |
+| 6 | Report reads without `start`: J-Wicket now sends `descending` on the inference that the default is oldest first (section 5.4). Is that right? What time zone do `start-time` and `stop-time` use? | Contributors | Q-LOG-01 |
 | 7 | `get-log` moves the whole file each poll and J-Wicket does not cap the reply size. Add a cheap change check first, cap the size, or probe `get-syslog-events` (count and time filters in its schema, runtime behaviour unknown)? | Contributors, security reviewer | Q-LOAD-01, Q-REL-01 |
 | 8 | The v2 design notes list "policy deny" among the close-reason badges and omit several documented reasons. "policy deny" is not a close reason (a deny is its own event). Use the verified list in 7.11 | UI owner | This spec |
-| 9 | One audit record per sessions poll: keep, sample, or record only filter changes (as logs do)? | Security reviewer | Q-SEC-01 |
+| 9 | **Answered in the code (2026-11-24):** `read_sessions` is recorded only when the filters or the outcome change (section 5.6). The security reviewer confirms at Q-SEC-01 | Security reviewer | Q-SEC-01 |
 | 10 | The cached gauge carries no read time of its own; add `summary.read_at` so the UI can show its age | Contributors | Unit test |
 | 11 | Log files configured in groups have `group: null`; archived `.gz` files are not offered | Owner | Parity ledger |
 | 12 | vSRX default mode: event per the mode page, stream per the general statement. Show which on the lab vSRX | Lab owner | Q-LOG-01 |

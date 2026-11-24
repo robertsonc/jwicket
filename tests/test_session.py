@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 import unittest
@@ -87,9 +88,19 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(child_tags(system), ["services"])  # never the whole system tree (login, passwords)
         self.assertEqual(child_tags(path(system, "services")), ["outbound-ssh"])
         self.assertEqual(child_tags(kid(root, "chassis")), ["high-availability"])
+        # Never the whole [edit security] (IKE pre-shared keys) or a whole logical/tenant system (SECU-12).
+        self.assertEqual(child_tags(kid(root, "security")), ["policies", "zones", "address-book"])
+        for scope in ("logical-systems", "tenants"):
+            with self.subTest(scope=scope):
+                node = kid(root, scope)
+                self.assertEqual(child_tags(node), ["name", "security", "applications"])
+                self.assertEqual(child_tags(kid(node, "security")), ["policies", "zones", "address-book"])
+                self.assertEqual(child_tags(kid(node, "applications")), [])
 
     def test_minimal_filter(self) -> None:
-        self.assertEqual(child_tags(xml(S.INVENTORY_FILTER_MINIMAL)), ["security", "applications"])
+        root = xml(S.INVENTORY_FILTER_MINIMAL)
+        self.assertEqual(child_tags(root), ["security", "applications"])
+        self.assertEqual(child_tags(kid(root, "security")), ["policies", "zones", "address-book"])
 
     def test_config_options_committed_with_inheritance(self) -> None:
         self.assertEqual(S.CONFIG_OPTIONS, {"database": "committed", "inherit": "inherit", "groups": "groups"})
@@ -176,8 +187,12 @@ class UserSessionTests(unittest.TestCase):
             sess = S.PyEzUserSession.open(host="127.0.0.1", port=830, user="alice", password="pw", timeout_s=30)
             self.assertEqual(sess.user, "alice")
             dev = created[-1]
+            # Only the typed password may sign anyone in: no keys from the daemon account's ~/.ssh,
+            # and no ~/.ssh/config that could override the host, the port or the key file (SECU-1).
             self.assertEqual(dev.kwargs, {"host": "127.0.0.1", "port": 830, "user": "alice", "passwd": "pw",
-                                          "gather_facts": False, "conn_open_timeout": 30})
+                                          "gather_facts": False, "conn_open_timeout": 30,
+                                          "look_for_keys": False, "ssh_config": os.devnull})
+            self.assertNotIn("ssh_private_key_file", dev.kwargs)
             self.assertEqual(dev.opened, {"gather_facts": False})
             self.assertEqual(dev.timeout, 30)
             with self.assertRaises(LoginRejected):

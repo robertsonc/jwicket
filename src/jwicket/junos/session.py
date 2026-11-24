@@ -12,13 +12,16 @@ Two real implementations and one fake:
 * ``jwicket.fixtures.FixtureSession`` (not shipped to devices) replays recorded or synthetic
   replies for development and tests.
 
-Only RPCs in ``ALLOWED_RPCS`` can be sent, with parameters validated by the caller. No code path
-builds an RPC name or a configuration filter from request input.
+Only RPCs in ``ALLOWED_RPCS`` can be sent, with parameters validated by the caller. No configuration
+filter is built from request input. One RPC name is: ``live._read_report`` appends a report type to
+``get-sec-log-report-detail-``, but only a type from the fixed ``logs.REPORT_TYPES`` set, and the
+result must still be in ``ALLOWED_RPCS``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Dict, FrozenSet, Protocol
 
@@ -55,13 +58,20 @@ ALLOWED_RPCS: FrozenSet[str] = frozenset(
 CONFIG_OPTIONS: Dict[str, str] = {"database": "committed", "inherit": "inherit", "groups": "groups"}
 
 # The narrowest configuration that the policy inventory needs. Never the whole configuration:
-# the rest holds password hashes and secrets that J-Wicket has no reason to read.
+# the rest holds password hashes and secrets that J-Wicket has no reason to read. Within
+# [edit security] only the three subtrees the inventory parses are requested, because the rest of it
+# holds secrets such as IKE pre-shared keys; within each logical or tenant system only its name and
+# the same subtrees, because each one is a whole configuration of its own (protocols, system...).
+# That a subtree filter returns "the key plus these children" of every list entry, with the entry's
+# inactive attribute, is J-Wicket's reading of RFC 6241 subtree filtering as Junos implements it,
+# confirmed per release by qualification Q-REL-01.
+_SCOPE_SECURITY = "<security><policies/><zones/><address-book/></security>"
 INVENTORY_FILTER = (
     "<configuration>"
-    "<security/>"
+    f"{_SCOPE_SECURITY}"
     "<applications/>"
-    "<logical-systems/>"
-    "<tenants/>"
+    f"<logical-systems><name/>{_SCOPE_SECURITY}<applications/></logical-systems>"
+    f"<tenants><name/>{_SCOPE_SECURITY}<applications/></tenants>"
     "<system><services><outbound-ssh/></services></system>"
     "<chassis><high-availability/></chassis>"
     "</configuration>"
@@ -69,7 +79,7 @@ INVENTORY_FILTER = (
 # Where logs are: syslog files and the security log settings (Spec 004).
 LOGS_FILTER = "<configuration><system><syslog/></system><security><log/></security></configuration>"
 # Used when a device rejects the full filter (for example a release without tenants).
-INVENTORY_FILTER_MINIMAL = "<configuration><security/><applications/></configuration>"
+INVENTORY_FILTER_MINIMAL = f"<configuration>{_SCOPE_SECURITY}<applications/></configuration>"
 
 
 class DeviceSession(Protocol):
@@ -121,6 +131,14 @@ class PyEzUserSession:
     def open(cls, *, host: str, port: int, user: str, password: str, timeout_s: int) -> PyEzUserSession:
         device_cls = _import_pyez()
         try:
+            # Only the password the operator typed may sign them in. By default PyEZ and ncclient
+            # first offer every key in the daemon account's ~/.ssh (look_for_keys) and read its
+            # ~/.ssh/config, whose Port, HostName, IdentityFile and ProxyCommand would override the
+            # validated loopback address and port. Neither is wanted here; no key file is passed, and
+            # PyEZ does not use an SSH agent when a password is given. PyEZ 2.8.3 honours both
+            # keywords (jnpr/junos/device.py, Device.__init__ and open). Older PyEZ ignores keyword
+            # arguments it does not know, so qualification Q-AUTH-01 checks on each on-box PyEZ
+            # that a wrong password is refused even when the daemon account holds an accepted key.
             dev = device_cls(
                 host=host,
                 port=port,
@@ -128,6 +146,8 @@ class PyEzUserSession:
                 passwd=password,
                 gather_facts=False,
                 conn_open_timeout=timeout_s,
+                look_for_keys=False,
+                ssh_config=os.devnull,
             )
             dev.open(gather_facts=False)
             dev.timeout = timeout_s

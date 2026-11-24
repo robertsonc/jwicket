@@ -14,17 +14,27 @@ from __future__ import annotations
 import csv
 import hmac
 import io
+import logging
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from jwicket import __version__, resources
-from jwicket.auth.backends import AuthBackend
+from jwicket.auth.backends import AuthBackend, validate_secret, validate_username
 from jwicket.auth.sessions import SessionLimit, SessionStore, WebSession
-from jwicket.auth.throttle import LoginThrottle
+from jwicket.auth.throttle import LoginThrottle, name_key
 from jwicket.junos import facts
-from jwicket.junos.errors import JunosError, LoginRejected, RpcDenied, RpcTimeout, RpcUnsupported, SessionLost
+from jwicket.junos.errors import (
+    JunosError,
+    LoginRejected,
+    LoginUnavailable,
+    RpcDenied,
+    RpcTimeout,
+    RpcUnsupported,
+    SessionLost,
+)
 from jwicket.junos.inventory import SCHEMA, build_inventory, configuration_root, scope_summaries
 from jwicket.junos.xmlutil import local
 from jwicket.junos.session import open_config
@@ -33,9 +43,17 @@ from jwicket.web.http import Request, Response, clear_cookie, session_cookie
 from jwicket.web.server import Router
 
 Json = Dict[str, Any]
+LOG = logging.getLogger("jwicket.api")
 _SCOPE = re.compile(r"^(root|lsys:[A-Za-z0-9._\-]{1,63}|tenant:[A-Za-z0-9._\-]{1,63})\Z")
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._\-]+")
 MIN_READ_INTERVAL_S = 2.0
+# How long a request waits for its operator's device session while another read on it runs. Each
+# waiting request holds a connection slot, so it waits briefly and is then answered 429.
+SESSION_WAIT_S = 5.0
+BUSY_RETRY_S = 2
+# Device error text written to the diagnostic log is cut to this length (an ncclient RpcError string
+# can carry the whole rpc-error XML).
+MAX_ERROR_TEXT = 500
 
 
 @dataclass
@@ -67,8 +85,36 @@ def _utc(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
-def _panel_error(err: JunosError) -> Json:
+def _panel_error(err: JunosError, what: str = "device read") -> Json:
+    """The operator-safe panel state for a failed read. The device's own error text goes to the
+    diagnostic log (INFO, truncated), never to the browser."""
+    if not getattr(err, "from_cache", False):  # a cached failure was logged when it happened
+        LOG.info("%s: %s: %s", what, err.kind, str(err)[:MAX_ERROR_TEXT])
     return {"status": err.kind, "message": err.public}
+
+
+class SessionBusy(Exception):
+    """Another read on the same operator's device session did not finish within SESSION_WAIT_S."""
+
+
+@contextmanager
+def device_turn(sess: WebSession) -> Iterator[None]:
+    """Exclusive use of the operator's device session (one RPC at a time), waiting at most
+    SESSION_WAIT_S so that queued requests do not hold connection slots for a whole RPC timeout."""
+    if not sess.lock.acquire(timeout=SESSION_WAIT_S):
+        raise SessionBusy(sess.user)
+    try:
+        yield
+    finally:
+        sess.lock.release()
+
+
+def busy() -> Response:
+    return Response.json(
+        429,
+        {"error": "Another read for your session is still running. Try again shortly.", "retry_after_s": BUSY_RETRY_S},
+        [("Retry-After", str(BUSY_RETRY_S))],
+    )
 
 
 def throttle_read(app: App, sess: WebSession, bucket: str, interval_s: float) -> Optional[Response]:
@@ -83,6 +129,7 @@ def throttle_read(app: App, sess: WebSession, bucket: str, interval_s: float) ->
 
 
 def session_lost(app: App, sess: WebSession, req: Request, err: SessionLost) -> Response:
+    LOG.info("device session for %s lost: %s", sess.user, str(err)[:MAX_ERROR_TEXT])
     app.sessions.drop(sess, "device session lost")
     app.audit.record("session_lost", user=sess.user, source=req.client)
     return Response.error(401, err.public, signed_out=True)
@@ -114,38 +161,71 @@ def get_session(app: App, req: Request) -> Response:
     )
 
 
+def _throttled(wait: float, message: str) -> Response:
+    seconds = max(1, int(wait + 0.999))
+    return Response.json(429, {"error": message, "retry_after_s": seconds}, [("Retry-After", str(seconds))])
+
+
 def login(app: App, req: Request) -> Response:
+    """Sign-in. Refusals of a client that has no session are aggregated in the audit trail; only a
+    sign-in that reaches the backend and fails uses up the throttle (see auth/throttle.py)."""
     if not req.same_origin():
-        app.audit.record("login_refused", user=None, source=req.client, reason="cross-origin")
+        app.audit.record_refusal("login_refused", source=req.client, reason="cross-origin")
         return Response.error(403, "cross-origin sign-in refused")
-    wait = app.throttle.attempt(req.client)
-    if wait is not None:
-        app.audit.record("login_throttled", user=None, source=req.client)
-        return Response.json(
-            429, {"error": "Too many sign-in attempts. Wait and try again."}, [("Retry-After", str(int(wait)))]
-        )
     try:
         body = req.json()
     except (ValueError, UnicodeDecodeError):
         return Response.error(400, "expected a JSON object")
     username = str(body.get("username") or "")
     secret = str(body.get("password") or body.get("token") or "")
-    # A fresh sign-in always gets a fresh session token (no fixation).
-    app.sessions.remove(req.cookie())
+    per_person = app.backend.credential == "password"
+    # Format checks first: a request Junos would never see costs no throttle budget and is not
+    # recorded name by name (the commonest malformed user name is a password typed into it).
     try:
-        device = app.backend.authenticate(username, secret)
-    except JunosError as err:
-        status = 401 if isinstance(err, LoginRejected) else 503
-        app.audit.record("login_failed", user=username[:64] or None, source=req.client, kind=err.kind)
-        return Response.error(status, err.public)
+        if per_person:
+            validate_username(username)
+        validate_secret(secret)
+    except LoginRejected as err:
+        app.audit.record_refusal("login_failed", source=req.client, kind=err.kind, reason="format")
+        return Response.error(401, err.public)
+    throttle_name = username if per_person else ""
+    wait = app.throttle.check(req.client, throttle_name)
+    if wait is not None:
+        app.audit.record_refusal("login_throttled", source=req.client, reason="failures")
+        return _throttled(wait, "Too many failed sign-in attempts. Wait and try again.")
+    if not app.throttle.begin():
+        app.audit.record_refusal("login_throttled", source=req.client, reason="busy")
+        return _throttled(BUSY_RETRY_S, "Other sign-ins are being checked. Try again in a moment.")
+    try:
+        # A fresh sign-in always gets a fresh session token (no fixation).
+        app.sessions.remove(req.cookie())
+        try:
+            device = app.backend.authenticate(username, secret)
+        except JunosError as err:
+            if not isinstance(err, LoginUnavailable):
+                app.throttle.failed(req.client, throttle_name)
+            status = 401 if isinstance(err, LoginRejected) else 503
+            LOG.info("sign-in from %s refused: %s: %s", req.client, err.kind, str(err)[:MAX_ERROR_TEXT])
+            app.audit.record(
+                "login_failed", user=None, source=req.client, kind=err.kind,
+                user_hash=app.audit.pseudonym(name_key(username)) if per_person else None,
+            )
+            return Response.error(status, err.public)
+    finally:
+        app.throttle.end()
+    app.throttle.succeeded(req.client, throttle_name)
+    replaced: List[WebSession] = []
     try:
         token, sess = app.sessions.create(
-            user=device.user, backend=app.backend.name, device=device, source=req.client
+            user=device.user, backend=app.backend.name, device=device, source=req.client,
+            user_key=name_key(device.user) if per_person else None, replaced=replaced,
         )
     except SessionLimit:
         device.close()
         app.audit.record("login_refused", user=device.user, source=req.client, reason="session-limit")
         return Response.error(503, "Too many people are signed in to J-Wicket on this device. Try again later.")
+    for old in replaced:
+        app.audit.record("session_replaced", user=old.user, source=old.source, by=req.client)
     app.audit.record("login", user=sess.user, source=req.client, backend=sess.backend)
     return Response.json(
         200,
@@ -191,20 +271,20 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
     inventories: Dict[str, Json] = {}
     config_root = None
 
-    with sess.lock:
+    with device_turn(sess):
         try:
             device = facts.software(sess.device.rpc("get-software-information"))
         except SessionLost:
             raise
         except JunosError as err:
-            device = _panel_error(err)
+            device = _panel_error(err, "software information")
         try:
             config_root = configuration_root(open_config(sess.device, warnings))
             config_status = {"status": "ok"}
         except SessionLost:
             raise
         except JunosError as err:
-            config_status = _panel_error(err)
+            config_status = _panel_error(err, "inventory configuration read")
         try:
             ha = facts.cluster(sess.device.rpc("get-chassis-cluster-status"))
         except SessionLost:
@@ -212,8 +292,9 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
         except RpcUnsupported:
             ha = facts.standalone()
         except (RpcDenied, RpcTimeout) as err:
-            ha = _panel_error(err)
+            ha = _panel_error(err, "chassis cluster status")
         except JunosError as err:
+            LOG.info("chassis cluster status: %s: %s", err.kind, str(err)[:MAX_ERROR_TEXT])
             # The standalone error wording is not documented, so any other error from the cluster
             # status RPC means "not a chassis cluster as far as this read can tell", said plainly.
             ha = {**facts.standalone(), "message": f"Chassis cluster status was not available ({err.public})."}
@@ -226,10 +307,12 @@ def read_snapshot(app: App, sess: WebSession, scope: str) -> Tuple[int, Json]:
         management = facts.central_management(config_root)
         if not any(local(c.tag) == "security" for c in config_root):
             # Junos may leave out what a login class cannot view rather than refuse the read, so an
-            # empty inventory must not be presented as "nothing is configured".
+            # empty inventory must not be presented as "nothing is configured". J-Wicket reads only
+            # security policies, zones and address books, so other security settings do not count.
             warnings.append(
-                "The configuration J-Wicket read has no security section. Either nothing is configured, "
-                f"or {sess.user}'s login class cannot view it (Junos may leave it out rather than refuse)."
+                "The configuration J-Wicket read has no security section (policies, zones or address books). "
+                f"Either nothing is configured, or {sess.user}'s login class cannot view it (Junos may leave "
+                "it out rather than refuse)."
             )
         if ha.get("mode") == "standalone" and facts.mnha_configured(config_root):
             ha = {"status": "ok", "mode": "mnha", "message": "Multinode High Availability is configured."}
@@ -274,6 +357,8 @@ def _read_guarded(
         status, payload = read_snapshot(app, sess, scope)
     except SessionLost as err:
         return None, session_lost(app, sess, req, err), None
+    except SessionBusy:
+        return sess, busy(), None
     if status != 200:
         return sess, Response.json(status, payload), None
     return sess, Response.json(200, payload), payload

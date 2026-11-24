@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import http.client
 import io
+import json
 import logging
 import re
 import shutil
 import socket
+import ssl
+import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from helpers import (
     BRANCH,
@@ -31,6 +37,7 @@ from helpers import (
 )
 
 from jwicket import resources
+from jwicket.api import build_router
 from jwicket.auth.backends import LabTokenBackend
 from jwicket.auth.sessions import SessionStore
 from jwicket.auth.throttle import LoginThrottle
@@ -38,8 +45,10 @@ from jwicket.devserver import FixtureBackend
 from jwicket.fixtures import FixtureSession
 from jwicket.junos.errors import LoginUnavailable, SessionLost
 from jwicket.junos.session import PyEzUserSession
-from jwicket.logs import AuditTrail
-from jwicket.web.http import CSP
+from jwicket.logs import AuditTrail, EscapeControls, escape_handlers, setup_logging
+from jwicket.settings import LogSettings
+from jwicket.web.http import COOKIE_PLAIN, COOKIE_TLS, CSP
+from jwicket.web.server import JWicketServer, make_tls_context
 
 FIXTURE_WARNING = "Fixture data: synthetic, not read from a device."
 
@@ -163,7 +172,9 @@ class RoutingTests(HttpCase):
         self.assertIn(b"/static/js/main.js", index.body)
         self.assertIn(b"/static/css/app.css", index.body)
         self.assertEqual(self.srv.get("/static/index.html").body, index.body)
-        for name, ctype in (("js/main.js", "text/javascript"), ("css/app.css", "text/css"), ("logo.svg", "image/svg+xml")):
+        for name, ctype in (
+            ("js/main.js", "text/javascript"), ("css/app.css", "text/css"), ("logo.svg", "image/svg+xml"),
+        ):
             with self.subTest(name=name):
                 reply = self.srv.get(f"/static/{name}")
                 self.assertEqual(reply.status, 200)
@@ -217,7 +228,7 @@ class LoginTests(HttpCase):
     def test_api_requires_a_session_cookie(self) -> None:
         paths = ("/api/inventory", "/api/inventory?scope=root", "/api/export?format=json", "/api/export?format=csv")
         for path in paths:
-            for cookie in (None, "jwicket=forged-token", "__Host-jwicket=forged"):
+            for cookie in (None, f"{COOKIE_PLAIN}=forged-token", f"{COOKIE_TLS}=forged", "jwicket=forged"):
                 with self.subTest(path=path, cookie=cookie):
                     reply = self.srv.get(path, cookie)
                     self.assertEqual(reply.status, 401)
@@ -270,7 +281,7 @@ class LoginTests(HttpCase):
         set_cookie = reply.all("set-cookie")
         self.assertEqual(len(set_cookie), 1)
         name, _, rest = set_cookie[0].partition("=")
-        self.assertEqual(name, "jwicket")
+        self.assertEqual(name, COOKIE_PLAIN)
         attrs = [a.strip() for a in rest.split(";")]
         token = attrs[0]
         self.assertGreaterEqual(len(token), 40)
@@ -302,7 +313,7 @@ class LoginTests(HttpCase):
         self.assertEqual(self.app.sessions.count(), 1)
 
     def test_planted_cookie_is_never_adopted(self) -> None:
-        planted = "jwicket=attacker-chosen-value-0123456789abcdefghijklmnop"
+        planted = f"{COOKIE_PLAIN}=attacker-chosen-value-0123456789abcdefghijklmnop"
         reply, cookie = self.srv.login("admin", cookie=planted)
         self.assertEqual(reply.status, 200)
         self.assertNotEqual(cookie, planted)
@@ -327,7 +338,7 @@ class LoginTests(HttpCase):
         self.assertEqual(out.status, 200)
         self.assertEqual(out.json(), {"authenticated": False})
         cleared = out.headers.get("set-cookie", "")
-        self.assertTrue(cleared.startswith("jwicket=;"), cleared)
+        self.assertTrue(cleared.startswith(f"{COOKIE_PLAIN}=;"), cleared)
         self.assertIn("Max-Age=0", cleared)
         self.assertFalse(self.srv.get("/api/session", cookie).json()["authenticated"])
         self.assertTrue(sess.device.closed)  # type: ignore[union-attr]
@@ -339,14 +350,49 @@ class LoginTests(HttpCase):
         self.assertIn("Max-Age=0", out.headers.get("set-cookie", ""))
 
     def test_login_is_throttled_with_retry_after(self) -> None:
-        self.app.throttle = LoginThrottle(per_source=2, overall=100, clock=self.clock)
+        self.app.throttle = LoginThrottle(per_name=2, per_source=100, clock=self.clock)
         self.assertEqual(self.srv.post_json("/api/login", {"username": "mallory", "password": "x"}).status, 401)
         self.assertEqual(self.srv.post_json("/api/login", {"username": "mallory", "password": "x"}).status, 401)
-        reply = self.srv.post_json("/api/login", {"username": "admin", "password": "x"})
+        reply = self.srv.post_json("/api/login", {"username": "mallory", "password": "x"})
         self.assertEqual(reply.status, 429)
         self.assertGreaterEqual(int(reply.headers["retry-after"]), 1)
         self.assertIn("error", reply.json())
+        self.assertEqual(self.srv.login("admin")[0].status, 200)  # another user name is not blocked
         self.clock.advance(61)
+        self.assertEqual(self.srv.post_json("/api/login", {"username": "mallory", "password": "x"}).status, 401)
+
+    def test_requests_that_never_reach_junos_do_not_lock_anyone_out(self) -> None:
+        """SECU-3: junk bodies, empty or malformed fields and successful sign-ins cost no budget."""
+        self.app.throttle = LoginThrottle(per_name=5, per_source=20, clock=self.clock)
+        for _ in range(30):
+            self.assertEqual(self.srv.post_json("/api/login", b"not json").status, 400)
+            self.assertEqual(self.srv.post_json("/api/login", {"username": "", "password": ""}).status, 401)
+            self.assertEqual(self.srv.post_json("/api/login", {"username": "bad name!", "password": "x"}).status, 401)
+        for _ in range(8):
+            self.assertEqual(self.srv.login("admin")[0].status, 200)
+        self.assertEqual(self.srv.login("admin")[0].status, 200)
+
+    def test_spraying_user_names_hits_the_per_source_cap(self) -> None:
+        self.app.throttle = LoginThrottle(per_name=5, per_source=3, clock=self.clock)
+        for i in range(3):
+            self.assertEqual(self.srv.post_json("/api/login", {"username": f"nobody{i}", "password": "x"}).status, 401)
+        self.assertEqual(self.srv.post_json("/api/login", {"username": "nobody9", "password": "x"}).status, 429)
+
+    def test_too_many_concurrent_sign_ins_is_429(self) -> None:
+        self.app.throttle = LoginThrottle(per_name=5, per_source=5, concurrent=1, clock=self.clock)
+        self.assertTrue(self.app.throttle.begin())  # another sign-in is being checked
+        reply = self.srv.post_json("/api/login", {"username": "admin", "password": "x"})
+        self.assertEqual(reply.status, 429)
+        self.assertGreaterEqual(int(reply.headers["retry-after"]), 1)
+        self.app.throttle.end()
+        self.assertEqual(self.srv.login("admin")[0].status, 200)
+
+    def test_one_account_cannot_hold_every_slot(self) -> None:
+        """SECU-5: signing in again as the same user replaces that user's session."""
+        cookies = [self.signed_in("auditor") for _ in range(6)]
+        self.assertEqual(self.app.sessions.count(), 1)
+        self.assertTrue(self.srv.get("/api/session", cookies[-1]).json()["authenticated"])
+        self.assertFalse(self.srv.get("/api/session", cookies[0]).json()["authenticated"])
         self.assertEqual(self.srv.login("admin")[0].status, 200)
 
     def test_audit_trail_never_holds_credentials(self) -> None:
@@ -364,6 +410,7 @@ class LoginTests(HttpCase):
 
         self.addCleanup(restore)
         self.app.audit = AuditTrail(audit_dir / "audit.log")
+        self.addCleanup(self.app.audit.close)
         password = "pw-that-must-not-be-logged"
         reply, cookie = self.srv.login("admin", password=password)
         csrf = reply.json()["csrf"]
@@ -378,6 +425,54 @@ class LoginTests(HttpCase):
         self.assertTrue(any('"event": "read_inventory"' in e for e in events))
         self.assertTrue(any('"event": "login_failed"' in e for e in events))
         self.assertTrue(any('"event": "logout"' in e for e in events))
+
+    def test_failed_sign_in_records_a_hash_not_the_user_name(self) -> None:
+        """SECU-10: a password typed into the user-name field must not reach the audit trail, even one
+        that fits the user-name pattern."""
+        audit_dir = Path(tempfile.mkdtemp(prefix="jwicket-http-audit-"))
+        self.addCleanup(shutil.rmtree, audit_dir, True)
+        self.app.audit = AuditTrail(audit_dir / "audit.log")
+        self.addCleanup(self.app.audit.close)
+        for name in ("Corr3ct-Horse!Battery#Staple", "P@ssw0rd-2024", "P@ssw0rd-2024"):
+            self.assertEqual(self.srv.post_json("/api/login", {"username": name, "password": "x"}).status, 401)
+        self.srv.login("admin")
+        self.app.audit.flush(force=True)
+        text = (audit_dir / "audit.log").read_text(encoding="utf-8")
+        for name in ("Corr3ct-Horse", "P@ssw0rd"):
+            self.assertNotIn(name, text)
+        entries = [json.loads(line) for line in text.splitlines()]
+        failed = [e for e in entries if e["event"] == "login_failed" and e.get("user_hash")]
+        self.assertEqual(len(failed), 2)
+        self.assertEqual(failed[0]["user_hash"], failed[1]["user_hash"])  # attempts on one name correlate
+        self.assertRegex(failed[0]["user_hash"], r"^[0-9a-f]{16}$")
+        self.assertTrue(all(e["user"] is None for e in failed))
+        self.assertEqual([e["user"] for e in entries if e["event"] == "login"], ["admin"])
+
+    def test_unauthenticated_refusals_cannot_flush_the_audit_trail(self) -> None:
+        """SECU-4: one line per kind, source and reason per window, plus a count when the window ends."""
+        audit_dir = Path(tempfile.mkdtemp(prefix="jwicket-http-audit-"))
+        self.addCleanup(shutil.rmtree, audit_dir, True)
+        self.app.audit = AuditTrail(audit_dir / "audit.log", 10_000, 1)
+        self.addCleanup(self.app.audit.close)
+        self.app.throttle = LoginThrottle(per_name=1, per_source=100, clock=self.clock)
+        self.assertEqual(self.srv.login("admin")[0].status, 200)
+        for _ in range(200):
+            self.srv.post_json("/api/login", b"{}", origin="http://evil.example")
+        self.srv.post_json("/api/login", {"username": "mallory", "password": "x"})
+        for _ in range(20):
+            self.assertEqual(self.srv.post_json("/api/login", {"username": "mallory", "password": "x"}).status, 429)
+            self.srv.post_json("/api/login", {"username": "bad name!", "password": "x"})
+        text = "".join(p.read_text(encoding="utf-8") for p in audit_dir.iterdir())
+        entries = [json.loads(line) for line in text.splitlines()]
+        self.assertIn("login", [e["event"] for e in entries])
+        self.assertEqual(sum(1 for e in entries if e["event"] == "login_refused"), 1)
+        self.assertEqual(sum(1 for e in entries if e["event"] == "login_throttled"), 1)
+        self.app.audit.flush(force=True)
+        entries = [json.loads(line) for line in (audit_dir / "audit.log").read_text(encoding="utf-8").splitlines()]
+        repeats = {(e["event"], e.get("reason")): e.get("repeated") for e in entries if e.get("repeated")}
+        self.assertEqual(repeats[("login_refused", "cross-origin")], 199)
+        self.assertEqual(repeats[("login_throttled", "failures")], 19)
+        self.assertEqual(repeats[("login_failed", "format")], 19)
 
 
 class InventoryTests(HttpCase):
@@ -768,6 +863,253 @@ class IdleConnectionTests(HttpCase):
         finally:
             for sock in held:
                 sock.close()
+
+
+class SlowClientTests(HttpCase):
+    """SECU-2: a client that trickles bytes cannot keep a connection slot past one read deadline."""
+
+    server_options: ClassVar[Dict[str, Any]] = {"max_connections": 2, "socket_timeout_s": 1.0}
+
+    def test_trickled_requests_lose_their_slot_at_the_deadline(self) -> None:
+        held = []
+        stop = threading.Event()
+        for _ in range(2):
+            sock = socket.create_connection(("127.0.0.1", self.srv.port), timeout=5)
+            sock.sendall(b"GET /healthz HTTP/1.0\r\n")
+            held.append(sock)
+
+        def trickle() -> None:
+            while not stop.wait(0.3):  # one header byte every 0.3 s: each read is well inside the timeout
+                for sock in held:
+                    with contextlib.suppress(OSError):
+                        sock.sendall(b"X")
+
+        worker = threading.Thread(target=trickle, daemon=True)
+        worker.start()
+        try:
+            started = time.monotonic()
+            for sock in held:
+                sock.settimeout(5)
+                try:
+                    while sock.recv(1024):
+                        pass
+                except (ConnectionResetError, socket.timeout):
+                    pass
+            self.assertLess(time.monotonic() - started, 4.0, "trickling clients kept their slots")
+
+            def serves() -> bool:
+                try:
+                    return self.srv.get("/healthz").status == 200
+                except (ConnectionError, OSError):
+                    return False
+
+            self.assertTrue(wait_until(serves, timeout=3), "a real client was still locked out")
+        finally:
+            stop.set()
+            worker.join(timeout=2)
+            for sock in held:
+                sock.close()
+
+    def test_a_request_that_arrives_in_time_is_served(self) -> None:
+        self.assertEqual(self.srv.get("/healthz").status, 200)
+        reply, cookie = self.srv.login("admin")
+        self.assertEqual(reply.status, 200)
+        self.assertEqual(self.read("/api/inventory", cookie).status, 200)
+
+
+def _self_signed(directory: Path) -> Optional[Tuple[Path, Path]]:
+    """A throwaway certificate for 127.0.0.1, made with the openssl command; None if it is missing."""
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+    cert, key = directory / "cert.pem", directory / "key.pem"
+    proc = subprocess.run(  # noqa: S603 - fixed argument list, no shell
+        [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1",
+         "-addext", "subjectAltName=IP:127.0.0.1", "-keyout", str(key), "-out", str(cert)],
+        capture_output=True, timeout=60, check=False,
+    )
+    return (cert, key) if proc.returncode == 0 else None
+
+
+class TlsDeadlineTests(unittest.TestCase):
+    """SECU-2: the read deadline covers the TLS handshake too."""
+
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="jwicket-tls-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        made = _self_signed(tmp)
+        if made is None:
+            self.skipTest("the openssl command is not available")
+        cert, key = made
+        self.client_ctx = ssl.create_default_context(cafile=str(cert))
+        self.server = JWicketServer(
+            ("127.0.0.1", 0), build_router(make_app(FixtureBackend(BRANCH))), tls=make_tls_context(str(cert), str(key)),
+            max_connections=2, socket_timeout_s=1.0, max_body_bytes=8192,
+        )
+        self.port = int(self.server.server_address[1])
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+
+        def stop() -> None:
+            self.server.shutdown()
+            self.server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(stop)
+
+    def healthz(self) -> int:
+        conn = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=5, context=self.client_ctx)
+        try:
+            conn.request("GET", "/healthz")
+            return conn.getresponse().status
+        finally:
+            conn.close()
+
+    def test_tls_request_is_served_with_hsts(self) -> None:
+        conn = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=5, context=self.client_ctx)
+        try:
+            conn.request("GET", "/healthz")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertIn("max-age", resp.getheader("Strict-Transport-Security") or "")
+        finally:
+            conn.close()
+
+    def test_trickled_handshakes_lose_their_slot(self) -> None:
+        held = [socket.create_connection(("127.0.0.1", self.port), timeout=5) for _ in range(2)]
+        stop = threading.Event()
+
+        def trickle() -> None:
+            # A TLS record header, then one byte at a time: each read is well inside the timeout.
+            for sock in held:
+                with contextlib.suppress(OSError):
+                    sock.sendall(b"\x16\x03\x01\x02\x00")
+            while not stop.wait(0.3):
+                for sock in held:
+                    with contextlib.suppress(OSError):
+                        sock.sendall(b"\x01")
+
+        worker = threading.Thread(target=trickle, daemon=True)
+        worker.start()
+        try:
+            started = time.monotonic()
+            for sock in held:
+                sock.settimeout(5)
+                try:
+                    while sock.recv(1024):
+                        pass
+                except (ConnectionResetError, socket.timeout):
+                    pass
+            self.assertLess(time.monotonic() - started, 4.0, "trickled handshakes kept their slots")
+
+            def serves() -> bool:
+                try:
+                    return self.healthz() == 200
+                except (ConnectionError, OSError):
+                    return False
+
+            self.assertTrue(wait_until(serves, timeout=3))
+        finally:
+            stop.set()
+            worker.join(timeout=2)
+            for sock in held:
+                sock.close()
+
+
+class HeadSizeTests(HttpCase):
+    def test_headers_over_the_total_cap_are_431(self) -> None:
+        many = "".join(f"X-Pad-{i}: {'a' * 1000}\r\n" for i in range(20))  # 20 KiB, each line small
+        raw = f"GET /healthz HTTP/1.0\r\nHost: {self.srv.host}\r\n{many}\r\n".encode()
+        reply = parse_raw_response(self.srv.raw(raw))
+        self.assertEqual(reply.status, 431)
+        assert_security_headers(self, reply, "431")
+
+    def test_request_line_over_the_cap_is_414(self) -> None:
+        raw = f"GET /healthz?{'a=1&' * 5000} HTTP/1.0\r\nHost: {self.srv.host}\r\n\r\n".encode()
+        reply = parse_raw_response(self.srv.raw(raw))
+        self.assertEqual(reply.status, 414)
+        assert_security_headers(self, reply, "414")
+
+    def test_normal_headers_are_served(self) -> None:
+        reply = self.srv.request("GET", "/healthz", headers={"X-Pad": "a" * 4000})
+        self.assertEqual(reply.status, 200)
+
+
+class DiagnosticLogEscapeTests(unittest.TestCase):
+    """SECU-7: request data reaches the diagnostic log with control characters escaped."""
+
+    def test_control_characters_are_escaped_once(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        escape_handlers([handler])
+        second = logging.StreamHandler(io.StringIO())
+        escape_handlers([second])
+        logger = logging.getLogger("jwicket.test-escape")
+        logger.propagate = False
+        logger.addHandler(handler)
+        logger.addHandler(second)
+        self.addCleanup(logger.removeHandler, handler)
+        self.addCleanup(logger.removeHandler, second)
+        logger.warning("%s %s", "127.0.0.1", 'GET /x\x1b[2J\rFORGED jwicket INFO login ok \\ \x85 HTTP/1.0')
+        line = stream.getvalue()
+        self.assertEqual(line.count("\n"), 1)
+        self.assertNotIn("\x1b", line)
+        self.assertNotIn("\r", line)
+        self.assertIn("\\x1b[2J\\x0dFORGED", line)
+        self.assertIn(" \\\\ \\x85 ", line)  # backslash escaped once, not twice
+
+    def test_traceback_keeps_its_line_breaks(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        escape_handlers([handler])
+        logger = logging.getLogger("jwicket.test-escape-tb")
+        logger.propagate = False
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        try:
+            int("boom")
+        except ValueError:
+            logger.exception("serving %s", "/a\x1bb")
+        text = stream.getvalue()
+        self.assertIn("serving /a\\x1bb\nTraceback", text)
+        self.assertIn("ValueError: invalid literal", text)
+
+    def test_setup_logging_escapes_its_handlers(self) -> None:
+        root = logging.getLogger()
+        before = list(root.handlers)
+        level = root.level
+        setup_logging(LogSettings(level="INFO"))
+        added = [h for h in root.handlers if h not in before]
+
+        def restore() -> None:
+            for h in added:
+                root.removeHandler(h)
+            root.setLevel(level)
+
+        self.addCleanup(restore)
+        self.assertTrue(added)
+        for h in added:
+            self.assertTrue(any(isinstance(f, EscapeControls) for f in h.filters))
+
+    def test_request_line_is_escaped_through_the_daemon_handlers(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        escape_handlers([handler])
+        web = logging.getLogger("jwicket.web")
+        web.addHandler(handler)
+        level = web.level
+        web.setLevel(logging.INFO)
+        self.addCleanup(web.removeHandler, handler)
+        self.addCleanup(web.setLevel, level)
+        srv = LiveServer(make_app(FixtureBackend(BRANCH)))
+        self.addCleanup(srv.stop)
+        srv.raw(b"GET /healthz\x1b[2J\x1b[1;1H\rFORGED jwicket INFO login ok HTTP/1.0\r\nHost: "
+                + srv.host.encode() + b"\r\n\r\n")
+        self.assertTrue(wait_until(lambda: "FORGED" in stream.getvalue()))
+        text = stream.getvalue()
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\r", text)
+        self.assertIn("\\x1b[2J", text)
 
 
 if __name__ == "__main__":

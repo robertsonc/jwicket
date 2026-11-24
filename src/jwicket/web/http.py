@@ -8,6 +8,7 @@ of API responses, and same-origin enforcement on every state-changing request.
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qs
@@ -30,8 +31,16 @@ BASE_HEADERS: Tuple[Tuple[str, str], ...] = (
 )
 HSTS = ("Strict-Transport-Security", "max-age=31536000")
 
-COOKIE_TLS = "__Host-jwicket"
-COOKIE_PLAIN = "jwicket"
+# Cookies are not isolated by port (RFC 6265 section 8.5): every J-Wicket reached through its own SSH
+# tunnel on one workstation is "127.0.0.1" to the browser, and every daemon listens on 8443 by
+# default, so a fixed name would let signing in to one device overwrite another device's session
+# cookie. Each daemon therefore names its cookie with a random suffix chosen at start-up. Sessions
+# live in memory and end with the process, so a new name at each start loses nothing. This does
+# not keep the cookie from other services on the same host (another port, the same 127.0.0.1): a
+# naming rule cannot, so the plain-HTTP tunnel is for lab use (docs/deploy-lab.md).
+INSTANCE_ID = secrets.token_hex(4)
+COOKIE_TLS = f"__Host-jwicket-{INSTANCE_ID}"
+COOKIE_PLAIN = f"jwicket-{INSTANCE_ID}"
 
 
 @dataclass

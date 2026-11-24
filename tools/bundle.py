@@ -275,7 +275,72 @@ Under Junos this file is started with no arguments (Junos cannot pass --flag opt
 application) and reads /var/db/jwicket/jwicket.ini. A copy saved as jwicket_selftest.py or
 jwicket_probe.py runs the bundle self-test or the interpreter probe instead, then exits.
 Off the device, "--bundle-self-test" does the same as the jwicket_selftest.py name.
+
+Before anything else is imported, this file's own directory is removed from sys.path, so nothing
+placed beside it can stand in for a standard-library or PyEZ module. The self-test fails, and the
+daemon refuses to start, if any loaded module still comes from that directory.
 """
+'''
+
+
+# Runs before every other import in the generated file (and so it may use built-in modules only, and
+# no annotations: the generated file has no "from __future__ import annotations", because even that
+# statement imports a module, __future__, through sys.path).
+_SCRUB = r'''
+# --- first: keep this file's own directory off the import path (fixed text from tools/bundle.py) ----
+# Run as a script, this file's directory is sys.path[0], so a json.py or hashlib.py placed beside it
+# would replace the standard library inside the daemon. Only built-in modules (sys, posix) are used
+# until that directory is removed; everything else is imported after.
+import sys
+
+
+def _script_dirs():
+    """This file's directory, and the directory of the file a symbolic link to it points at
+    (CPython puts the resolved one on sys.path)."""
+    import posix  # built into the interpreter: never read from a directory on sys.path
+
+    here = globals().get("__file__") or (sys.argv[0] if sys.argv else "")
+    if not here:
+        return []
+    if not here.startswith("/"):
+        here = posix.getcwd() + "/" + here
+    dirs = [here.rpartition("/")[0] or "/"]
+    target = here
+    for _hop in range(40):
+        try:
+            link = posix.readlink(target)
+        except (OSError, ValueError):
+            break
+        target = link if link.startswith("/") else (target.rpartition("/")[0] or "/") + "/" + link
+        dirs.append(target.rpartition("/")[0] or "/")
+    return dirs
+
+
+def _scrub_path(dirs):
+    """Remove every sys.path entry that is one of ``dirs`` (compared by device and inode, so any
+    spelling of the directory matches), and the current-directory entries "" and "."."""
+    import posix
+
+    def identity(entry):
+        try:
+            st = posix.stat(entry)
+        except (OSError, TypeError, ValueError):
+            return None
+        return (st.st_dev, st.st_ino)
+
+    unsafe = {identity(d) for d in dirs} - {None}
+    kept, removed = [], []
+    for entry in sys.path:
+        if entry in ("", ".") or (isinstance(entry, str) and identity(entry) in unsafe):
+            removed.append(entry)
+        else:
+            kept.append(entry)
+    sys.path[:] = kept
+    return removed
+
+
+_SCRIPT_DIRS = _script_dirs()
+_PATH_REMOVED = _scrub_path(_SCRIPT_DIRS)
 '''
 
 
@@ -373,6 +438,29 @@ class _BundleImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         return entry[0]
 
 
+def _foreign_modules() -> List[str]:
+    """Loaded modules whose file lies in this file's directory, which must supply no code at all."""
+    prefixes: List[str] = []
+    for directory in [*_SCRIPT_DIRS, *_PATH_REMOVED]:
+        if directory in ("", "."):
+            directory = os.getcwd()
+        for form in {directory, os.path.realpath(directory)}:
+            if form not in ("", "/"):
+                prefixes.append(form.rstrip("/") + "/")
+    own = os.path.realpath(str(globals().get("__file__") or "")) if globals().get("__file__") else None
+    found: List[str] = []
+    for name, module in list(sys.modules.items()):
+        filename = getattr(module, "__file__", None)
+        if name == "__main__" or not isinstance(filename, str) or not filename.startswith("/"):
+            continue
+        real = os.path.realpath(filename)
+        if real == own:
+            continue  # this bundle itself
+        if any(filename.startswith(p) or real.startswith(p) for p in prefixes):
+            found.append(f"{name} ({filename})")
+    return sorted(found)
+
+
 def _install() -> _BundleImporter:
     for finder in sys.meta_path:
         if isinstance(finder, _BundleImporter):
@@ -440,6 +528,10 @@ def _self_test() -> int:
     if actual != PAYLOAD_SHA256:
         failures.append(f"payload sha256 is {actual}, the bundle header says {PAYLOAD_SHA256}")
 
+    foreign = _foreign_modules()
+    if foreign:
+        failures.append("loaded from this file's directory: " + ", ".join(foreign))
+
     summary = {
         "bundle": "jwicket",
         "version": BUNDLE_VERSION,
@@ -452,6 +544,8 @@ def _self_test() -> int:
         "static_files": len(_RESOURCES_B64),
         "assets": assets,
         "not_shipped": list(EXCLUDED_MODULES),
+        "path_removed": list(_PATH_REMOVED),
+        "foreign_modules": foreign,
         "failures": failures,
         "ok": not failures,
     }
@@ -473,7 +567,13 @@ def _main(argv: List[str]) -> int:
         _install()
         return int(importlib.import_module("jwicket.app").main(["--probe"]))
     _install()
-    return int(importlib.import_module("jwicket.app").main())
+    app = importlib.import_module("jwicket.app")
+    foreign = _foreign_modules()
+    if foreign:
+        print("jwicket: refusing to start: code was loaded from this file's directory: " + ", ".join(foreign),
+              file=sys.stderr)
+        return 2
+    return int(app.main())
 
 
 if __name__ == "__main__":
@@ -481,8 +581,6 @@ if __name__ == "__main__":
 '''
 
 _IMPORTS = """
-from __future__ import annotations
-
 import base64
 import hashlib
 import importlib
@@ -500,7 +598,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 def render(
     version: str, source_ref: Optional[str], modules: Sequence[Module], resources: Sequence[Resource], digest: str
 ) -> str:
-    parts = [_header(version, source_ref, digest, len(modules), len(resources)), _IMPORTS, "\n"]
+    parts = [_header(version, source_ref, digest, len(modules), len(resources)), _SCRUB, _IMPORTS, "\n"]
     parts.append(f"BUNDLE_VERSION = {version!a}\n")
     parts.append(f"SOURCE_REF = {source_ref!a}\n")
     parts.append(f"PAYLOAD_SHA256 = {digest!a}\n")

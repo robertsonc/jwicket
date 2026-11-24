@@ -97,6 +97,30 @@ class ReadSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["management"]["status"], "failed")
         self.assertNotIn("timeout", json.dumps(payload))  # internal text stays in the logs
 
+    def test_reply_without_configuration_is_a_failed_panel(self) -> None:
+        """CONS-02: a malformed reply is a failed configuration panel; the other panels are kept."""
+        status, payload, _ = self.snapshot({"get-software-information": SW,
+                                            "get-configuration": xml("<rpc-reply><ok/></rpc-reply>"),
+                                            "get-chassis-cluster-status": RpcUnsupported("x")})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["config"]["status"], "failed")
+        self.assertTrue(payload["config"]["message"])
+        self.assertEqual(payload["device"]["hostname"], "fw1")
+        self.assertEqual(payload["ha"]["mode"], "standalone")
+        self.assertIsNone(payload["scope"])
+
+    def test_device_error_text_goes_to_the_diagnostic_log_only(self) -> None:
+        """CONS-05: the Junos wording is kept for the lab (INFO, truncated), never sent to the browser."""
+        marker = "MARKER-DEVICE-TEXT"
+        with self.assertLogs("jwicket.api", level="INFO") as logged:
+            _, payload, _ = self.snapshot({"get-software-information": RpcDenied(f"error: {marker}"),
+                                           "get-configuration": RpcFailed("x" * 2000),
+                                           "get-chassis-cluster-status": RpcFailed(f"odd {marker}")})
+        text = "\n".join(logged.output)
+        self.assertIn(marker, text)
+        self.assertNotIn("x" * (api.MAX_ERROR_TEXT + 1), text)
+        self.assertNotIn(marker, json.dumps(payload))
+
     def test_denied_configuration(self) -> None:
         status, payload, _ = self.snapshot({"get-software-information": SW, "get-configuration": RpcDenied("x"),
                                             "get-chassis-cluster-status": RpcUnsupported("x")}, "lsys:ANY")
@@ -188,16 +212,22 @@ def req(headers: Dict[str, str], tls: bool = False, body: bytes = b"") -> H.Requ
 
 class RequestTests(unittest.TestCase):
     def test_cookie_names(self) -> None:
-        self.assertEqual(req({}).cookie_name, "jwicket")
-        self.assertEqual(req({}, tls=True).cookie_name, "__Host-jwicket")
+        """SECU-11: a per-daemon suffix, so two daemons behind two tunnels on 127.0.0.1 do not share a name."""
+        self.assertRegex(H.INSTANCE_ID, r"^[0-9a-f]{8}$")
+        self.assertEqual(req({}).cookie_name, f"jwicket-{H.INSTANCE_ID}")
+        self.assertEqual(req({}, tls=True).cookie_name, f"__Host-jwicket-{H.INSTANCE_ID}")
+        self.assertEqual((H.COOKIE_PLAIN, H.COOKIE_TLS), (req({}).cookie_name, req({}, tls=True).cookie_name))
 
     def test_cookie_parsing(self) -> None:
-        self.assertEqual(req({"Cookie": "a=1; jwicket=tok; b=2"}).cookie(), "tok")
-        self.assertIsNone(req({"Cookie": "jwicketx=1; xjwicket=2"}).cookie())
-        self.assertIsNone(req({"Cookie": "jwicket="}).cookie())
+        plain, tls = H.COOKIE_PLAIN, H.COOKIE_TLS
+        self.assertEqual(req({"Cookie": f"a=1; {plain}=tok; b=2"}).cookie(), "tok")
+        self.assertIsNone(req({"Cookie": f"{plain}x=1; x{plain}=2"}).cookie())
+        self.assertIsNone(req({"Cookie": f"{plain}="}).cookie())
         self.assertIsNone(req({}).cookie())
-        self.assertIsNone(req({"Cookie": "jwicket=plain"}, tls=True).cookie())  # TLS uses the __Host- name
-        self.assertEqual(req({"Cookie": "__Host-jwicket=t"}, tls=True).cookie(), "t")
+        # Another daemon's cookie (another tunnel, same 127.0.0.1) and the old fixed name are not ours.
+        self.assertIsNone(req({"Cookie": "jwicket=tok; jwicket-0badc0de=tok2"}).cookie())
+        self.assertIsNone(req({"Cookie": f"{plain}=plain"}, tls=True).cookie())  # TLS uses the __Host- name
+        self.assertEqual(req({"Cookie": f"{tls}=t"}, tls=True).cookie(), "t")
 
     def test_same_origin(self) -> None:
         self.assertTrue(req({"Host": "127.0.0.1:8443", "Origin": "http://127.0.0.1:8443"}).same_origin())

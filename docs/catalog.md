@@ -606,7 +606,7 @@ flowchart TD
 | **Brownfield** | J-Web rewrites what it does not model: VPN edit deletes a predefined proposal-set and shows only the first custom proposal (verified, W6). Deleting a default zone fails at commit because policies reference it (verified, W3). The Setup Wizard creates trust and untrust zones even when absent (verified, W1). | Read the committed configuration and keep everything it does not model, listed per object ([ADR 0005](adr/0005-committed-config-with-provenance.md), implemented in [`junos/inventory.py`](../src/jwicket/junos/inventory.py) as `unmodeled` and scope warnings). Never rewrite a set the UI shows only in part. Check references before a delete (policy to zone, Content Security policy to antivirus profile, policy to address). | Spec 003 cases; Spec 002 Q-CHG tests; Q-REL-01 |
 | **Group ownership** | Brownfield SRX configurations use `apply-groups`, wildcard groups and, in clusters, `node0`/`node1` groups (ADR 0005; node groups corroborated by search snippets only). Commit scripts can add transient changes that never appear in the candidate (verified, `https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-generating-persistent-and-transient-changes-overview.html`). | Show where each object comes from (implemented: `group`, `inherited` per object, read with `inherit="inherit" groups="groups"`). Refuse to edit a group-owned object in place and name the group. Show the change as written and the effective result after inheritance and commit scripts, and flag a difference. | Spec 002; Q-REL-01 (attribute behaviour) |
 | **Chassis cluster** | One configuration shared by both nodes (inferred). "The node on which RG0 is primary determines which Routing Engine is active in the cluster" (verified, `https://networkingdocs.hpe.com/documentation/us/en/software/junos/chassis-cluster-security-devices/topics/topic-map/security-chassis-cluster-redundancy-groups.html`). J-Web's Cluster wizard erases both units (verified, W3). Script synchronization covers commit, event, lib, op and SNMP scripts between Routing Engines and does not mention JET or chassis cluster nodes (verified, `https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-script-synchronizing-routing-engines-overview.html`). | Show cluster ID, redundancy groups and node priorities (implemented in [`junos/facts.py`](../src/jwicket/junos/facts.py)). Show which node serves the page (not yet: `local_node` is `None` until Q-HA-02). Allow writes only where Junos accepts them, expected on the RG0 primary (inferred). Name the node a reboot or capture targets. | Q-HA-01, Q-HA-02 |
-| **MNHA** | "Each node in the high availability setup must have an identical configuration"; Juniper recommends configuration groups with `[edit system commit peers-synchronize]` (verified, `https://networkingdocs.hpe.com/documentation/us/en/software/junos/high-availability/topics/topic-map/mnha-introduction.html`). The 24.4 J-Web guide has no MNHA topic (verified absence). | Detect MNHA (implemented: `chassis high-availability` present in the configuration reports mode `mnha`). Never present two nodes as one device. A change preview must say which node it commits on and whether peer synchronization is configured. | Q-HA-03 |
+| **MNHA** | For logical and tenant systems, "Each node in the high availability setup must have an identical configuration" (the sentence is scoped to that section of the page, not a general rule); Juniper recommends configuration groups with `[edit system commit peers-synchronize]` (verified, `https://networkingdocs.hpe.com/documentation/us/en/software/junos/high-availability/topics/topic-map/mnha-introduction.html`). The 24.4 J-Web guide has no MNHA topic (verified absence). | Detect MNHA (implemented: an active `chassis high-availability` in the configuration reports mode `mnha`; a deactivated one does not). Never present two nodes as one device. A change preview must say which node it commits on and whether peer synchronization is configured. | Q-HA-03 |
 | **Tenant and logical system** | J-Web's switcher works only in root context; roles carry a Default, Tenant or Logical System scope (verified, O31, O39). Data Plane Packet Capture filters by tenant and LSYS (verified, O26). Logical-system and tenant reports exist only on some models (verified, W12). | Keep scopes apart: root, each logical system and each tenant are separate inventories (implemented; scope `root`, `lsys:<name>`, `tenant:<name>` in [`api.py`](../src/jwicket/api.py)). Scope comes from the operator's Junos identity and is never widened. Device-wide operations (Part 2: history, rescue, reboot, software, files, licences) are offered only to root-scope operators (inferred). Sessions for non-root scopes are refused today ([`live.py`](../src/jwicket/live.py) returns 400). | Q-AUTH-03 |
 | **Central management** | Security Director Cloud flags local changes as out of sync and "overwrites such device configurations with the original configuration" on redeploy (verified, `https://networkingdocs.hpe.com/documentation/us/en/software/sd-cloud/sd-cloud-user-guide/user-guide/topics/topic-map/configuration-versions.html`). W8 hands the device to Security Director Cloud. | Show "also managed from" with the outbound-SSH client names and targets, never the secret (implemented, `central_management` in `facts.py`; detection is a heuristic, [ADR 0009](adr/0009-central-management-coexistence.md)). Before any write or rollback: warn, require an acknowledgement recorded in the audit trail and the commit comment, and allow a setting to block writes on managed devices. | Q-MGMT-01 |
 | **Login-class visibility** | Junos hides hierarchies matched by `deny-configuration-regexps` (verified, access privileges, `https://networkingdocs.hpe.com/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html`); whether a missing permission bit hides or refuses is unknown (Q-AUTH-03). | Never present an empty read as "nothing configured" (implemented: a reply with no security section produces a warning in `read_snapshot`). Hide operations the class cannot perform, and still handle the denial when Junos refuses. | Q-AUTH-03 |
@@ -669,7 +669,7 @@ flowchart TD
 | O31 Roles | Replace: J-Wicket has no roles of its own; it shows the operator's Junos login class ([ADR 0002](adr/0002-junos-delegated-sign-in.md)). A login-class editor would be a guided change | View: P1; edit: P4 | Tenant and LSYS scope of classes |
 | O32 Licences | View: read view; add, delete, update: guided action | View: P1; actions: P3 | Needs internet for updates |
 | O33 Security packages | View: read view; install and update: guided action | View: P1; actions: P3 | Needs internet or an offline package upload |
-| O34 Log grids | Read view (Spec 004); see N4 | View, time range, Refresh, filter and Detailed Log View: P0 (the ATP page: P1); export, Save and Load Filter: P1; Show/Hide Columns and PCAP: P3 | Log mode decides where logs are; SRX5000 has no on-box reporting (Q-LOG-01) |
+| O34 Log grids | Read view (Spec 004); see N4 | View, time range, Refresh, filter and Detailed Log View: P0 (the ATP page: P1); export, Save and Load Filter: P1; Show/Hide Columns and PCAP: P3 | Log mode decides where logs are; that SRX5000 has no on-box reporting is inferred (Feature Explorer 8049 does not list it; Q-LOG-01) |
 | O35 System log | Read view (Spec 004); backend built on fixtures, view not yet checked in a browser (AC-004-20) | P0 | Own NETCONF reads appear as UI_NETCONF_CMD lines (Q-LOAD-03) |
 | O36 Alarms | View: read view; definitions: guided change | View: P1; definitions: P4 | — |
 | O37 Monitor clear actions | Guided action; Delete PCAP Files treated as destructive | P3 | Clearing SAs drops tunnels; MNHA SRG1 |
@@ -782,16 +782,19 @@ behind N1 to N4 are `specified` today ([ledger summary, gap 4](parity/jweb-24.4.
   CSV export stops at 100 rows; not on the SRX5000 line (verified, O34). The guide has no live view
   of `show security flow session` (inferred from absence).
 - **Why pushdown matters.** Listing sessions sends every matching session from the SPUs to the
-  Routing Engine; Juniper support has tied high control-plane CPU to it (KB28956, quoted in
-  `https://community.networking.hpe.com/discussion/info-over-logs`; the KB itself was not
-  retrieved). So filters must go to the device (inferred).
+  Routing Engine. A 2015 community-forum reply (SRX3600, 12.1X44) quotes the title of Juniper
+  KB28956, "[SRX] Control Plane CPU is high ("Idle 0 percent") after "show security flow session"
+  command is issued" (`https://community.networking.hpe.com/discussion/info-over-logs`; the KB
+  itself was not retrieved, and that it applies to current releases is inferred). So filters must
+  go to the device (inferred).
 - **J-Wicket today.** `GET /api/sessions` validates source and destination prefix, ports,
   protocol, application and interface, and sends them as parameters of
   `get-flow-session-information`. It reads the filtered summary first. If more than 5,000 sessions
-  match, it refuses to pull rows and asks for a narrower filter. It returns at most 500 rows by
+  match, it refuses to pull rows and asks for a narrower filter; if it cannot tell how many match,
+  it pulls nothing either (`count-unknown`). It returns at most 500 rows by
   default (2,000 maximum) and says how many were dropped. Reads are limited to one per 1.5 s per
-  operator, and the server suggests a 5 s poll interval. Every read is in the audit trail. Root
-  scope only for now.
+  operator, and the server suggests a 5 s poll interval. The audit trail records each change of
+  filters or outcome, not every poll. Root scope only for now.
   Code: [`live.py`](../src/jwicket/live.py), [`junos/sessions.py`](../src/jwicket/junos/sessions.py).
   Status: backend built and tested on fixtures; the Sessions view is built in the working tree,
   not yet committed, not yet checked in a browser (Spec 004, AC-004-20).
@@ -800,12 +803,16 @@ behind N1 to N4 are `specified` today ([ledger summary, gap 4](parity/jweb-24.4.
 
 ### N4. Live logs with syntax highlighting and session timelines
 
-- **J-Web 24.4.** Six log grids over on-box reporting with a filter language and 100-row CSV
-  export, a System log page that filters only on Event and Message with `=`, and none of it on the
-  SRX5000 line (verified, O34–O35).
+- **J-Web 24.4.** Six log grids with a filter language and 100-row CSV export, and the six grids
+  are not on the SRX5000 line (verified, O34); that they read the on-box reporting database is
+  inferred (O34). A System log page filters only on Event and Message with `=`; the guide states no
+  SRX5000 limit for it (verified, O35).
 - **J-Wicket today.** `GET /api/logs/sources` says where logs are, from the configuration: syslog
   files, the security log mode (stream mode sends traffic logs off the box and says so), stream
-  hosts, and whether on-box reporting or the event-mode buffer is available. `GET /api/logs` tails
+  hosts, RADIUS destinations and local stream files, deactivated statements and `security log
+  disable`, and whether on-box reporting (offered whenever it is configured, with a note where the
+  documentation does not cover the model or mode) or the event-mode buffer is available. `GET
+  /api/logs` checks every parameter before any device read, then tails
   a configured syslog file with a cursor, so each poll returns only new lines, and reports rotation
   as a reset. Substring include and exclude terms are applied by J-Wicket on the device, before
   lines cross the network; a regular expression from a browser never runs on the Routing Engine.
