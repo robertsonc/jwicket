@@ -292,9 +292,10 @@ file show /var/db/jwicket/jwicket.log
 Expect `TLS is off; listening on loopback only (127.0.0.1)` and
 `listening on 127.0.0.1:8443 tls=False backend=netconf`. If those lines are there, confirm with
 `commit`. If not, do not confirm: let the change roll back, and use "Debugging" below. A refused start
-writes its reason (`startup refused: ...`) to stderr only, because the log file is opened after the
-settings are accepted; Junos stops restarting an application that keeps exiting ("thrashing, not
-restarted", verified).
+writes its reason (`startup refused: ...`) to stderr, and also to `/var/db/jwicket/startup-refused.txt`
+when that directory exists, because the log file is opened only after the settings are accepted:
+`file show /var/db/jwicket/startup-refused.txt`. Junos stops restarting an application that keeps
+exiting ("thrashing, not restarted", verified).
 
 ## 7. Open the UI through an SSH tunnel only
 
