@@ -1,8 +1,11 @@
 // histogram.js: the stacked event-rate strip above the Logs stream.
 //
-//   const hist = new Histogram({ series: [{ id, label }], label, onBrush(range | null), unit: 'line' });
+//   const hist = new Histogram({ series: [{ id, label }], label, onBrush(range | null), unit: 'line', legend });
 //   el.append(hist.el);
 //   hist.update({ times: [ms, ...], series: [seriesIndex, ...], selection: { lo, hi } | null });
+//   hist.setNote('UTC');  // the clock the axis is in, shown in the legend
+// With `legend: true` the bucket size, clock and brush hint go to `hist.legendEl` (place it above the
+// chart) instead of the top-right corner of the plot, where it covered the newest bars.
 //
 // Events per bucket over the time span of the data, stacked by series (event family). Bucket size is
 // a "nice" step chosen from the pixel width. Brush (drag) to select a time range, click a bar to
@@ -59,8 +62,10 @@ function plural(n, word) {
 }
 
 export class Histogram {
-  constructor({ series = [], label = 'Events over time', onBrush = null, unit = 'line' } = {}) {
+  constructor({ series = [], label = 'Events over time', onBrush = null, unit = 'line', legend = false } = {}) {
     this.series = series;
+    this.note = 'UTC';
+    this.legendEl = legend ? h('span', { class: 'hg-legend', 'aria-hidden': 'true' }) : null;
     this.label = label;
     this.unit = unit;
     this.onBrush = typeof onBrush === 'function' ? onBrush : null;
@@ -96,7 +101,16 @@ export class Histogram {
     this.svg.append(this.layers.grid, this.layers.hover, this.layers.bars, this.layers.sel, this.layers.cursor, this.layers.brush, this.layers.axis);
 
     this._render = rafBatch(() => this.render());
-    this._ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => this._render()) : null;
+    // The size comes from the observer: reading clientWidth in render() would force a layout in the
+    // same frame the log stream has just written its rows.
+    this.size = null;
+    this._ro = typeof ResizeObserver === 'function'
+      ? new ResizeObserver((entries) => {
+        const r = entries[entries.length - 1].contentRect;
+        this.size = { w: Math.round(r.width), h: Math.round(r.height) };
+        this._render();
+      })
+      : null;
     if (this._ro) this._ro.observe(this.el);
     this._bind();
   }
@@ -106,6 +120,14 @@ export class Histogram {
     if (times) this.times = times;
     if (series) this.ser = series;
     if (selection !== undefined) this.sel = selection;
+    this._render();
+  }
+
+  /** The clock the times are in ("UTC", "device clock, read as UTC"), named in the legend. */
+  setNote(text) {
+    const next = String(text || '');
+    if (next === this.note) return;
+    this.note = next;
     this._render();
   }
 
@@ -215,8 +237,8 @@ export class Histogram {
   // ---- drawing ----------------------------------------------------------------------------------
 
   render() {
-    const width = Math.round(this.el.clientWidth);
-    const height = Math.round(this.el.clientHeight);
+    const width = this.size ? this.size.w : Math.round(this.el.clientWidth);
+    const height = this.size ? this.size.h : Math.round(this.el.clientHeight);
     this.geo = this._compute(width, height);
     const L = this.layers;
     this.svg.setAttribute('width', String(Math.max(0, width)));
@@ -227,6 +249,7 @@ export class Histogram {
     L.axis.replaceChildren();
     L.sel.replaceChildren();
     this.empty.hidden = Boolean(this.geo) || width < 60;
+    if (this.legendEl && !this.geo) this.legendEl.textContent = '';
     if (!this.geo) {
       this.svg.setAttribute('aria-label', `${this.label}: nothing to chart yet.`);
       this._hideHover();
@@ -252,13 +275,17 @@ export class Histogram {
       const x = PAD.left + b * g.bw + gap / 2;
       const w = Math.max(1, g.bw - gap);
       let y = base;
+      let top = -1;
+      for (let s = 0; s < g.S; s += 1) if (g.counts[b * g.S + s]) top = s;
       for (let s = 0; s < g.S; s += 1) {
         const c = g.counts[b * g.S + s];
         if (!c) continue;
         const hgt = Math.max(1, c * scale);
         y -= hgt;
+        // A 1 px gap above each segment but the top one separates hues that differ in hue only.
+        const sepPx = s !== top && hgt >= 3 ? 1 : 0;
         const id = (this.series[s] && this.series[s].id) || 'other';
-        L.bars.append(svg('rect', { class: `hg-bar fam-${id}`, x: x.toFixed(2), y: y.toFixed(2), width: w.toFixed(2), height: hgt.toFixed(2) }));
+        L.bars.append(svg('rect', { class: `hg-bar fam-${id}`, x: x.toFixed(2), y: (y + sepPx).toFixed(2), width: w.toFixed(2), height: (hgt - sepPx).toFixed(2) }));
       }
     }
     // x ticks: a multiple of the step, at least ~78 px apart
@@ -277,8 +304,9 @@ export class Histogram {
     if (g.earlier) {
       L.axis.append(svg('text', { class: 'hg-earlier', x: PAD.left + 4, y: PAD.top + 4, 'text-anchor': 'start' }, `\u25c2 ${plural(g.earlier, this.unit)} earlier, not drawn`));
     }
-    const hint = this.onBrush && !this.sel && g.plotW > 420 ? ' \u00b7 drag to pick a time range' : '';
-    L.axis.append(svg('text', { class: 'hg-step', x: PAD.left + g.plotW, y: PAD.top + 4, 'text-anchor': 'end' }, `per ${stepLabel(g.step)}${hint}`));
+    const hint = this.onBrush && !this.sel && g.plotW > (this.legendEl ? 360 : 420) ? ' \u00b7 drag to pick a time range' : '';
+    if (this.legendEl) this.legendEl.textContent = `per ${stepLabel(g.step)} \u00b7 ${this.note}${hint}`;
+    else L.axis.append(svg('text', { class: 'hg-step', x: PAD.left + g.plotW, y: PAD.top + 4, 'text-anchor': 'end' }, `per ${stepLabel(g.step)}${hint}`));
     // selection
     if (this.sel && Number.isFinite(this.sel.lo) && Number.isFinite(this.sel.hi)) {
       const x0 = Math.max(PAD.left, Math.min(PAD.left + g.plotW, this._x(this.sel.lo)));
@@ -289,7 +317,7 @@ export class Histogram {
       if (x1 < PAD.left + g.plotW) L.sel.append(svg('rect', { class: 'hg-dim', x: x1.toFixed(2), y: top, width: (PAD.left + g.plotW - x1).toFixed(2), height: hh }));
       L.sel.append(svg('rect', { class: 'hg-sel', x: x0.toFixed(2), y: top + 0.5, width: Math.max(2, x1 - x0).toFixed(2), height: hh - 1, rx: 2 }));
     }
-    const sum = `${plural(g.n, this.unit)}${g.earlier ? ` (and ${g.earlier} earlier, not drawn)` : ''} from ${clock(g.start, seconds)} to ${clock(g.end, seconds)}, ${plural(g.buckets, 'bar')} of ${stepLabel(g.step)}; busiest ${clock(g.start + g.peakAt * g.step)}: ${plural(g.peak, this.unit)}.`;
+    const sum = `${plural(g.n, this.unit)}${g.earlier ? ` (and ${g.earlier} earlier, not drawn)` : ''} from ${clock(g.start, seconds)} to ${clock(g.end, seconds)} (${this.note}), ${plural(g.buckets, 'bar')} of ${stepLabel(g.step)}; busiest ${clock(g.start + g.peakAt * g.step)}: ${plural(g.peak, this.unit)}.`;
     const how = this.onBrush ? ' Drag, or use the arrow keys and Enter, to select a time range; Escape clears it.' : '';
     const selText = this.sel ? ` Selected ${clock(this.sel.lo)} to ${clock(this.sel.hi)}.` : '';
     this.svg.setAttribute('aria-label', `${this.label}: ${sum}${selText}${how}`);
@@ -347,7 +375,7 @@ export class Histogram {
       rows.push(h('li', null, h('span', { class: `hg-sw fam-${ser.id}`, 'aria-hidden': 'true' }), h('span', { class: 'hg-tl' }, ser.label), h('b', null, c.toLocaleString('en-US'))));
     }
     this.tip.replaceChildren(
-      h('div', { class: 'hg-th' }, `${clock(lo, true)} – ${clock(lo + g.step - 1, seconds || g.step < 3600000)}`, h('b', null, plural(g.totals[i], this.unit))),
+      h('div', { class: 'hg-th' }, `${clock(lo, true)} – ${clock(lo + g.step - 1, seconds || g.step < 3600000)} ${this.note === 'UTC' ? 'UTC' : 'device clock'}`, h('b', null, plural(g.totals[i], this.unit))),
       rows.length ? h('ul', null, rows) : h('p', { class: 'hg-tn' }, 'Nothing in this interval'),
     );
     this.tip.hidden = false;

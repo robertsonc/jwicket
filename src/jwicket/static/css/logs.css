@@ -9,9 +9,40 @@
 /* ---- frame ------------------------------------------------------------------------------------ */
 
 .lg-view {
+  /* New lines: a wash quieter than search hits (--gold-wash) and selection (--gold-soft + bar).
+     Derived from the gold fill until app.css has a --new-wash token. */
+  --lg-new-wash: color-mix(in srgb, var(--gold-fill) 12%, transparent);
   gap: var(--s3);
   padding-top: var(--s3);
   padding-bottom: var(--s4);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .lg-view {
+    --lg-new-wash: color-mix(in srgb, var(--gold-fill) 16%, transparent);
+  }
+}
+
+:root[data-theme="light"] .lg-view {
+  --lg-new-wash: color-mix(in srgb, var(--gold-fill) 16%, transparent);
+}
+
+/* Family hues in the Logs view: Screen (orange), Commit (gold) and Auth (amber) were three warm
+   yellows. Auth becomes rose and SNMP slate, mixed from existing tokens until app.css has --fam-*. */
+.lg-view .fam-auth,
+.lg-detail .fam-auth {
+  --fam: color-mix(in srgb, var(--deny) 50%, var(--lilac));
+}
+
+.lg-view .fam-snmp,
+.lg-detail .fam-snmp {
+  --fam: color-mix(in srgb, var(--sky) 45%, var(--inactive));
+}
+
+/* Violet means NAT in a line; the process name is not NAT. */
+.lg-text .tk-daemon,
+.lg-d-raw .tk-daemon {
+  color: var(--muted);
 }
 
 .lg-head {
@@ -81,18 +112,39 @@
 .lg-view.is-blocked .lg-srcrow,
 .lg-view.is-blocked .lg-query,
 .lg-view.is-blocked .lg-timeline,
-.lg-view.is-blocked .lg-bar,
-.lg-view.is-blocked .lg-foot,
+.lg-view.is-blocked .lg-main,
 .lg-view.is-blocked .lg-iv,
-.lg-view.is-blocked .lg-menu-wrap {
+.lg-view.is-blocked .lg-menu-wrap,
+.lg-view.is-blocked .live-pill,
+.lg-view.is-nodata .live-pill,
+.lg-view.is-nodata .lg-iv,
+.lg-view.is-nodata .lg-menu-wrap {
   display: none;
+}
+
+/* The explanation, directly under the header and aligned with the title: no empty frame around it. */
+.lg-block {
+  max-width: 720px;
+}
+
+.lg-block .state {
+  align-items: flex-start;
+  text-align: left;
+  margin: 0;
+}
+
+.lg-view.is-blocked,
+.lg-view.is-nodata {
+  flex: 0 0 auto;
 }
 
 .lg-srcrow:has(.lg-sources:empty) .lg-sources {
   display: none;
 }
 
-.lg-view.is-nodata .lg-timeline {
+.lg-view.is-nodata .lg-timeline,
+.lg-view.is-nodata .lg-main,
+.lg-view.is-nodata .lg-qhint {
   display: none;
 }
 
@@ -508,15 +560,44 @@
   min-width: 0;
 }
 
+.lg-tl-side {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+  margin-left: auto;
+}
+
+.lg-ages > button {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+/* Bucket size, clock and brush hint: above the plot, right-aligned, never over the newest bars. */
+.lg-tl-legend {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 14px;
+  margin-top: 4px;
+  padding-right: 8px;
+}
+
+.hg-legend {
+  color: var(--faint);
+  font: 10px/14px var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .lg-fams {
   display: flex;
+  flex-wrap: wrap;
   gap: 3px;
   min-width: 0;
   flex: 1 1 auto;
-  overflow-x: auto;
-  scrollbar-width: none;
-  padding: 1px 18px 1px 1px;
-  mask-image: linear-gradient(90deg, var(--text) calc(100% - 22px), transparent);
+  padding: 1px;
 }
 
 .lg-fams::-webkit-scrollbar {
@@ -574,6 +655,11 @@
 
 .lg-fam.is-zero:hover {
   opacity: .85;
+}
+
+.lg-fam-more {
+  border-style: dashed;
+  color: var(--faint);
 }
 
 .lg-fam-n {
@@ -642,7 +728,7 @@
 }
 
 .hg-bar {
-  opacity: .88;
+  opacity: .9;
   shape-rendering: crispEdges;
 }
 
@@ -801,8 +887,151 @@
 }
 
 .lg-count b {
+  display: inline-block;
   font-size: 13px;
   font-weight: 650;
+}
+
+.lg-hostchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.lg-hostchip svg {
+  width: 13px;
+  height: 13px;
+  color: var(--faint);
+}
+
+/* the stream and the top-values rail */
+.lg-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.lg-main.has-facets {
+  grid-template-columns: minmax(0, 1fr) 272px;
+}
+
+.lg-facets {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 12px;
+  gap: 12px;
+  overscroll-behavior: contain;
+}
+
+.lg-fc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.lg-fc-h {
+  font: 700 13px/1.2 var(--font-display);
+  letter-spacing: .01em;
+}
+
+.lg-fc {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lg-fc-title {
+  color: var(--muted);
+  font: 700 10.5px/1.3 var(--font-ui);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.lg-fc-title .faint {
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.lg-fc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.lg-fc-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  text-align: left;
+  overflow: hidden;
+}
+
+.lg-fc-item:hover {
+  background: var(--hover);
+}
+
+.lg-fc-bar {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: var(--w, 0%);
+  border-radius: 4px;
+  background: var(--muted-soft);
+  pointer-events: none;
+}
+
+.lg-fc-item.fc-reason .lg-fc-bar {
+  background: var(--deny-soft);
+}
+
+.lg-fc-item.fc-policy .lg-fc-bar {
+  background: var(--gold-soft);
+}
+
+.lg-fc-v {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.lg-fc-n {
+  position: relative;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.lg-fc-empty {
+  font-size: 12px;
 }
 
 .lg-matchnav {
@@ -1037,8 +1266,23 @@
   background: linear-gradient(var(--deny-soft), var(--deny-soft)), var(--sunken);
 }
 
+/* New lines: a short fade from a quiet wash (a few lines), or only the gutter stripe (a burst). */
 .lg-row.is-new {
-  animation: jw-wash 1.8s var(--ease);
+  animation: lg-new 900ms var(--ease);
+}
+
+.lg-row.is-new-gut .lg-gut::before {
+  animation: lg-new-gut 600ms var(--ease);
+}
+
+@keyframes lg-new {
+  0% { background-color: var(--lg-new-wash); }
+  100% { background-color: transparent; }
+}
+
+@keyframes lg-new-gut {
+  0% { background-color: var(--gold-fill); opacity: 1; }
+  100% { background-color: var(--fam, var(--muted)); opacity: .7; }
 }
 
 .lg-body.is-wrap .lg-row {
@@ -1080,6 +1324,111 @@
 
 .lg-text {
   display: inline;
+  /* Device text may hold right-to-left characters: they reorder inside their token, never the line. */
+  unicode-bidi: isolate;
+  direction: ltr;
+}
+
+.lg-text span {
+  unicode-bidi: isolate;
+}
+
+/* An invisible or direction-changing character, shown as "U+202E" (same width rules as any token). */
+.tk-ctl {
+  border-radius: 2px;
+  background: var(--deny-soft);
+  box-shadow: 0 0 0 1px var(--deny-line);
+  color: var(--deny);
+  font-weight: 600;
+}
+
+/* Compact: the RT_FLOW family badge, the remaining fields, the note on a capped line. */
+.lg-text .lg-badge {
+  letter-spacing: .02em;
+}
+
+.lg-text .lg-faint,
+.lg-text .lg-faint.tk-key,
+.lg-text .lg-faint.tk-val,
+.lg-text .lg-faint.tk-num,
+.lg-text .lg-faint.tk-ip,
+.lg-text .lg-faint.tk-nat,
+.lg-text .lg-faint.tk-iface,
+.lg-text .lg-faint.tk-user,
+.lg-text .lg-faint.tk-good,
+.lg-text .lg-faint.tk-bad {
+  color: var(--faint);
+  font-weight: 400;
+}
+
+.lg-text .lg-faint.tk-ip {
+  text-decoration: none;
+}
+
+.lg-text .tk-cap {
+  color: var(--amber);
+}
+
+.lg-text .tk-sdid {
+  color: var(--faint);
+  cursor: help;
+}
+
+.lg-text .tk-ts[title] {
+  cursor: default;
+}
+
+/* Two-line rows (Compact + Wrap at phone width): time, gutter and family on line 1, the summary on
+   line 2, cut with an ellipsis (the decoded panel has the rest). */
+.lg-body.is-two .lg-c-head {
+  display: block;
+}
+
+.lg-body.is-two .lg-c-body {
+  display: block;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+/* A day divider (Compact): the date the times below are on. */
+.lg-row.lg-day {
+  display: flex;
+  align-items: center;
+  padding: 0 12px 0 18px;
+  white-space: nowrap;
+}
+
+.lg-day-text {
+  position: sticky;
+  left: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font: 600 11px/1 var(--font-ui);
+  letter-spacing: .04em;
+}
+
+.lg-day-text::after {
+  content: "";
+  width: 48px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.lg-day-zone {
+  order: 2;
+  color: var(--faint);
+  font-weight: 400;
+  letter-spacing: 0;
+  cursor: help;
+}
+
+.lg-body.is-wrap .lg-row.lg-day {
+  padding-top: 0;
+  padding-bottom: 0;
+  box-shadow: none;
 }
 
 /* Inline token boxes must not change text width (see the file header). */
@@ -1317,6 +1666,43 @@
 .lg-d-time {
   color: var(--muted);
   font-size: 11.5px;
+}
+
+.lg-d-zone {
+  color: var(--faint);
+}
+
+.lg-d-h3note {
+  color: var(--faint);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.lg-d-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+}
+
+.lg-d-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Device text in the panel: right-to-left characters stay inside their own value. */
+.lg-detail td,
+.lg-d-lead,
+.lg-d-facts li,
+.lg-d-ep,
+.lg-tl-what,
+.lg-d-raw {
+  unicode-bidi: isolate;
+}
+
+.lg-d-raw {
+  direction: ltr;
 }
 
 .lg-d-sentence {
@@ -1587,6 +1973,14 @@
   box-shadow: inset 0 0 0 1.5px var(--muted);
 }
 
+.lg-live-dot.is-closed {
+  background: var(--teal);
+}
+
+.lg-live-dot.is-denied {
+  background: var(--deny);
+}
+
 .lg-d-fields {
   width: 100%;
   border-collapse: collapse;
@@ -1663,6 +2057,29 @@
   }
   .lg-src-meta {
     max-width: 150px;
+  }
+  /* The top-values rail moves under the stream as a strip of columns. */
+  /* With the rail under the stream the page scrolls, as on a phone: the stream keeps its height. */
+  .view.view-fill.lg-view:has(.lg-main.has-facets) {
+    flex: 1 0 auto;
+    overflow: visible;
+  }
+  .lg-main.has-facets {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+  .lg-main.has-facets .lg-stream {
+    flex: none;
+    height: max(420px, calc(100dvh - 300px));
+  }
+  .lg-facets {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    align-items: start;
+  }
+  .lg-fc-head {
+    grid-column: 1 / -1;
   }
 }
 
@@ -1749,6 +2166,24 @@
     flex: none;
     height: max(430px, calc(100dvh - 250px));
   }
+  .lg-main {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+  .lg-facets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+  }
+  .lg-tl-side {
+    margin-left: 0;
+  }
+  .lg-tl-head {
+    flex-wrap: wrap;
+  }
+  .lg-hostchip {
+    display: none;
+  }
   .lg-win,
   .lg-mn-txt {
     display: none;
@@ -1777,9 +2212,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lg-row.is-new {
+  /* No motion: new lines are announced and counted, not flashed. */
+  .lg-row.is-new,
+  .lg-row.is-new-gut .lg-gut::before {
     animation: none !important;
-    box-shadow: inset 2px 0 0 var(--gold);
   }
   .lg-live-dot.is-live {
     animation: none !important;

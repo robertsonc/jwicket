@@ -626,7 +626,7 @@ class SessionsView {
     for (const off of this.offs) off();
     for (const [type, fn] of this.listeners) document.removeEventListener(type, fn);
     if (this.ro) this.ro.disconnect();
-    clearTimeout(this.facetTimer);
+    if (this.facetTimer) cancelAnimationFrame(this.facetTimer);
     if (this.list) this.list.destroy();
     if (this.bar) this.bar.destroy();
     this.closeMenu();
@@ -808,7 +808,7 @@ class SessionsView {
     this.list = new RowWindow({
       container: this.scroller,
       rowHeight: this.rowHeight(),
-      overscan: 10,
+      overscan: 6,
       keyOf: (i) => (this.rows[i] ? this.rows[i].id : `#${i}`),
       create: (i) => this.createRow(i),
       patch: (node, i) => this.patchRow(node, i),
@@ -896,8 +896,9 @@ class SessionsView {
     this.grid.append(probe);
     const w = probe.getBoundingClientRect().width / 40;
     probe.remove();
-    this.charW = w > 3 && w < 20 ? w : 6.9;
-    return this.charW;
+    if (!(w > 3 && w < 20)) return 6.9; // not laid out yet (detached): measure again next time
+    this.charW = w;
+    return w;
   }
 
   /** The zones column fits the longest "from → to" of the policies in the inventory. */
@@ -998,7 +999,7 @@ class SessionsView {
     });
     if (this.mobile) {
       cells.length = 0;
-      cells.push(h('div', { class: 'sx-hc sx-mhead', role: 'columnheader', 'aria-colindex': '1' }, 'Sessions', h('span', { class: 'faint' }, ` · sorted ${SORT_LABEL[this.sort] || `by ${(COL_BY_ID.get(skey) || {}).label || skey}${dir === 'descending' ? ' ▼' : ' ▲'}`}`)));
+      cells.push(h('div', { class: 'sx-hc sx-mhead', role: 'columnheader', 'aria-colindex': '1' }, 'Sessions', h('span', { class: 'faint' }, `\u00a0· sorted ${SORT_LABEL[this.sort] || `by ${(COL_BY_ID.get(skey) || {}).label || skey}${dir === 'descending' ? ' ▼' : ' ▲'}`}`)));
     }
     this.gridHead.replaceChildren(...cells);
     this.sortNote.textContent = `Sorted: ${SORT_LABEL[this.sort] || `${(COL_BY_ID.get(skey) || {}).label || skey} ${dir === 'descending' ? '▼' : '▲'}`}${this.hold ? ' · order held' : ''}`;
@@ -1537,19 +1538,21 @@ class SessionsView {
       const ok = this.payload && this.payload.sessions && this.payload.sessions.status === 'ok';
       this.bar.setStatus(this.browserActive && ok ? `${this.fmt.num(this.shownCount)} of ${this.fmt.num(this.listedCount)}` : '');
     }
-    if (facets) this.renderFacets();
+    if (facets) this.scheduleFacets();
     this.renderStats();
     this.renderGridState();
   }
 
-  /** Facets are recomputed after the rows are painted (a separate, short task), and only when shown. */
+  /**
+   * Facets are recomputed in the next animation frame (a separate, short piece of work that paints
+   * in the same frame as the rows), and only while the rail is shown.
+   */
   scheduleFacets() {
-    if (!this.facetsOpen) return;
-    clearTimeout(this.facetTimer);
-    this.facetTimer = setTimeout(() => {
+    if (!this.facetsOpen || this.facetTimer) return;
+    this.facetTimer = requestAnimationFrame(() => {
       this.facetTimer = 0;
       if (!this.dead) this.renderFacets();
-    }, 30);
+    });
   }
 
   facetData() {
@@ -1810,8 +1813,12 @@ class SessionsView {
     let hard = false;
     let loading = false;
     const table = this.payload && this.payload.sessions;
-    const history = btn('Session history: Logs → on-box report', () => this.ctx.navigate('logs', { source: 'report' }), 'btn sm ghost');
-    history.title = 'Sessions that closed are in the traffic log (RT_FLOW) or the on-box report, in Logs';
+    const history = h(
+      'button',
+      { class: 'btn sm', type: 'button', dataset: { fk: 'history' }, title: 'Sessions that closed are in the traffic log (RT_FLOW) or the on-box report, in Logs', on: { click: () => this.ctx.navigate('logs', { source: 'report' }) } },
+      this.ctx.dom.icon('logs'),
+      'Session history: Logs → on-box report',
+    );
     if (!this.q || !this.ctx.QueryBar) {
       sig = 'engine';
       solo = hard = true;
@@ -2032,8 +2039,12 @@ class SessionsView {
     return this.h('span', { class: ['fx', cls], tabindex: '-1', dataset: { k: key, v: String(value), fk: `${key}=${value}` } }, display ?? String(value));
   }
 
-  /** An address whose middle is cut (never its last group) when the column is too narrow. */
+  /**
+   * An address whose middle is cut (never its last group) when the column is too narrow. An IPv4
+   * address (at most 15 characters) always fits its column, so it stays one text node.
+   */
   addr(text) {
+    if (String(text).length <= 15) return String(text);
     const [head, tail] = splitTail(text);
     return [this.h('span', { class: 'ip-h' }, head), this.h('span', { class: 'ip-t' }, tail)];
   }
@@ -3115,16 +3126,17 @@ class SessionDetail {
     const k = this.v.known.get(r.id);
     const hist = k ? k.hist.slice() : [];
     this.rateEl.textContent = state !== 'live' || !Number.isFinite(r.rate) ? DASH : fmt.rate(r.rate);
-    this.rateEl.classList.toggle('avg', state === 'live' && !r._live);
+    this.rateEl.classList.toggle('avg', state !== 'live' || !r._live);
     this.rateSub.textContent = state !== 'live' ? (state === 'ended' ? 'ended' : 'not listed') : r._live ? 'between the last two polls' : 'average since start (live rate after the next poll)';
     const enough = hist.length >= 3; // the sparkline draws from three points
     this.spark.el.hidden = !enough;
     this.sparkPh.hidden = enough;
     if (enough) this.spark.update(hist, { min: 0 });
     const polls = k ? k.polls : 1;
-    this.sparkNote.textContent = enough
-      ? `${fmt.plural(hist.length, 'poll')} in this tab · peak ${fmt.rate(Math.max(...hist))}`
-      : `collecting · ${fmt.plural(polls, 'poll')}${hist.length ? ` · peak ${fmt.rate(Math.max(...hist))}` : ''}`;
+    const peak = hist.length ? ` · peak ${fmt.rate(Math.max(...hist))}` : '';
+    this.sparkNote.textContent = enough || state !== 'live'
+      ? `${fmt.plural(enough ? hist.length : polls, 'poll')} in this tab${peak}`
+      : `collecting · ${fmt.plural(polls, 'poll')}${peak}`;
     tick(this.upEl, fmt.bytes((r.in || {}).bytes));
     tick(this.downEl, fmt.bytes((r.out || {}).bytes));
   }

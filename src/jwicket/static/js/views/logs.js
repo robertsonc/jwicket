@@ -11,7 +11,12 @@
 // default and counted.
 //
 // Nothing read from the device is stored in the browser: lines live in memory for this view only.
-// localStorage holds display preferences (wrap, window size, interval) and nothing else.
+// localStorage holds display preferences (wrap, compact, top values, window size, interval) only.
+//
+// Compact (the default) changes only what is painted: the stream shows HH:MM:SS.mmm with a divider row
+// where the date changes, hides the RFC 5424 <pri>, "-" and SD-ID boilerplate (and the host while the
+// window holds one host), and paints RT_FLOW lines as a summary (5-tuple, policy, zones, NAT, reason)
+// followed by the remaining fields. Copy line, the decoded panel and the tokenizer stay exact.
 
 import { Histogram, clock } from '../widgets/histogram.js';
 
@@ -22,7 +27,13 @@ const DEFAULT_WINDOW = 5000;
 const API_MAX_LINES = 2000;
 const REPORT_COUNT = 1000;
 const FAIL_BACKOFF_S = 10;
-const PREF = { wrap: 'jwicket.logs.wrap', window: 'jwicket.logs.window', interval: 'jwicket.logs.interval' };
+const PREF = {
+  wrap: 'jwicket.logs.wrap',
+  compact: 'jwicket.logs.compact',
+  facets: 'jwicket.logs.facets',
+  window: 'jwicket.logs.window',
+  interval: 'jwicket.logs.interval',
+};
 const CLICKABLE = new Set(['ip', 'port', 'proto', 'zone', 'policy', 'iface', 'nat', 'num', 'str', 'bad', 'good', 'user', 'val', 'tag', 'daemon', 'host', 'pid']);
 const FLOW_FAMS = new Set(['create', 'close', 'deny']);
 const SEP = ' \u00b7 ';
@@ -30,6 +41,46 @@ const OVERSCAN = 10;
 const PARSE_SLICE = 300;
 const PROBE_CHARS = 24;
 const GUTTER_PX = 30; // .lg-row padding-left + padding-right, kept in step with logs.css
+const NARROW_MQ = '(max-width: 640px)';
+const LINE_CAP = 4000; // characters painted per line in the stream; the panel and Copy line keep it all
+const CTL_EXTRA = 5; // a control character paints as "U+XXXX": five columns more than it takes
+const NEW_WASH_MAX = 6; // a read with more new lines flashes the gutter only
+const NEW_MS = 1000;
+const FACET_MIN_MS = 900;
+// row.fs bits: which window totals a row is counted in (kept so trimming can subtract it again)
+const FS_SELF = 1;
+const FS_COUNT = 2;
+const FS_HIST = 4;
+const FS_VIS = 8;
+const FS_MATCH = 16;
+// Top values over the filtered window: [id, label, query key]
+const FACETS = [
+  ['src', 'Sources', 'src'],
+  ['dst', 'Destinations', 'dst'],
+  ['dport', 'Destination ports', 'dport'],
+  ['policy', 'Policies', 'policy'],
+  ['reason', 'Reasons', 'reason'],
+  ['pair', 'Zone pairs', null],
+];
+const FACET_TOP = 8;
+const REPORT_FAMILY = { 'session-close': 'close', 'session-create': 'create', 'session-deny': 'deny', screen: 'screen', 'idp-all': 'idp', 'utm-all': 'idp', threat: 'idp', 'ipsec-vpn': 'vpn' };
+const AGES = [['15m', '15 min'], ['1h', '1 h'], ['24h', '24 h']];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/**
+ * The Policies row id ("sel") for a policy named on a log line. A name used in several zone pairs
+ * is resolved with the line's own zones (a global policy with no zones applies to any); null when
+ * the inventory does not know the name or the zones do not single one row out.
+ */
+function policySel(idx, name, from, to) {
+  const p = idx ? idx.get(name) : null;
+  if (!p) return null;
+  if (!p.ambiguous) return p.id || null;
+  const fits = (list, z) => !list || !list.length || (z !== null && z !== undefined && list.includes(z));
+  const hits = (p.all || []).filter((e) => fits(e.from, from) && fits(e.to, to));
+  return hits.length === 1 ? hits[0].id || null : null;
+}
 
 function prefGet(key) {
   try {
@@ -72,6 +123,30 @@ function reportStart(ms) {
 function bufferSince(ms) {
   const iso = isoNoZone(ms);
   return `${iso.slice(0, 10)}.${iso.slice(11, 19)}`;
+}
+
+/** "HH:MM:SS" or "HH:MM:SS.mmm" (UTC) for the compact time column. */
+function shortClock(ms, withMs) {
+  const d = new Date(ms);
+  const base = `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+  return withMs ? `${base}.${String(d.getUTCMilliseconds()).padStart(3, '0')}` : base;
+}
+
+function dayKey(ms) {
+  return Math.floor(ms / 86400000);
+}
+
+function dayLabel(ms) {
+  const d = new Date(ms);
+  return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+function hostOnly(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s || /^(?:N\/A|NA|None|NONE|UNKNOWN|unknown|-|0x0)$/.test(s)) return null;
+  const slash = s.indexOf('/');
+  return slash > 0 ? s.slice(0, slash) : s;
 }
 
 function stampMs(ms, withMs = true) {
@@ -163,8 +238,11 @@ class LineList {
     this.tops = new Float64Array(1);
     this.lh = 20;
     this.markerH = 30;
+    this.dayH = 20;
     this.wrapPad = 4;
     this.wrap = false;
+    this.twoLine = false; // compact + wrap at phone width: the head (time, tag) on a line of its own
+    this.wantEnd = false;
     this.ch = 7.2;
     this.cpl = 160;
     this.maxLen = 0;
@@ -187,14 +265,30 @@ class LineList {
     if (this._raf) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = 0;
-      this.reconcile(false);
+      if (this.wantEnd) {
+        // Once per frame, after every height write: one layout, not one per call.
+        this.wantEnd = false;
+        this.pendingDy = 0;
+        this.setScroll(Number.MAX_SAFE_INTEGER);
+      } else if (this.pendingDy) {
+        const dy = this.pendingDy;
+        this.pendingDy = 0;
+        this.setScroll(this.sc.scrollTop + dy);
+      } else {
+        this.reconcile(false);
+      }
     });
   }
 
+  /** Painted length (row.pl) and, for two-line rows, the head's length (row.ph) come from the view. */
   heightOf(row) {
-    if (row.marker) return this.markerH;
+    if (row.marker) return row.marker.kind === 'day' ? this.dayH : this.markerH;
     if (!this.wrap) return this.lh;
-    const lines = Math.max(1, Math.ceil(row.len / this.cpl));
+    const len = row.pl === undefined ? row.len : row.pl;
+    let lines;
+    // Two-line rows: the head, then one line of summary (cut with an ellipsis; the panel has it all).
+    if (this.twoLine && row.ph) lines = Math.max(1, Math.ceil(row.ph / this.cpl)) + 1;
+    else lines = Math.max(1, Math.ceil(len / this.cpl));
     return lines * this.lh + this.wrapPad;
   }
 
@@ -215,9 +309,11 @@ class LineList {
     else this._schedule();
   }
 
-  setWrap(on) {
+  setWrap(on, twoLine = this.twoLine) {
     this.wrap = Boolean(on);
+    this.twoLine = Boolean(twoLine);
     this.body.classList.toggle('is-wrap', this.wrap);
+    this.body.classList.toggle('is-two', this.wrap && this.twoLine);
     this.measure();
     this.relayout();
   }
@@ -264,16 +360,20 @@ class LineList {
     for (let i = start; i < n; i += 1) {
       const row = this.items[i];
       this.tops[i + 1] = this.tops[i] + this.heightOf(row);
-      if (!row.marker && row.len > this.maxLen) this.maxLen = row.len;
+      const len = row.pl === undefined ? row.len : row.pl;
+      if (!row.marker && len > this.maxLen) this.maxLen = len;
     }
     this.body.style.height = `${this.tops[n]}px`;
     this.body.style.setProperty('--lg-maxch', String(Math.max(40, this.maxLen)));
   }
 
+  /** New items: every drawn row is dropped and the visible ones are drawn on the next frame. */
   setItems(items) {
     this.items = items;
     this.recompute(0);
-    this.reconcile(true);
+    for (const node of this.nodes.values()) node.remove();
+    this.nodes.clear();
+    this._schedule();
   }
 
   /** Rows were pushed to the end of `items` starting at index `from`. */
@@ -372,6 +472,7 @@ class LineList {
   }
 
   setScroll(y) {
+    this.wantEnd = false;
     this.programmatic = Date.now();
     const n = this.items.length;
     const max = Math.max(0, (this.tops[n] || 0) - (this.viewH || this.sc.clientHeight));
@@ -396,11 +497,21 @@ class LineList {
     if (next !== cur) this.setScroll(next);
   }
 
+  /** Moves the scroll position by `dy` px on the next frame (rows above the viewport went away). */
+  nudge(dy) {
+    if (!dy) return;
+    this.pendingDy = (this.pendingDy || 0) + dy;
+    this._schedule();
+  }
+
+  /** Scrolls to the newest row on the next frame (several calls in one task scroll once). */
   scrollToEnd() {
-    this.setScroll(Number.MAX_SAFE_INTEGER);
+    this.wantEnd = true;
+    this._schedule();
   }
 
   atEnd(slack = 24) {
+    if (this.wantEnd) return true;
     const total = this.tops[this.items.length] || 0;
     return this.sc.scrollTop + (this.viewH || this.sc.clientHeight) >= total - slack;
   }
@@ -471,7 +582,24 @@ class LogsView {
     this.readAs = (ctx.store.session && ctx.store.session.user) || '';
     this.panelSeq = null;
     this.reopening = false;
-    this.wrap = prefGet(PREF.wrap) === '1';
+    this.narrowMq = typeof matchMedia === 'function' ? matchMedia(NARROW_MQ) : null;
+    this.narrow = Boolean(this.narrowMq && this.narrowMq.matches);
+    // Phone width defaults to Compact + Wrap (two-line rows); a stored choice wins.
+    const wrapPref = prefGet(PREF.wrap);
+    this.wrap = wrapPref === null ? this.narrow : wrapPref === '1';
+    this.compact = prefGet(PREF.compact) !== '0';
+    const facetPref = prefGet(PREF.facets);
+    this.facetsOn = facetPref === null ? typeof innerWidth !== 'number' || innerWidth >= 1280 : facetPref === '1';
+    this.facets = FACETS.map(() => new Map());
+    this.facetsAt = 0;
+    this.hostCounts = new Map();
+    this.singleHost = null;
+    this.pkey = '';
+    this.filterGen = 0;
+    this.reportOk = new Set();
+    this.famsExpanded = false;
+    this.clockChecked = false;
+    this.fields = null;
     const w = Number(prefGet(PREF.window));
     this.windowMax = WINDOWS.includes(w) ? w : DEFAULT_WINDOW;
     const iv = Number(prefGet(PREF.interval));
@@ -493,6 +621,7 @@ class LogsView {
     }
     this.families = this.lp.FAMILIES.map((f) => ({ id: f.id, label: f.label }));
     this.famIndex = new Map(this.families.map((f, i) => [f.id, i]));
+    this.fields = this.logFields();
     this.build();
     this.bind();
     this.readRoute(ctx.route, true);
@@ -562,8 +691,8 @@ class LogsView {
     );
     this.queryEl = h('div', { class: 'lg-query' }, this.bar ? this.bar.el : null, this.queryHint);
 
-    // timeline: family toggles (also the histogram legend) and the histogram
-    this.famEl = h('div', { class: 'lg-fams', role: 'group', 'aria-label': 'Event families: click to show or hide, Alt-click to show only one' });
+    // timeline: family toggles (also the histogram legend), time presets and the histogram
+    this.famEl = h('div', { class: 'lg-fams', role: 'group', 'aria-label': 'Event families: click to show only one (again: all), Alt-click to hide one, Shift-click to add or remove one' });
     this.famBtns = new Map();
     for (const f of this.families) {
       const count = h('span', { class: 'lg-fam-n' }, '0');
@@ -574,7 +703,7 @@ class LogsView {
           type: 'button',
           'aria-pressed': 'true',
           dataset: { fam: f.id },
-          on: { click: (e) => this.toggleFamily(f.id, e.altKey || e.shiftKey) },
+          on: { click: (e) => this.toggleFamily(f.id, e) },
         },
         h('span', { class: 'lg-fam-sw', 'aria-hidden': 'true' }),
         h('span', { class: 'lg-fam-label' }, f.label),
@@ -583,26 +712,50 @@ class LogsView {
       this.famBtns.set(f.id, { btn, count });
       this.famEl.append(btn);
     }
+    this.famMore = h('button', { class: 'lg-fam lg-fam-more', type: 'button', 'aria-expanded': 'false', on: { click: () => { this.famsExpanded = !this.famsExpanded; this.renderFams(); } } });
+    this.famEl.append(this.famMore);
     this.rangeEl = h('div', { class: 'lg-range' });
+    this.ageSeg = h(
+      'div',
+      { class: 'seg lg-ages', role: 'group', 'aria-label': 'Time range' },
+      AGES.map(([v, label]) => h('button', { type: 'button', dataset: { age: v }, 'aria-pressed': 'false', title: `Only the last ${label} (age<${v}); report and buffer sources ask the device for it`, on: { click: () => this.setAge(v) } }, label)),
+      h('button', { type: 'button', dataset: { age: 'custom' }, 'aria-pressed': 'false', title: 'Type a time range: adds time>= and time<= to the query (or drag across the chart)', on: { click: () => this.customRange() } }, 'Custom'),
+      h('button', { type: 'button', dataset: { age: 'all' }, 'aria-pressed': 'true', title: 'Every line in the window', on: { click: () => this.setAge(null) } }, 'All'),
+    );
     this.histogram = new Histogram({
       series: this.families,
       label: 'Log lines over time, stacked by event family',
       unit: 'line',
+      legend: true,
       onBrush: (r) => this.onBrush(r),
     });
     this.timeline = h(
       'section',
       { class: 'tile lg-timeline', 'aria-label': 'Timeline' },
-      h('div', { class: 'lg-tl-head' }, this.famEl, this.rangeEl),
+      h('div', { class: 'lg-tl-head' }, this.famEl, h('div', { class: 'lg-tl-side' }, this.rangeEl, this.ageSeg)),
+      h('div', { class: 'lg-tl-legend' }, this.histogram.legendEl),
       this.histogram.el,
     );
 
     // stream
     this.countEl = h('span', { class: 'lg-count' });
+    this.hostEl = h('span', { class: 'lg-hostchip', hidden: true });
     this.matchEl = h('span', { class: 'lg-matchnav', hidden: true });
     this.selfEl = h('span', { class: 'lg-selfwrap' });
-    this.followBtn = h('button', { class: 'btn sm lg-follow', type: 'button', title: 'Follow the newest line (f)', on: { click: () => this.toggleFollow() } }, icon('arrow', { class: 'lg-down' }), 'Follow');
-    this.wrapBtn = h('button', { class: 'btn sm', type: 'button', title: 'Wrap long lines', 'aria-pressed': this.wrap ? 'true' : 'false', on: { click: () => this.toggleWrap() } }, icon('rows'), 'Wrap');
+    this.followBtn = h('button', { class: 'btn sm lg-follow', type: 'button', title: 'Follow the newest line (f)', on: { click: () => this.toggleFollow() } }, icon('arrow', { class: 'lg-down' }), h('span', { class: 'lg-btn-label' }, 'Follow'));
+    this.compactBtn = h(
+      'button',
+      { class: 'btn sm', type: 'button', title: 'Compact (c): short times, no repeated header, RT_FLOW lines as a summary. Copy line and the decoded panel keep the exact line.', 'aria-pressed': this.compact ? 'true' : 'false', on: { click: () => this.toggleCompact() } },
+      icon('menu'),
+      h('span', { class: 'lg-btn-label' }, 'Compact'),
+    );
+    this.wrapBtn = h('button', { class: 'btn sm', type: 'button', title: 'Wrap long lines (w)', 'aria-pressed': this.wrap ? 'true' : 'false', on: { click: () => this.toggleWrap() } }, icon('rows'), h('span', { class: 'lg-btn-label' }, 'Wrap'));
+    this.facetsBtn = h(
+      'button',
+      { class: 'btn sm', type: 'button', title: 'Top values in the filtered window: sources, destinations, ports, policies, reasons, zone pairs', 'aria-pressed': this.facetsOn ? 'true' : 'false', 'aria-controls': 'lg-facets', on: { click: () => this.toggleFacets() } },
+      icon('grid'),
+      h('span', { class: 'lg-btn-label' }, 'Top'),
+    );
     this.winSel = h(
       'select',
       { class: 'lg-select', 'aria-label': 'Lines kept in this window', title: 'Lines kept in this browser window (memory only)', on: { change: () => this.setWindow(Number(this.winSel.value)) } },
@@ -613,11 +766,14 @@ class LogsView {
       'div',
       { class: 'lg-bar' },
       this.countEl,
+      this.hostEl,
       this.matchEl,
       this.selfEl,
       h('span', { class: 'spacer' }),
       this.followBtn,
+      this.compactBtn,
       this.wrapBtn,
+      this.facetsBtn,
       this.winSel,
     );
     this.noticeEl = h('div', { class: 'lg-notice', role: 'status', hidden: true });
@@ -635,18 +791,25 @@ class LogsView {
     this.hoverBar = h(
       'div',
       { class: 'lg-hoverbar', hidden: true },
-      h('button', { class: 'btn sm icon', type: 'button', title: 'Copy this line (c)', 'aria-label': 'Copy this line', on: { click: () => this.hoverRow && this.copyLine(this.hoverRow) } }, icon('copy')),
+      h('button', { class: 'btn sm icon', type: 'button', title: 'Copy this line exactly (y)', 'aria-label': 'Copy this line', on: { click: () => this.hoverRow && this.copyLine(this.hoverRow) } }, icon('copy')),
       h('button', { class: 'btn sm icon', type: 'button', title: 'Decode this line (Enter)', 'aria-label': 'Decode this line', on: { click: () => this.hoverRow && this.select(this.hoverRow, { open: true }) } }, icon('info')),
     );
     this.stateEl = h('div', { class: 'lg-state', hidden: true });
     this.streamWrap = h('div', { class: 'lg-wrap' }, this.scroller, this.newPill, this.hintEl, this.hoverBar, this.stateEl);
     this.footEl = h('div', { class: 'lg-foot', role: 'status', 'aria-live': 'off' });
     this.stream = h('section', { class: 'tile lg-stream', 'aria-label': 'Log stream' }, this.streamBar, this.noticeEl, this.streamWrap, this.footEl);
+    this.facetsEl = h('aside', { id: 'lg-facets', class: 'tile lg-facets', 'aria-label': 'Top values in the filtered window', hidden: !this.facetsOn });
+    this.facetsEl.addEventListener('click', (e) => this.onFacetClick(e));
+    this.mainEl = h('div', { class: ['lg-main', this.facetsOn && 'has-facets'] }, this.stream, this.facetsEl);
+    // Nothing could be read: the explanation sits under the header instead of inside an empty frame.
+    this.blockEl = h('section', { class: 'lg-block', 'aria-label': 'Why there are no lines', hidden: true });
 
-    this.el.append(this.head, this.srcRow, this.whereEl, this.queryEl, this.timeline, this.stream);
+    this.el.append(this.head, this.srcRow, this.blockEl, this.whereEl, this.queryEl, this.timeline, this.mainEl);
 
     this.list = new LineList(this.scroller, { h, render: (row) => this.renderRow(row), onScroll: (programmatic) => this.onScroll(programmatic) });
-    this.list.setWrap(this.wrap);
+    this.updatePaintKey();
+    this.list.body.classList.toggle('is-compact', this.compact);
+    this.list.setWrap(this.wrap, this.twoLineMode());
     this.renderLive();
     this.renderFollow();
     this.showState({ status: 'loading', title: 'Reading the log configuration', message: 'J-Wicket asks the device which log files and databases exist.', skeleton: true });
@@ -690,6 +853,12 @@ class LogsView {
     }));
     this.offs.push(this.ctx.store.on('sessions', () => this.refreshLiveLink()));
     this.offs.push(this.ctx.store.on('scope', () => this.renderSub()));
+    if (this.narrowMq) {
+      on(this.narrowMq, 'change', () => {
+        this.narrow = this.narrowMq.matches;
+        this.repaint();
+      });
+    }
     this.timers.ago = setInterval(() => this.renderFoot(), 1000);
   }
 
@@ -722,8 +891,9 @@ class LogsView {
     const showSelf = p.get('self') === 'show';
     const selfChanged = showSelf !== this.showSelf;
     this.showSelf = showSelf;
+    // A link without a type means session-all, whatever was chosen before.
     const type = p.get('type');
-    if (type && /^[a-z-]{2,32}$/.test(type)) this.reportType = type;
+    this.reportType = type && /^[a-z-]{2,32}$/.test(type) ? type : 'session-all';
     this.wantSource = p.get('source') || null;
     const q = p.get('q') || '';
     if (initial || q !== this.queryText) {
@@ -902,7 +1072,8 @@ class LogsView {
   renderWhere() {
     const { h, put, icon } = this.dom;
     const tr = this.sources && this.sources.traffic;
-    this.whereEl.hidden = !(tr && this.whereOpen);
+    // With nothing to read, the traffic-log card is part of the explanation: always shown.
+    this.whereEl.hidden = !(tr && (this.whereOpen || this.el.classList.contains('is-nodata')));
     if (!tr) return;
     const mode = tr.effective_mode || 'unknown';
     const modeCls = mode === 'stream' ? 'amber' : mode === 'event' ? 'permit' : mode === 'stream-event' ? 'sky' : 'muted';
@@ -956,7 +1127,8 @@ class LogsView {
           ),
           h('p', { class: 'lg-where-cli' }, h('span', { class: 'faint' }, 'Check on the device: '), h('code', null, 'show configuration security log')),
         ),
-        h('button', { class: 'btn ghost icon lg-where-x', type: 'button', 'aria-label': 'Close', title: 'Close', on: { click: () => this.toggleWhere() } }, icon('close')),
+        // With nothing to read the card is part of the explanation, so it cannot be closed.
+        this.el.classList.contains('is-nodata') ? null : h('button', { class: 'btn ghost icon lg-where-x', type: 'button', 'aria-label': 'Close', title: 'Close', on: { click: () => this.toggleWhere() } }, icon('close')),
       ),
     );
   }
@@ -1005,6 +1177,15 @@ class LogsView {
     this.curSeq = null;
     this.selfHidden = 0;
     this.hist = { times: [], series: [] };
+    this.hostCounts.clear();
+    this.facets = FACETS.map(() => new Map());
+    this.facetsDirty = true;
+    this.lastDay = null;
+    if (this.singleHost !== null) {
+      this.singleHost = null;
+      this.updatePaintKey();
+      this.renderHost();
+    }
     this.list.setItems(this.visible);
   }
 
@@ -1017,8 +1198,8 @@ class LogsView {
     this.failed = null;
     this.notice = null;
     this.follow = true;
+    this.clockChecked = false;
     this.resetRows();
-    this.firstSeqLive = Infinity;
     this.renderFollow();
     this.renderNotice();
     if (!this.src) return;
@@ -1164,6 +1345,7 @@ class LogsView {
     }
     if (this.bar) this.bar.setError(null);
     this.lastRead = { at: Date.now(), ok: true };
+    if (src.kind === 'report') this.reportOk.add(this.reportType);
     // Parse big reads in slices so the first paint never blocks the page for long (parse results are
     // memoised by logparse, so ingest() below reuses them).
     const lines = Array.isArray(log.lines) ? log.lines : [];
@@ -1188,6 +1370,7 @@ class LogsView {
         hint: src.kind === 'file' ? 'Reading a syslog file ("show log") needs the trace permission; the read-only class does not have it.' : 'Ask your Junos administrator for a class that can read security logs.',
       };
     }
+    if (src.kind === 'report' && (log.status === 'unsupported' || log.status === 'failed')) return this.reportState(log, src);
     if (log.status === 'unsupported') {
       const { h, icon } = this.dom;
       const others = this.sourceList.filter((x) => x.id !== src.id && x.traffic === 'yes');
@@ -1200,6 +1383,56 @@ class LogsView {
       };
     }
     return { status: log.status || 'failed', message: log.message, actions: [this.retryButton(() => this.restart())] };
+  }
+
+  /**
+   * One report type failed. That says nothing about on-box reporting as a whole (other types may
+   * work) and, in fixture mode, nothing about a device: say which type, and offer session-all with
+   * the matching family filter.
+   */
+  reportState(log, src) {
+    const { h, icon } = this.dom;
+    const type = this.reportType;
+    const fixture = Boolean((this.meta && this.meta.fixture) || (this.ctx.store.session && this.ctx.store.session.fixture));
+    const fam = REPORT_FAMILY[type];
+    const allOk = this.reportOk.has('session-all');
+    const actions = [];
+    let message;
+    if (type !== 'session-all' && (src.types || []).includes('session-all')) {
+      const q = fam ? `family:${fam}` : '';
+      message = allOk
+        ? `session-all works here${fam ? `: filter it with family:${fam} for the same lines` : ''}.`
+        : `Try session-all${fam ? ` and filter it with family:${fam}` : ''}.`;
+      actions.push(
+        h('button', { class: 'btn sm', type: 'button', on: { click: () => this.useSessionAll(q) } }, icon('grid'), `Read session-all${q ? ` with ${q}` : ''}`),
+      );
+    } else {
+      message = log.message && !/does not support or has not enabled/i.test(log.message) ? log.message : null;
+    }
+    actions.push(this.retryButton(() => this.restart()));
+    return {
+      status: log.status === 'failed' ? 'failed' : 'unsupported',
+      title: `The ${type} report returned nothing this console can read`,
+      message,
+      hint: fixture
+        ? 'This is fixture data: the fixture has no lines for this report type. It says nothing about a real device.'
+        : `On-box reporting itself may still work: a single report type can be unavailable (a feature without its licence, or not configured) while others answer. Check on the device: show security log report in-detail ${type}`,
+      actions,
+    };
+  }
+
+  useSessionAll(q) {
+    if (!this.src || this.src.kind !== 'report') return;
+    this.reportType = 'session-all';
+    this.src.reportType = 'session-all';
+    if (q && !this.queryText.includes(q)) {
+      this.queryText = this.queryText ? `${this.queryText} ${q}` : q;
+      if (this.bar) this.bar.setValue(this.queryText);
+      this.applyQuery(this.queryText, this.bar ? this.bar.parsed : this.q.parse(this.queryText, { view: 'logs' }), { silent: true });
+    }
+    this.renderSources();
+    this.writeRoute();
+    this.restart();
   }
 
   ingest(log, src, initial) {
@@ -1240,7 +1473,50 @@ class LogsView {
       markers.push({ kind: 'gap', text: `The device returned its limit of ${this.fmt.num(REPORT_COUNT)} lines; some lines before this point may be missing.` });
     }
     const dedupe = src.kind !== 'file' || Boolean(log.reset);
+    const before = this.seq;
     this.append(items, markers, dedupe, initial);
+    this.checkClocks(initial, src, before);
+  }
+
+  /**
+   * Time-zone sanity. Lines a live tail just read were written moments ago: if their zone-less
+   * times sit far from the device's UTC clock, the device logs in local time and every time here
+   * (read as UTC) is off by that offset. Also says when this browser's clock is off the device's.
+   */
+  checkClocks(initial, src, beforeSeq) {
+    const server = this.meta && this.meta.read_at ? Date.parse(this.meta.read_at) : NaN;
+    if (!Number.isFinite(server)) return;
+    const notes = [];
+    if (initial && !this.skewNoted) {
+      const skew = Date.now() - server;
+      if (Math.abs(skew) > 120000) {
+        this.skewNoted = true;
+        notes.push(`This browser's clock is ${this.fmt.duration(Math.round(Math.abs(skew) / 1000))} ${skew > 0 ? 'ahead of' : 'behind'} the device's, so age filters (age<15m) are off by that much.`);
+      }
+    }
+    if (!initial && src.kind === 'file' && !this.clockChecked) {
+      let fresh = null;
+      for (let i = this.rows.length - 1; i >= 0 && this.rows[i].seq > beforeSeq; i -= 1) {
+        const r = this.rows[i];
+        if (!r.marker && r.time !== null && !r.p.zoned) {
+          fresh = r;
+          break;
+        }
+      }
+      if (fresh) {
+        this.clockChecked = true;
+        const d = fresh.time - server;
+        if (Math.abs(d) > 20 * 60000) {
+          const q = Math.round(d / 900000) / 4;
+          const off = `UTC${q >= 0 ? '+' : '\u2212'}${Math.abs(q)}`;
+          notes.push(`New lines in ${src.label} are stamped ${this.fmt.duration(Math.round(Math.abs(d) / 1000))} ${d > 0 ? 'ahead of' : 'behind'} the device's UTC clock. Their times carry no zone, so the device probably logs in local time (about ${off}); J-Wicket reads them as UTC, so the chart, ages and time ranges are off by that much.`);
+        }
+      }
+    }
+    if (notes.length) {
+      this.notice = { kind: 'info', text: notes.join(' ') };
+      this.renderNotice();
+    }
   }
 
   timeOrder(items) {
@@ -1262,6 +1538,7 @@ class LogsView {
     let p = this.lp.parse(line);
     if (ev) p = withEvent(p, ev, this.lp.SEVERITIES || []);
     const fam = this.famIndex.has(p.family) ? p.family : 'other';
+    const fk = this.facetKeys(p);
     const row = {
       seq: (this.seq += 1),
       line,
@@ -1272,16 +1549,23 @@ class LogsView {
       self: this.lp.isSelfRead(p, this.readAs),
       sid: sessionIdOf(p),
       len: line.length,
+      nctl: this.lp.countControls ? this.lp.countControls(line) : 0,
+      fk: fk.keys,
+      pair: fk.pair,
       added: Date.now(),
+      flash: null,
       toks: null,
       tg: -1,
+      ptoks: null,
+      pk: '',
+      fs: 0,
       marker: null,
     };
     return row;
   }
 
   markerRow(marker) {
-    return { seq: (this.seq += 1), line: '', p: null, fam: 'other', famIx: 0, time: null, self: false, sid: null, len: 0, added: Date.now(), marker };
+    return { seq: (this.seq += 1), line: '', p: null, fam: 'other', famIx: 0, time: null, self: false, sid: null, len: 0, pl: 0, added: Date.now(), marker };
   }
 
   append(items, markers, dedupe, initial) {
@@ -1299,28 +1583,44 @@ class LogsView {
       if (row.time !== null && (this.newest === null || row.time > this.newest)) this.newest = row.time;
     }
     // A marker with nothing after it says nothing: drop markers when no lines followed.
-    if (!added.some((r) => !r.marker)) {
+    const lines = added.filter((r) => !r.marker);
+    if (!lines.length) {
       if (initial) this.afterIngest(0, initial);
       else this.renderFoot();
       return;
     }
+    // A few new lines get a brief wash; a burst only flashes the gutter so the stream stays readable.
+    if (!initial) {
+      const flash = lines.length <= NEW_WASH_MAX ? 'wash' : 'gut';
+      for (const r of lines) r.flash = flash;
+    }
     for (const row of added) {
       this.rows.push(row);
       this.bySeq.set(row.seq, row);
-      if (!row.marker) this.seen.set(row.line, (this.seen.get(row.line) || 0) + 1);
+      if (!row.marker) {
+        this.seen.set(row.line, (this.seen.get(row.line) || 0) + 1);
+        this.hostAdd(row, 1);
+      }
     }
     const excess = this.rows.length - this.windowMax;
-    if (excess > 0) {
-      const unseen = this.unseen;
-      this.trimFront(excess);
+    const removed = excess > 0 ? this.trimFront(excess) : [];
+    for (const r of removed) if (!r.marker) this.hostAdd(r, -1);
+    if (this.checkHosts() || !this.famCounts) {
+      // The host column appeared or went away (Compact): every row paints differently.
+      this.updatePaintKey();
+      for (const r of this.rows) this.measureRow(r);
       this.refilter();
-      if (!this.follow) this.unseen = unseen + added.filter((r) => !r.marker && this.indexOfSeq(r.seq) >= 0).length;
     } else {
+      for (const r of lines) this.measureRow(r);
+      // Steady state: subtract what left the window, then filter only what arrived.
+      const shift = this.forgetRows(removed);
       this.filterAppend(added);
+      if (!this.follow && shift) this.list.nudge(-shift);
     }
-    this.afterIngest(added.filter((r) => !r.marker).length, initial);
+    this.afterIngest(lines.length, initial);
   }
 
+  /** Removes the oldest `k` rows from the window; returns them. */
   trimFront(k) {
     const removed = this.rows.splice(0, k);
     for (const row of removed) {
@@ -1331,7 +1631,53 @@ class LogsView {
         else this.seen.delete(row.line);
       }
       if (row.seq === this.selSeq) this.selSeq = null;
+      if (row.seq === this.curSeq) this.curSeq = null;
     }
+    return removed;
+  }
+
+  /**
+   * Takes trimmed rows out of the window totals (family counts, histogram, matches, top values) and
+   * drops them from the head of the visible list, without filtering the window again. Returns how
+   * far (px) the first row still shown moved up, so a reader who is not following keeps their place.
+   */
+  forgetRows(removed) {
+    if (!removed.length) return 0;
+    let hist = 0;
+    for (const row of removed) {
+      if (row.marker) continue;
+      const fs = row.fs || 0;
+      if (fs & FS_SELF) this.selfHidden -= 1;
+      if (fs & FS_COUNT) this.famCounts[row.famIx] -= 1;
+      if (fs & FS_HIST) hist += 1;
+      if (fs & FS_VIS) {
+        this.facetAdd(row, -1);
+        if (fs & FS_MATCH) this.matchCount -= 1;
+      }
+    }
+    // Histogram entries are pushed in row order, so the trimmed rows own the first `hist` of them.
+    if (hist) {
+      this.hist.times.splice(0, hist);
+      this.hist.series.splice(0, hist);
+    }
+    const maxSeq = removed[removed.length - 1].seq;
+    const v = this.visible;
+    let k = 0;
+    while (k < v.length && v[k].seq <= maxSeq) k += 1;
+    // A gap or rotation marker with nothing before it says nothing.
+    while (k < v.length && v[k].marker && v[k].marker.kind !== 'day') k += 1;
+    if (!k) return 0;
+    const before = this.list.tops[k] || 0;
+    v.splice(0, k);
+    let at = 0;
+    if (this.compact && v.length && !v[0].marker && v[0].time !== null) {
+      v.unshift(this.dividerFor(v[0]));
+      at = 1;
+    }
+    if (!v.some((r) => !r.marker)) this.lastDay = null;
+    this.list.recompute(0);
+    this.facetsDirty = true;
+    return before - (this.list.tops[at] || 0);
   }
 
   setWindow(n) {
@@ -1340,8 +1686,9 @@ class LogsView {
     prefSet(PREF.window, n);
     const excess = this.rows.length - n;
     if (excess > 0) {
-      this.trimFront(excess);
-      this.refilter();
+      for (const r of this.trimFront(excess)) if (!r.marker) this.hostAdd(r, -1);
+      if (this.checkHosts()) this.repaint();
+      else this.refilter();
     }
     this.renderBar();
     this.ctx.ui.toast(`Keeping the newest ${this.fmt.num(n)} lines in this window.`, 'info');
@@ -1366,7 +1713,6 @@ class LogsView {
       this.ctx.ui.announce(`${this.fmt.plural(addedCount, 'new log line')}`);
     }
     if (this.follow) this.list.scrollToEnd();
-    if (initial) this.firstSeqLive = this.seq;
     this.renderAll();
   }
 
@@ -1410,8 +1756,18 @@ class LogsView {
       return;
     }
     const kind = (this.src && this.src.kind) || 'file';
-    const plan = this.q.plan(parsed.ast, `logs:${kind}`);
-    if (kind === 'report' && plan.expression) {
+    // In Logs `app` also matches the Junos application (service-name), as it does in Sessions. The
+    // report database's `application` key is the layer-7 name, so a Junos application name is not
+    // sent to the device as application=...: it is matched here.
+    const held = kind === 'report' ? this.junosAppTerms(parsed.ast) : [];
+    const planAst = held.length ? this.withoutItems(parsed.ast, held) : parsed.ast;
+    const plan = this.q.plan(planAst, `logs:${kind}`);
+    if (held.length) {
+      const items = parsed.ast.type === 'and' ? parsed.ast.items : [parsed.ast];
+      const byPos = new Map(plan.explain.map((e) => [e.pos, e]));
+      plan.explain = items.map((it) => byPos.get(it.gpos ?? it.pos) || { text: this.q.toQueryString(it), where: 'browser', pos: it.gpos ?? it.pos, end: it.gend ?? it.end });
+    }
+    if (kind === 'report' && (plan.expression || held.length)) {
       // The report expression's accepted keys and its != >= <= forms are inferred, not verified on a
       // device (research note 51): the device narrows, and the browser checks every term again.
       plan.browser = parsed.ast;
@@ -1421,8 +1777,8 @@ class LogsView {
     if (this.bar) this.bar.setPlan(plan);
     const split = this.splitTime(plan.browser);
     const ctx = { now: Date.now() };
-    this.pred = this.q.compile(split.rest, this.q.FIELDS.logs, ctx);
-    this.predTime = this.q.compile(split.time, this.q.FIELDS.logs, ctx);
+    this.pred = this.q.compile(split.rest, this.fields, ctx);
+    this.predTime = this.q.compile(split.time, this.fields, ctx);
     this.timeRange = split.lo !== null || split.hi !== null ? { lo: split.lo === null ? -Infinity : split.lo, hi: split.hi === null ? Infinity : split.hi } : null;
     const terms = this.markTerms(parsed.ast);
     terms.sort((a, b) => b.length - a.length);
@@ -1441,6 +1797,24 @@ class LogsView {
       return;
     }
     if (!fromRoute || this.rows.length) this.refilter();
+  }
+
+  /** Top-level positive app terms whose value is a Junos application (junos-*, or one in the inventory). */
+  junosAppTerms(ast) {
+    if (!ast) return [];
+    const inv = this.ctx.store.lastInventory;
+    const apps = new Set((((inv && inv.scope && inv.scope.applications) || {}).rows || []).map((a) => a.name));
+    const items = ast.type === 'and' ? ast.items : [ast];
+    return items.filter((it) => {
+      if (it.type !== 'term' || !it.key || !['app', 'application'].includes(String(it.key).toLowerCase())) return false;
+      return (it.values || []).some((v) => v.kind !== 'regex' && (/^junos-/i.test(v.text) || apps.has(v.text)));
+    });
+  }
+
+  withoutItems(ast, drop) {
+    const items = (ast.type === 'and' ? ast.items : [ast]).filter((it) => !drop.includes(it));
+    if (!items.length) return null;
+    return items.length === 1 ? items[0] : { ...ast, type: 'and', items };
   }
 
   /**
@@ -1481,20 +1855,24 @@ class LogsView {
   }
 
   refilter() {
+    this.filterGen += 1;
     const counts = new Array(this.families.length).fill(0);
     const vis = [];
     const times = [];
     const series = [];
     let selfHidden = 0;
     let matches = 0;
+    this.facets = FACETS.map(() => new Map());
     for (const row of this.rows) {
       if (row.marker) {
         vis.push(row);
         continue;
       }
+      row.fs = 0;
       const r = this.passes(row);
       if (r === 0) {
         selfHidden += 1;
+        row.fs = FS_SELF;
         continue;
       }
       if (r === 1) continue;
@@ -1502,22 +1880,30 @@ class LogsView {
       if (famOn && row.time !== null) {
         times.push(row.time);
         series.push(row.famIx);
+        row.fs |= FS_HIST;
       }
       if (!this.predTime(row.p)) continue;
       counts[row.famIx] += 1;
+      row.fs |= FS_COUNT;
       if (!famOn) continue;
       vis.push(row);
+      row.fs |= FS_VIS;
+      this.facetAdd(row, 1);
       if (this.markRe) {
         this.markRe.lastIndex = 0;
-        if (this.markRe.test(row.line)) matches += 1;
+        if (this.markRe.test(row.line)) {
+          matches += 1;
+          row.fs |= FS_MATCH;
+        }
       }
     }
     // Markers between nothing are noise: drop leading/consecutive markers in the visible list.
-    this.visible = this.tidyMarkers(vis);
+    this.visible = this.withDividers(this.tidyMarkers(vis));
     this.famCounts = counts;
     this.selfHidden = selfHidden;
     this.matchCount = matches;
     this.hist = { times, series };
+    this.facetsDirty = true;
     const anchor = this.follow ? null : this.list.anchor();
     this.list.setItems(this.visible);
     if (this.follow) this.list.scrollToEnd();
@@ -1540,6 +1926,29 @@ class LogsView {
     return out;
   }
 
+  /** Compact: a 20 px row with the date before the first line of each day (times show no date). */
+  withDividers(vis) {
+    this.lastDay = null;
+    if (!this.compact) return vis;
+    const out = [];
+    for (const row of vis) {
+      if (!row.marker && row.time !== null) {
+        const d = dayKey(row.time);
+        if (d !== this.lastDay) {
+          out.push(this.dividerFor(row));
+          this.lastDay = d;
+        }
+      }
+      out.push(row);
+    }
+    return out;
+  }
+
+  dividerFor(row) {
+    // seq sits between the row and the one before it, so the visible list stays sorted by seq.
+    return { seq: row.seq - 0.5, line: '', p: null, fam: 'other', famIx: 0, time: row.time, self: false, sid: null, len: 0, pl: 0, marker: { kind: 'day', text: dayLabel(row.time), zoned: Boolean(row.p && row.p.zoned) } };
+  }
+
   filterAppend(added) {
     const from = this.visible.length;
     let visibleAdded = 0;
@@ -1549,9 +1958,11 @@ class LogsView {
         pendingMarker = row;
         continue;
       }
+      row.fs = 0;
       const r = this.passes(row);
       if (r === 0) {
         this.selfHidden += 1;
+        row.fs = FS_SELF;
         continue;
       }
       if (r === 1) continue;
@@ -1559,23 +1970,38 @@ class LogsView {
       if (famOn && row.time !== null) {
         this.hist.times.push(row.time);
         this.hist.series.push(row.famIx);
+        row.fs |= FS_HIST;
       }
       if (!this.predTime(row.p)) continue;
       this.famCounts[row.famIx] += 1;
+      row.fs |= FS_COUNT;
       if (!famOn) continue;
-      if (pendingMarker && this.visible.length) this.visible.push(pendingMarker);
+      if (pendingMarker && this.visible.some((x) => !x.marker)) this.visible.push(pendingMarker);
       pendingMarker = null;
+      if (this.compact && row.time !== null) {
+        const d = dayKey(row.time);
+        if (d !== this.lastDay) {
+          this.visible.push(this.dividerFor(row));
+          this.lastDay = d;
+        }
+      }
       this.visible.push(row);
+      row.fs |= FS_VIS;
+      this.facetAdd(row, 1);
       visibleAdded += 1;
       if (this.markRe) {
         this.markRe.lastIndex = 0;
-        if (this.markRe.test(row.line)) this.matchCount += 1;
+        if (this.markRe.test(row.line)) {
+          this.matchCount += 1;
+          row.fs |= FS_MATCH;
+        }
       }
     }
     if (this.visible.length > from) {
       // When following, afterIngest() scrolls to the end and draws once there.
       this.list.appended(from, { draw: !this.follow });
       if (!this.follow) this.unseen += visibleAdded;
+      this.facetsDirty = true;
     }
   }
 
@@ -1593,14 +2019,18 @@ class LogsView {
     return -1;
   }
 
-  toggleFamily(id, solo) {
-    if (solo) {
-      const only = this.famOff.size === this.families.length - 1 && !this.famOff.has(id);
-      this.famOff = only ? new Set() : new Set(this.families.map((f) => f.id).filter((x) => x !== id));
-    } else if (this.famOff.has(id)) {
-      this.famOff.delete(id);
+  /** Click: only this family (again: all). Alt-click: hide it. Shift-click: add or remove it. */
+  toggleFamily(id, e) {
+    const all = this.families.map((f) => f.id);
+    if (e && e.altKey) {
+      if (this.famOff.has(id)) this.famOff.delete(id);
+      else this.famOff.add(id);
+    } else if (e && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+      if (this.famOff.has(id)) this.famOff.delete(id);
+      else if (this.famOff.size < all.length - 1) this.famOff.add(id);
     } else {
-      this.famOff.add(id);
+      const only = this.famOff.size === all.length - 1 && !this.famOff.has(id);
+      this.famOff = only ? new Set() : new Set(all.filter((x) => x !== id));
     }
     this.writeRoute();
     this.refilter();
@@ -1613,15 +2043,7 @@ class LogsView {
   }
 
   onBrush(range) {
-    const text = this.queryText;
-    const parsed = this.q.parse(text, { view: 'logs' });
-    let base = text;
-    if (!parsed.error && parsed.ast) {
-      const split = this.splitTime(parsed.ast);
-      const cuts = (split.items || []).map((it) => [it.gpos ?? it.pos, it.gend ?? it.end]).sort((a, b) => b[0] - a[0]);
-      for (const [a, b] of cuts) base = `${base.slice(0, a)} ${base.slice(b)}`;
-      base = base.replace(/\s{2,}/g, ' ').replace(/(^|\s)(AND|and|&&)(\s+(AND|and|&&))+(\s|$)/g, '$1$2$5').replace(/^\s*(AND|and|&&)\s+|\s+(AND|and|&&)\s*$/g, '').trim();
-    }
+    const base = this.withoutTimeTerms(this.queryText);
     let next = base;
     if (range) {
       const lo = Math.floor(range.lo / 1000) * 1000;
@@ -1630,7 +2052,7 @@ class LogsView {
       next = `${base ? `${base} ` : ''}time>=${fmt(lo)} time<=${fmt(hi)}`;
     }
     this.setQuery(next.trim());
-    this.ctx.ui.announce(range ? `Time range ${clock(range.lo)} to ${clock(range.hi)}` : 'Time range cleared');
+    this.ctx.ui.announce(range ? `Time range ${clock(range.lo)} to ${clock(range.hi)} UTC` : 'Time range cleared');
   }
 
   setQuery(text) {
@@ -1673,11 +2095,14 @@ class LogsView {
   }
 
   tokenTerm(tk) {
+    if (tk.nc || tk.t === 'ctl' || tk.t === 'cap') return null;
     const v = tk.q !== undefined && tk.q !== null ? tk.q : tk.v;
     let value = String(v).trim();
     if (tk.t === 'port' && !tk.q) value = value.replace(/^[/:]/, '');
     if (tk.t === 'str') value = value.replace(/^['"]|['"]$/g, '');
-    if (!value) return null;
+    // Invisible and direction-changing characters never go into the query: they match as a wildcard.
+    if (this.lp.CONTROL_RE && this.lp.CONTROL_RE.test(value)) value = value.split('').map((c) => (this.lp.CONTROL_RE.test(c) ? '*' : c)).join('').replace(/\*+/g, '*');
+    if (!value || value === '*') return null;
     if (tk.k) return termText(tk.k, value);
     if (tk.t === 'pid') return termText(null, value.replace(/^\[|\]$/g, ''));
     return termText(null, value);
@@ -1732,36 +2157,268 @@ class LogsView {
     return out.length ? out : null;
   }
 
+  // ---- painting -----------------------------------------------------------------------------------
+
+  twoLineMode() {
+    return Boolean(this.compact && this.wrap && this.narrow);
+  }
+
+  /** The paint key: rows measured under another key are measured (and painted) again. */
+  updatePaintKey() {
+    const key = `${this.compact ? 'c' : 'r'}${this.twoLineMode() ? '2' : '1'}|${this.compact ? this.singleHost || '' : ''}`;
+    const changed = key !== this.pkey;
+    this.pkey = key;
+    return changed;
+  }
+
+  /** Compact, wrap or the width class changed: measure every row again and rebuild the list. */
+  repaint() {
+    this.updatePaintKey();
+    for (const row of this.rows) this.measureRow(row);
+    this.compactBtn.setAttribute('aria-pressed', this.compact ? 'true' : 'false');
+    this.wrapBtn.setAttribute('aria-pressed', this.wrap ? 'true' : 'false');
+    this.list.wrap = this.wrap;
+    this.list.twoLine = this.twoLineMode();
+    this.list.body.classList.toggle('is-wrap', this.wrap);
+    this.list.body.classList.toggle('is-two', this.wrap && this.list.twoLine);
+    this.list.body.classList.toggle('is-compact', this.compact);
+    this.list.measure();
+    this.refilter();
+  }
+
+  hostAdd(row, d) {
+    const host = row.p && row.p.host;
+    if (!host) return;
+    const n = (this.hostCounts.get(host) || 0) + d;
+    if (n > 0) this.hostCounts.set(host, n);
+    else this.hostCounts.delete(host);
+  }
+
+  /** Whether the "one host in the window" answer changed (Compact then hides or shows the host). */
+  checkHosts() {
+    const single = this.hostCounts.size === 1 ? this.hostCounts.keys().next().value : null;
+    if (single === this.singleHost) return false;
+    this.singleHost = single;
+    this.renderHost();
+    return this.compact;
+  }
+
+  /** Sets row.pl (painted columns) and row.ph (two-line head columns) for the virtual list. */
+  measureRow(row) {
+    if (row.marker || row.pk === this.pkey) return;
+    row.pk = this.pkey;
+    row.ptoks = null;
+    let len;
+    let head = 0;
+    if (!this.compact) {
+      len = row.len + row.nctl * CTL_EXTRA;
+    } else if (row.p.flow) {
+      const m = this.flowModel(row);
+      len = m.len;
+      head = m.head;
+    } else {
+      len = row.len + row.nctl * CTL_EXTRA;
+      for (const ed of this.compactEdits(row)) {
+        const cut = row.nctl ? this.lp.countControls(row.line.slice(ed.s, ed.e)) : 0;
+        len += (ed.rep ? ed.rep.v.length : 0) - (ed.e - ed.s) - cut * CTL_EXTRA;
+      }
+    }
+    row.full = len;
+    row.capNote = len > LINE_CAP ? ` … ${this.fmt.num(len - LINE_CAP)} more characters: open the line to read it all` : null;
+    row.pl = row.capNote ? LINE_CAP + row.capNote.length : len;
+    row.ph = this.twoLineMode() ? head : 0;
+  }
+
+  tsToken(row) {
+    const p = row.p;
+    const zone = p.zoned ? 'UTC' : 'device clock, no zone in the line (read as UTC)';
+    return { t: 'ts', v: shortClock(row.time, hasMs(p)), title: `${p.ts} · ${zone}` };
+  }
+
+  /** Header edits for a compact non-RT_FLOW line: [{s, e, rep}] over the raw line, sorted. */
+  compactEdits(row) {
+    const p = row.p;
+    const hd = p.hdr || {};
+    const out = [];
+    if (hd.pri) out.push({ s: hd.pri[0], e: hd.pri[1], rep: null });
+    if (hd.ts && row.time !== null) out.push({ s: hd.ts[0], e: hd.ts[1], rep: this.tsToken(row) });
+    if (hd.host && (p.host === null || p.host === this.singleHost)) out.push({ s: hd.host[0], e: hd.host[1], rep: null });
+    if (hd.procid) out.push({ s: hd.procid[0], e: hd.procid[1], rep: null });
+    if (hd.sdid) out.push({ s: hd.sdid[0], e: hd.sdid[1], rep: { t: 'sdid', v: '[', title: `structured data ${p.sdid || ''}`.trim() } });
+    out.sort((x, y) => x.s - y.s);
+    return out;
+  }
+
+  /** Cuts and replaces header ranges in a token list (tokens are shared: never mutated). */
+  cutTokens(toks, edits) {
+    if (!edits.length) return toks;
+    const out = [];
+    let pos = 0;
+    let ei = 0;
+    const piece = (tk, a, b) => {
+      const o = { ...tk, v: tk.v.slice(a, b) };
+      if (tk.t !== 'text' && o.q === undefined) o.q = tk.v;
+      return o;
+    };
+    for (const tk of toks) {
+      const s = pos;
+      const e = pos + tk.v.length;
+      pos = e;
+      let at = s;
+      while (at < e) {
+        while (ei < edits.length && edits[ei].e <= at) ei += 1;
+        const ed = edits[ei];
+        if (!ed || ed.s >= e) {
+          out.push(at === s ? tk : piece(tk, at - s));
+          break;
+        }
+        if (ed.s > at) {
+          out.push(piece(tk, at - s, ed.s - s));
+          at = ed.s;
+        }
+        if (!ed.done) {
+          if (ed.rep) out.push(ed.rep);
+          ed.done = true;
+        }
+        at = Math.min(e, ed.e);
+      }
+    }
+    return out;
+  }
+
+  /** Control characters paint as a visible "U+XXXX" badge (6 columns). */
+  expandCtl(toks) {
+    if (!toks.some((t) => t.t === 'ctl' || (this.lp.CONTROL_RE && this.lp.CONTROL_RE.test(t.v)))) return toks;
+    const out = [];
+    for (const tk of toks) {
+      if (tk.t === 'ctl') {
+        const name = this.lp.controlName(tk.v);
+        out.push({ t: 'ctl', v: name, nc: 1, title: `A hidden ${name} character is here (shown, not applied)` });
+        continue;
+      }
+      if (!this.lp.CONTROL_RE.test(tk.v)) {
+        out.push(tk);
+        continue;
+      }
+      let buf = '';
+      for (const ch of tk.v) {
+        if (this.lp.CONTROL_RE.test(ch)) {
+          if (buf) out.push({ ...tk, v: buf, q: tk.q !== undefined ? tk.q : tk.v });
+          buf = '';
+          const name = this.lp.controlName(ch);
+          out.push({ t: 'ctl', v: name, nc: 1, title: `A hidden ${name} character is here (shown, not applied)` });
+        } else {
+          buf += ch;
+        }
+      }
+      if (buf) out.push({ ...tk, v: buf, q: tk.q !== undefined ? tk.q : tk.v });
+    }
+    return out;
+  }
+
+  /** Compact RT_FLOW row: time, family badge, then the summary; `head` columns form line 1 when two-line. */
+  flowModel(row, keep = false) {
+    const p = row.p;
+    const two = this.twoLineMode();
+    const head = [];
+    if (row.time !== null) head.push(this.tsToken(row));
+    else if (p.ts) head.push({ t: 'ts', v: p.ts });
+    head.push({ t: 'text', v: ' ' });
+    if (p.host && p.host !== this.singleHost) head.push({ t: 'host', v: p.host, k: 'host' }, { t: 'text', v: ' ' });
+    const badge = this.lp.flowBadge(p) || p.tag || 'RT_FLOW';
+    head.push({ t: 'tag', v: badge, k: 'tag', q: p.tag, title: p.tag, badge: 1 });
+    head.push({ t: 'text', v: two ? ' ' : ' '.repeat(Math.max(1, 7 - badge.length)) });
+    const h2 = this.expandCtl(head);
+    const body = this.expandCtl(this.lp.summary(p, { pad: !two, rest: !two }) || []);
+    let hl = 0;
+    for (const t of h2) hl += t.v.length;
+    let len = hl;
+    for (const t of body) len += t.v.length;
+    const m = { len, head: hl, hn: h2.length };
+    if (keep) m.toks = h2.concat(body);
+    return m;
+  }
+
+  /** The tokens painted for a row in the current mode (memoised per row). */
+  paintOf(row) {
+    if (row.pk !== this.pkey) this.measureRow(row);
+    if (row.ptoks && row.ptg === this.hintGen) return row.ptoks;
+    let toks;
+    row.phn = 0;
+    if (!this.compact) {
+      toks = this.expandCtl(this.tokensOf(row));
+    } else if (row.p.flow) {
+      const m = this.flowModel(row, true);
+      toks = m.toks;
+      row.phn = this.twoLineMode() ? m.hn : 0;
+    } else {
+      toks = this.expandCtl(this.cutTokens(this.tokensOf(row), this.compactEdits(row)));
+    }
+    if (row.capNote) toks = this.capTokens(toks, row.capNote);
+    row.ptoks = toks;
+    row.ptg = this.hintGen;
+    return toks;
+  }
+
+  /** At most LINE_CAP columns of a very long line, then a note; the panel and Copy line keep it all. */
+  capTokens(toks, note) {
+    const out = [];
+    let n = 0;
+    for (const tk of toks) {
+      if (n + tk.v.length <= LINE_CAP) {
+        out.push(tk);
+        n += tk.v.length;
+        continue;
+      }
+      const rest = LINE_CAP - n;
+      if (rest > 0) out.push({ ...tk, v: tk.v.slice(0, rest), q: tk.q !== undefined ? tk.q : tk.v });
+      break;
+    }
+    out.push({ t: 'cap', v: note, nc: 1 });
+    return out;
+  }
+
   // ---- rendering rows -----------------------------------------------------------------------------
 
-  /** Appends the highlighted tokens of `row` to `target`; returns whether any search mark was made. */
-  fillTokens(target, row, interactive) {
-    const toks = this.tokensOf(row);
-    const ranges = this.markRanges(row.line);
+  /**
+   * Appends display tokens to `box(i)` (the element for token i); marks search hits in the painted
+   * text. Returns whether any mark was made.
+   */
+  fillTokens(box, toks, { interactive = false, fam = 'other' } = {}) {
+    let ranges = null;
+    if (this.markRe) {
+      let text = '';
+      for (const t of toks) text += t.v;
+      ranges = this.markRanges(text);
+    }
     let pos = 0;
     let ri = 0;
     for (let ti = 0; ti < toks.length; ti += 1) {
       const tk = toks[ti];
+      const target = typeof box === 'function' ? box(ti) : box;
       const v = tk.v;
       const s = pos;
       const e = pos + v.length;
       pos = e;
-      let box = target;
-      if (tk.t !== 'text') {
+      let el = target;
+      if (tk.t !== 'text' || tk.f || tk.title) {
         const span = document.createElement('span');
-        let cls = `tk-${tk.t}`;
-        if (tk.t === 'tag') cls += ` fam-${row.fam}`;
-        if (interactive && CLICKABLE.has(tk.t) && v.trim()) {
+        let cls = tk.t === 'text' ? '' : `tk-${tk.t}`;
+        if (tk.t === 'tag') cls += ` fam-${fam}`;
+        if (tk.badge) cls += ' lg-badge';
+        if (tk.f) cls += ' lg-faint';
+        if (interactive && CLICKABLE.has(tk.t) && !tk.nc && v.trim()) {
           cls += ' tk-click';
           span.dataset.ti = String(ti);
         }
-        span.className = cls;
+        if (cls) span.className = cls.trim();
+        if (tk.title) span.title = tk.title;
         target.append(span);
-        box = span;
+        el = span;
       }
       while (ranges && ri < ranges.length && ranges[ri][1] <= s) ri += 1;
       if (!ranges || ri >= ranges.length || ranges[ri][0] >= e) {
-        box.append(v);
+        el.append(v);
         continue;
       }
       let at = s;
@@ -1769,18 +2426,18 @@ class LogsView {
       while (at < e) {
         const r = ranges[k];
         if (!r || r[0] >= e) {
-          box.append(v.slice(at - s));
+          el.append(v.slice(at - s));
           break;
         }
         if (r[0] > at) {
-          box.append(v.slice(at - s, r[0] - s));
+          el.append(v.slice(at - s, r[0] - s));
           at = r[0];
         }
         const stop = Math.min(e, r[1]);
         const mark = document.createElement('mark');
         mark.className = 'lg-hit';
         mark.textContent = v.slice(at - s, stop - s);
-        box.append(mark);
+        el.append(mark);
         at = stop;
         if (r[1] <= e) k += 1;
       }
@@ -1791,8 +2448,23 @@ class LogsView {
   renderRow(row) {
     const node = document.createElement('div');
     node.setAttribute('role', 'row');
-    node.id = `lg-r-${row.seq}`;
+    node.id = `lg-r-${String(row.seq).replace('.', '-')}`;
     node.dataset.seq = String(row.seq);
+    if (row.marker && row.marker.kind === 'day') {
+      node.className = 'lg-row lg-day';
+      const cell = document.createElement('span');
+      cell.setAttribute('role', 'gridcell');
+      cell.className = 'lg-day-text';
+      const zone = document.createElement('span');
+      zone.className = 'lg-day-zone';
+      zone.textContent = row.marker.zoned ? 'times in UTC' : 'device clock, read as UTC';
+      zone.title = row.marker.zoned
+        ? 'The lines carry their time zone; times are shown in UTC.'
+        : 'These lines carry no time zone. J-Wicket reads them as UTC; if the device logs in local time, times are off by its UTC offset.';
+      cell.append(document.createTextNode(row.marker.text), zone);
+      node.append(cell);
+      return node;
+    }
     if (row.marker) {
       node.className = `lg-row lg-marker is-${row.marker.kind}`;
       const cell = document.createElement('span');
@@ -1807,7 +2479,7 @@ class LogsView {
     if (row.seq === this.curSeq) cls += ' is-cur';
     if (row.self) cls += ' is-self';
     else if (Number.isInteger(row.p.severity) && row.p.severity <= 3) cls += ' is-err';
-    if (Date.now() - row.added < 1600 && this.lastRead && !this.firstPaint(row)) cls += ' is-new';
+    if (row.flash && Date.now() - row.added < NEW_MS) cls += row.flash === 'wash' ? ' is-new' : ' is-new-gut';
     node.className = cls;
     if (row.seq === this.selSeq) node.setAttribute('aria-selected', 'true');
     // The gutter carries the family stripe and the search bead; it stays put when long lines scroll.
@@ -1817,14 +2489,23 @@ class LogsView {
     const cell = document.createElement('span');
     cell.setAttribute('role', 'gridcell');
     cell.className = 'lg-text';
-    if (this.fillTokens(cell, row, true)) node.classList.add('has-hit');
+    const toks = this.paintOf(row);
+    let hit;
+    if (row.phn) {
+      const head = document.createElement('span');
+      head.className = 'lg-c-head';
+      const body = document.createElement('span');
+      body.className = 'lg-c-body';
+      hit = this.fillTokens((i) => (i < row.phn ? head : body), toks, { interactive: true, fam: row.fam });
+      cell.append(head, body);
+    } else {
+      hit = this.fillTokens(cell, toks, { interactive: true, fam: row.fam });
+    }
+    if (this.compact && row.p.flow) node.classList.add('is-sum');
+    // The bead says the raw line matches, even when the match is in a part Compact does not paint.
+    if (hit || (row.fs & FS_MATCH)) node.classList.add('has-hit');
     node.append(gut, cell);
     return node;
-  }
-
-  firstPaint(row) {
-    // Lines from the first read of a source do not flash.
-    return row.seq <= (this.firstSeqLive || 0);
   }
 
   // ---- interaction --------------------------------------------------------------------------------
@@ -1842,7 +2523,7 @@ class LogsView {
     if (sel && !sel.isCollapsed && String(sel).trim()) return; // selecting text, not clicking
     const tkEl = e.target.closest('[data-ti]');
     if (tkEl) {
-      const tk = this.tokensOf(row)[Number(tkEl.dataset.ti)];
+      const tk = this.paintOf(row)[Number(tkEl.dataset.ti)];
       const term = tk ? this.tokenTerm(tk) : null;
       if (term) {
         e.preventDefault();
@@ -1870,7 +2551,7 @@ class LogsView {
       this.hoverBar.hidden = true;
     }
     if (row && tkEl) {
-      const tk = this.tokensOf(row)[Number(tkEl.dataset.ti)];
+      const tk = this.paintOf(row)[Number(tkEl.dataset.ti)];
       const term = tk ? this.tokenTerm(tk) : null;
       if (term) {
         const { h, put } = this.dom;
@@ -1930,7 +2611,13 @@ class LogsView {
     if (key === 'j' || key === 'k') {
       e.preventDefault();
       this.moveSelection(key === 'j' ? 1 : -1, true);
-    } else if (key === 'c' && this.selSeq !== null) {
+    } else if (key === 'c') {
+      e.preventDefault();
+      this.toggleCompact();
+    } else if (key === 'w') {
+      e.preventDefault();
+      this.toggleWrap();
+    } else if (key === 'y' && this.selSeq !== null) {
       const row = this.bySeq.get(this.selSeq);
       if (row) {
         e.preventDefault();
@@ -2090,9 +2777,249 @@ class LogsView {
   toggleWrap() {
     this.wrap = !this.wrap;
     prefSet(PREF.wrap, this.wrap ? '1' : '0');
-    this.wrapBtn.setAttribute('aria-pressed', this.wrap ? 'true' : 'false');
-    this.list.setWrap(this.wrap);
-    if (this.follow) this.list.scrollToEnd();
+    this.repaint();
+  }
+
+  toggleCompact() {
+    this.compact = !this.compact;
+    prefSet(PREF.compact, this.compact ? '1' : '0');
+    this.repaint();
+    this.renderHost();
+    this.ctx.ui.announce(this.compact ? 'Compact lines; Copy line and the panel keep the exact line' : 'Full lines as written');
+  }
+
+  toggleFacets() {
+    this.facetsOn = !this.facetsOn;
+    prefSet(PREF.facets, this.facetsOn ? '1' : '0');
+    this.facetsBtn.setAttribute('aria-pressed', this.facetsOn ? 'true' : 'false');
+    this.facetsEl.hidden = !this.facetsOn;
+    this.mainEl.classList.toggle('has-facets', this.facetsOn);
+    this.facetsDirty = true;
+    this.renderFacets(true);
+    this.list.measure();
+  }
+
+  // ---- top values ---------------------------------------------------------------------------------
+
+  /** Facet keys of a line: [src, dst, dport, policy, reason, zone pair] (null when absent). */
+  facetKeys(p) {
+    const f = p.fields || {};
+    const fl = p.flow;
+    const real = (v) => (isPlaceholder(v) ? null : String(v));
+    const src = fl ? fl.src : hostOnly(f['source-address']);
+    const dst = fl ? fl.dst : hostOnly(f['destination-address']);
+    const dportRaw = fl ? fl.dport : f['destination-port'];
+    const dport = dportRaw !== null && dportRaw !== undefined && /^\d+$/.test(String(dportRaw)) ? String(dportRaw) : null;
+    const policy = fl ? fl.policy : real(f['policy-name']);
+    const reason = fl ? (fl.reason && !isPlaceholder(fl.reason) ? fl.reason : null) : real(f.reason);
+    const from = fl ? fl.from : real(f['source-zone-name']);
+    const to = fl ? fl.to : real(f['destination-zone-name']);
+    const pair = from || to ? [from, to] : null;
+    return { keys: [src, dst, dport, policy, reason, pair ? `${from || '?'} → ${to || '?'}` : null], pair };
+  }
+
+  facetAdd(row, d) {
+    const keys = row.fk;
+    if (!keys) return;
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (key === null || key === undefined) continue;
+      const map = this.facets[i];
+      const n = (map.get(key) || 0) + d;
+      if (n > 0) map.set(key, n);
+      else map.delete(key);
+      if (i === 5 && d > 0 && row.pair) {
+        if (!this.pairOf) this.pairOf = new Map();
+        this.pairOf.set(key, row.pair);
+      }
+    }
+  }
+
+  /** Redraws the top-values rail (at most about once a second while live). */
+  renderFacets(force = false) {
+    if (!this.facetsOn || this.dead) return;
+    if (!force && !this.facetsDirty) return;
+    const now = Date.now();
+    if (!force && now - this.facetsAt < FACET_MIN_MS) {
+      if (!this.facetsTimer) this.facetsTimer = setTimeout(() => { this.facetsTimer = 0; this.renderFacets(true); }, FACET_MIN_MS - (now - this.facetsAt));
+      return;
+    }
+    this.facetsAt = now;
+    this.facetsDirty = false;
+    const { h, put } = this.dom;
+    const shown = this.visible.reduce((n, r) => n + (r.marker ? 0 : 1), 0);
+    const sections = [];
+    FACETS.forEach(([id, label], i) => {
+      const map = this.facets[i];
+      if (!map || !map.size) return;
+      const top = [...map.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, FACET_TOP);
+      const max = top[0][1];
+      sections.push(
+        h(
+          'section',
+          { class: 'lg-fc' },
+          h('h3', { class: 'lg-fc-title' }, label, h('span', { class: 'faint' }, map.size > FACET_TOP ? ` top ${FACET_TOP} of ${this.fmt.num(map.size)}` : ` ${this.fmt.num(map.size)}`)),
+          h(
+            'ol',
+            { class: 'lg-fc-list' },
+            top.map(([value, n]) => {
+              const bar = h('span', { class: 'lg-fc-bar', 'aria-hidden': 'true' });
+              bar.style.setProperty('--w', `${Math.max(2, Math.round((n / max) * 100))}%`);
+              return h(
+                'li',
+                null,
+                h(
+                  'button',
+                  {
+                    class: ['lg-fc-item', `fc-${id}`],
+                    type: 'button',
+                    dataset: { fc: String(i), value },
+                    title: `${label}: ${this.lp.escapeControls(value)} · ${this.fmt.plural(n, 'line')}. Click to filter, Alt-click to exclude.`,
+                  },
+                  bar,
+                  h('span', { class: 'lg-fc-v mono' }, this.vis(value)),
+                  h('span', { class: 'lg-fc-n mono' }, this.fmt.num(n)),
+                ),
+              );
+            }),
+          ),
+        ),
+      );
+    });
+    put(
+      this.facetsEl,
+      h('div', { class: 'lg-fc-head' }, h('h2', { class: 'lg-fc-h' }, 'Top values'), h('span', { class: 'faint' }, `over ${this.fmt.plural(shown, 'line')} shown`)),
+      sections.length ? sections : h('p', { class: 'lg-fc-empty faint' }, 'No addresses, ports, policies or zones in the lines shown.'),
+    );
+  }
+
+  onFacetClick(e) {
+    const btn = e.target instanceof Element ? e.target.closest('.lg-fc-item') : null;
+    if (!btn) return;
+    const i = Number(btn.dataset.fc);
+    const value = btn.dataset.value;
+    const def = FACETS[i];
+    if (!def) return;
+    let term;
+    if (def[0] === 'pair') {
+      const pair = (this.pairOf && this.pairOf.get(value)) || null;
+      if (!pair) return;
+      const parts = [pair[0] ? termText('from', pair[0]) : null, pair[1] ? termText('to', pair[1]) : null].filter(Boolean);
+      term = parts.length > 1 ? `(${parts.join(' ')})` : parts[0];
+    } else {
+      term = this.tokenTerm({ t: 'val', v: value, k: def[2] });
+    }
+    if (term) this.addTerm(term, e.altKey);
+  }
+
+  renderHost() {
+    const host = this.compact ? this.singleHost : null;
+    this.hostEl.hidden = !host;
+    if (!host) return;
+    const { put, icon, h } = this.dom;
+    put(this.hostEl, icon('server'), h('span', { class: 'mono' }, this.vis(host)));
+    this.hostEl.title = `Every line in this window is from ${this.lp.escapeControls(host)}, so Compact leaves the host out of each line.`;
+  }
+
+  /** Device text for the panel and chips: control characters become visible "U+XXXX" badges. */
+  vis(value) {
+    const s = String(value ?? '');
+    if (!this.lp.CONTROL_RE || !this.lp.CONTROL_RE.test(s)) return s;
+    const { h } = this.dom;
+    const out = [];
+    let buf = '';
+    for (const ch of s) {
+      if (this.lp.CONTROL_RE.test(ch)) {
+        if (buf) out.push(buf);
+        buf = '';
+        const name = this.lp.controlName(ch);
+        out.push(h('span', { class: 'tk-ctl', title: `A hidden ${name} character is here (shown, not applied)` }, name));
+      } else {
+        buf += ch;
+      }
+    }
+    if (buf) out.push(buf);
+    return out;
+  }
+
+  // ---- time range presets -------------------------------------------------------------------------
+
+  /** Query text without its time and age terms. */
+  withoutTimeTerms(text) {
+    const parsed = this.q.parse(text, { view: 'logs' });
+    if (parsed.error || !parsed.ast) return text;
+    const items = parsed.ast.type === 'and' ? parsed.ast.items : [parsed.ast];
+    const cuts = [];
+    for (const it of items) {
+      const key = it.type === 'term' && it.key ? String(it.key).toLowerCase() : '';
+      if (['time', 'ts', 'timestamp', 'age', 'ago', 'last'].includes(key) && /[<>]=?/.test(it.op || '')) cuts.push([it.gpos ?? it.pos, it.gend ?? it.end]);
+    }
+    if (!cuts.length) return text;
+    let base = text;
+    cuts.sort((a, b) => b[0] - a[0]);
+    for (const [a, b] of cuts) base = `${base.slice(0, a)} ${base.slice(b)}`;
+    return base.replace(/\s{2,}/g, ' ').replace(/(^|\s)(AND|and|&&)(\s+(AND|and|&&))+(\s|$)/g, '$1$2$5').replace(/^\s*(AND|and|&&)\s+|\s+(AND|and|&&)\s*$/g, '').trim();
+  }
+
+  setAge(v) {
+    const base = this.withoutTimeTerms(this.queryText);
+    this.setQuery(v ? `${base ? `${base} ` : ''}age<${v}`.trim() : base);
+  }
+
+  customRange() {
+    const base = this.withoutTimeTerms(this.queryText);
+    const t = this.hist.times;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const x of t) {
+      if (x < lo) lo = x;
+      if (x > hi) hi = x;
+    }
+    if (!Number.isFinite(lo)) {
+      hi = Date.now();
+      lo = hi - 3600000;
+    }
+    const fmt = (ms) => isoNoZone(Math.floor(ms / 60000) * 60000).slice(0, 16);
+    this.setQuery(`${base ? `${base} ` : ''}time>=${fmt(lo)} time<=${fmt(hi + 60000)}`);
+    if (this.bar) this.bar.focus();
+    this.ctx.ui.toast('Edit the two times in the query (UTC); report and buffer sources ask the device for that range.', 'info');
+  }
+
+  renderAges() {
+    const text = this.queryText;
+    let cur = 'all';
+    const parsed = text ? this.q.parse(text, { view: 'logs' }) : null;
+    if (parsed && !parsed.error && parsed.ast) {
+      const items = parsed.ast.type === 'and' ? parsed.ast.items : [parsed.ast];
+      for (const it of items) {
+        const key = it.type === 'term' && it.key ? String(it.key).toLowerCase() : '';
+        if (['age', 'ago', 'last'].includes(key) && it.values && it.values.length === 1) {
+          const v = it.values[0].text;
+          cur = AGES.some(([a]) => a === v) && (it.op === '<' || it.op === '<=') ? v : 'custom';
+        } else if (['time', 'ts', 'timestamp'].includes(key) && /[<>]=?/.test(it.op || '')) {
+          cur = 'custom';
+        }
+      }
+    }
+    for (const b of this.ageSeg.querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.age === cur ? 'true' : 'false');
+  }
+
+  /** FIELDS.logs, except that `app` also matches the Junos service (app:junos-https, as in Sessions). */
+  logFields() {
+    const base = this.q.FIELDS.logs;
+    const out = Object.assign({}, base);
+    for (const sym of Object.getOwnPropertySymbols(base)) Object.defineProperty(out, sym, { value: base[sym], enumerable: false });
+    if (base.app) {
+      out.app = {
+        ...base.app,
+        label: 'application: layer 7 (SSL) or Junos application (junos-https)',
+        get: (r) => {
+          const f = (r && r.fields) || {};
+          return [f.application, f['application-name'], f['service-name']].filter((v) => v !== undefined && v !== null && v !== '' && !isPlaceholder(v));
+        },
+      };
+    }
+    return out;
   }
 
   togglePause() {
@@ -2117,8 +3044,14 @@ class LogsView {
     if (!this.paused && !this.inflight && this.liveCapable()) this.schedule();
   }
 
+  /**
+   * Copies the line as the device wrote it, except that invisible and direction-changing characters
+   * are written as <U+XXXX>: pasted into a terminal or ticket they would reorder or hide text.
+   */
   copyLine(row) {
-    this.ctx.ui.copy(row.line, 'Log line copied.');
+    const n = row.nctl || 0;
+    const text = n ? this.lp.escapeControls(row.line) : row.line;
+    this.ctx.ui.copy(text, n ? `Log line copied; ${this.fmt.plural(n, 'hidden character')} written as <U+XXXX>.` : 'Log line copied.');
   }
 
   retryButton(fn) {
@@ -2291,7 +3224,12 @@ class LogsView {
         sev ? h('span', { class: ['pill', p.severity <= 3 ? 'deny' : p.severity === 4 ? 'reject' : 'muted'], title: p.severitySource ? `severity from ${p.severitySource}` : null }, sev) : null,
         row.self ? h('span', { class: 'pill gold', title: this.selfNote || '' }, 'your J-Wicket read') : null,
         h('span', { class: 'spacer' }),
-        h('span', { class: 'lg-d-time mono' }, row.time !== null ? stampMs(row.time, hasMs(p)) : p.ts || 'no time'),
+        h(
+          'span',
+          { class: 'lg-d-time mono', title: p.zoned ? `As written: ${p.ts}` : `As written: ${p.ts || '(no time)'}. The line carries no time zone; J-Wicket reads it as UTC. If the device logs in local time, this is off by its UTC offset.` },
+          row.time !== null ? stampMs(row.time, hasMs(p)) : p.ts || 'no time',
+          row.time !== null ? h('span', { class: 'lg-d-zone' }, p.zoned ? ' UTC' : ' device clock') : null,
+        ),
       ),
     );
     const sentence = this.lp.decode(p);
@@ -2301,8 +3239,8 @@ class LogsView {
         h(
           'div',
           { class: ['lg-d-sentence', `fam-${row.fam}`] },
-          h('p', { class: 'lg-d-lead' }, parts[0]),
-          parts.length > 1 ? h('ul', { class: 'lg-d-facts' }, parts.slice(1).map((x) => h('li', null, x))) : null,
+          h('p', { class: 'lg-d-lead' }, this.vis(parts[0])),
+          parts.length > 1 ? h('ul', { class: 'lg-d-facts' }, parts.slice(1).map((x) => h('li', null, this.vis(x)))) : null,
         ),
       );
     } else {
@@ -2310,9 +3248,13 @@ class LogsView {
     }
     if (p.flow) content.append(this.flowStrip(p.flow, row));
     if (row.sid || (p.flow && FLOW_FAMS.has(row.fam))) content.append(this.timelineSection(row));
+    if (p.flow) {
+      const test = this.testSection(p.flow);
+      if (test) content.append(test);
+    }
     content.append(this.fieldsSection(row));
     const raw = h('div', { class: 'lg-d-raw' });
-    this.fillTokens(raw, row, false);
+    this.fillTokens(raw, this.expandCtl(this.tokensOf(row)), { fam: row.fam });
     content.append(
       h(
         'section',
@@ -2348,25 +3290,26 @@ class LogsView {
 
   flowStrip(fl, row) {
     const { h, icon } = this.dom;
-    const hp = (ip, port) => (ip ? `${ip.includes(':') ? `[${ip}]` : ip}${port !== null && port !== undefined ? `:${port}` : ''}` : '?');
-    const zone = (z, key) => (z ? h('button', { class: 'zone lg-d-zone', type: 'button', title: `Filter ${key}:${z}`, on: { click: (e) => this.addTerm(termText(key, z), e.altKey) } }, z) : h('span', { class: 'faint' }, 'zone ?'));
+    const hp = (ip, port) => this.vis(ip ? `${ip.includes(':') ? `[${ip}]` : ip}${port !== null && port !== undefined ? `:${port}` : ''}` : '?');
+    const zone = (z, key) => (z ? h('button', { class: 'zone lg-d-zone', type: 'button', title: `Filter ${key}:${this.lp.escapeControls(z)}`, on: { click: (e) => { const t = this.tokenTerm({ t: 'zone', v: z, k: key }); if (t) this.addTerm(t, e.altKey); } } }, this.vis(z)) : h('span', { class: 'faint' }, 'zone ?'));
     const policy = fl.policy
-      ? h('button', { class: 'policy-link', type: 'button', title: `Open policy ${fl.policy} in Policies`, on: { click: () => this.ctx.navigate('policies', { q: `name:${quoteValue(fl.policy, true)}` }) } }, fl.policy)
+      ? h('button', { class: 'policy-link', type: 'button', title: `Open policy ${this.lp.escapeControls(fl.policy)} in Policies`, on: { click: () => this.ctx.navigate('policies', { q: `name:${quoteValue(fl.policy, true)}`, sel: policySel(this.ctx.store.policyIndex(), fl.policy, fl.from, fl.to) }) } }, this.vis(fl.policy))
       : h('span', { class: 'faint mono' }, 'no policy');
-    const verdict = row.fam === 'deny' ? h('span', { class: 'pill deny' }, 'denied') : row.fam === 'close' ? h('span', { class: 'pill teal' }, fl.reason || 'closed') : h('span', { class: 'pill permit' }, 'permitted');
+    const verdict = row.fam === 'deny' ? h('span', { class: 'pill deny' }, 'denied') : row.fam === 'close' ? h('span', { class: 'pill teal' }, this.vis(fl.reason || 'closed')) : h('span', { class: 'pill permit' }, 'permitted');
     const nat = [];
     if (fl.snat) nat.push(h('div', { class: 'lg-d-nat' }, h('span', { class: 'pill violet' }, 'SNAT'), h('span', { class: 'mono' }, hp(fl.src, fl.sport)), icon('arrow'), h('span', { class: 'mono nat' }, hp(fl.natSrc, fl.natSport)), fl.snatRule ? h('span', { class: 'faint' }, `rule ${fl.snatRule}`) : null));
     if (fl.dnat) nat.push(h('div', { class: 'lg-d-nat' }, h('span', { class: 'pill violet' }, 'DNAT'), h('span', { class: 'mono' }, hp(fl.dst, fl.dport)), icon('arrow'), h('span', { class: 'mono nat' }, hp(fl.natDst, fl.natDport)), fl.dnatRule ? h('span', { class: 'faint' }, `rule ${fl.dnatRule}`) : null));
     const stats = [];
     if (fl.bytesClient !== null || fl.bytesServer !== null) {
-      // Exact byte counts: the decoded sentence above rounds (1024-based), the counters do not.
+      // Exact byte counts: the decoded sentence above rounds (decimal kB/MB, as format.bytes), the counters do not.
       const side = (arrow, who, b, pk) => h('span', { title: `${this.fmt.bytes(b || 0)}` }, h('span', { class: 'faint' }, `${arrow} ${who} `), h('b', { class: 'mono' }, `${this.fmt.num(b || 0)} B`), pk !== null ? h('span', { class: 'faint' }, ` in ${this.fmt.plural(pk, 'packet')}`) : null);
       stats.push(side('\u2191', 'from client', fl.bytesClient, fl.packetsClient));
       stats.push(side('\u2193', 'from server', fl.bytesServer, fl.packetsServer));
     }
     if (fl.elapsed !== null) stats.push(h('span', null, h('span', { class: 'faint' }, 'lasted '), h('b', { class: 'mono' }, this.fmt.duration(fl.elapsed))));
-    if (fl.app) stats.push(h('span', null, h('span', { class: 'faint' }, 'app '), h('b', { class: 'mono' }, fl.app)));
-    if (fl.iface) stats.push(h('span', null, h('span', { class: 'faint' }, 'in '), h('b', { class: 'mono iface' }, fl.iface)));
+    if (fl.app) stats.push(h('span', null, h('span', { class: 'faint' }, 'app '), h('b', { class: 'mono' }, this.vis(fl.app))));
+    if (fl.service) stats.push(h('span', null, h('span', { class: 'faint' }, 'service '), h('b', { class: 'mono' }, this.vis(fl.service))));
+    if (fl.iface) stats.push(h('span', null, h('span', { class: 'faint' }, 'in '), h('b', { class: 'mono iface' }, this.vis(fl.iface))));
     return h(
       'section',
       { class: 'panel-section' },
@@ -2376,9 +3319,14 @@ class LogsView {
         { class: ['lg-d-flow', `fam-${row.fam}`] },
         h('div', { class: 'lg-d-end' }, h('span', { class: 'lg-d-role' }, 'client'), h('span', { class: 'mono lg-d-ep' }, hp(fl.src, fl.sport))),
         h('span', { class: 'lg-d-arr', 'aria-hidden': 'true' }, icon('arrow')),
-        h('div', { class: 'lg-d-mid' }, h('div', { class: 'lg-d-zones' }, zone(fl.from, 'from'), icon('arrow'), zone(fl.to, 'to')), h('div', { class: 'lg-d-pol' }, policy, verdict), h('div', { class: 'lg-d-proto faint mono' }, [fl.protocol ? fl.protocol.toUpperCase() : null, fl.service].filter(Boolean).join(SEP))),
+        h('div', { class: 'lg-d-mid' }, h('div', { class: 'lg-d-zones' }, zone(fl.from, 'from'), icon('arrow'), zone(fl.to, 'to')), h('div', { class: 'lg-d-pol' }, policy, verdict), h('div', { class: 'lg-d-proto faint mono' }, this.vis([fl.protocol ? fl.protocol.toUpperCase() : null, fl.service].filter(Boolean).join(SEP)))),
         h('span', { class: 'lg-d-arr', 'aria-hidden': 'true' }, icon('arrow')),
-        h('div', { class: 'lg-d-end' }, h('span', { class: 'lg-d-role' }, fl.dnat ? 'server (as the client sent it)' : 'server'), h('span', { class: 'mono lg-d-ep' }, hp(fl.dst, fl.dport))),
+        h(
+          'div',
+          { class: 'lg-d-end' },
+          h('span', { class: 'lg-d-role', title: fl.dnat ? 'The server address as the client sent it, before destination NAT; the translated address is below' : null }, fl.dnat ? 'server \u00b7 before DNAT' : 'server'),
+          h('span', { class: 'mono lg-d-ep' }, hp(fl.dst, fl.dport)),
+        ),
       ),
       nat.length ? h('div', { class: 'lg-d-nats' }, nat) : null,
       stats.length ? h('div', { class: 'lg-d-stats' }, stats) : null,
@@ -2416,7 +3364,7 @@ class LogsView {
         h('span', { class: 'lg-tl-dot', 'aria-hidden': 'true' }),
         h('span', { class: 'lg-tl-time mono' }, r.time !== null ? stampMs(r.time, hasMs(r.p)).slice(11) : '?'),
         h('span', { class: ['lg-tl-ev', `fam-${r.fam}`] }, evLabel[r.fam] || r.fam),
-        h('span', { class: 'lg-tl-what' }, what || '\u2014'),
+        h('span', { class: 'lg-tl-what' }, this.vis(what || '\u2014')),
         r.seq === row.seq
           ? h('span', { class: 'pill gold' }, 'this line')
           : h('button', { class: 'btn ghost sm', type: 'button', on: { click: () => { const v = this.indexOfSeq(r.seq) >= 0; if (v) this.select(r, { scroll: true, open: true }); else this.openDetail(r); } } }, 'Show'),
@@ -2443,7 +3391,7 @@ class LogsView {
     return h(
       'section',
       { class: 'panel-section' },
-      h('h3', null, 'Session timeline'),
+      h('h3', null, 'Session timeline', h('span', { class: 'lg-d-h3note' }, this.zoneNote() === 'UTC' ? ' \u00b7 times UTC' : ' \u00b7 device clock')),
       h('div', { class: 'lg-d-tlhead' }, h('b', null, title), h('span', { class: 'faint' }, `${this.fmt.plural(related.length, 'line')} in this window`), h('span', { class: 'spacer' }), filterBtn),
       h('ol', { class: 'lg-tl' }, items),
       missing.length ? h('ul', { class: 'lg-d-missing' }, missing.map((m) => h('li', null, m))) : null,
@@ -2451,38 +3399,136 @@ class LogsView {
     );
   }
 
+  /** Sessions query for a flow: terms the device filters (src, sport, dst, dport, proto) plus the id. */
+  sessionTerms(fl, sid) {
+    const proto = fl.protocol && !/\s/.test(fl.protocol) ? fl.protocol : fl.protocolId;
+    return [
+      fl.src ? `src:${quoteValue(fl.src, true)}` : null,
+      fl.sport !== null && fl.sport !== undefined ? `sport:${fl.sport}` : null,
+      fl.dst ? `dst:${quoteValue(fl.dst, true)}` : null,
+      fl.dport !== null && fl.dport !== undefined ? `dport:${fl.dport}` : null,
+      proto !== null && proto !== undefined ? `proto:${proto}` : null,
+      sid ? `id:${sid}` : null,
+    ].filter(Boolean).join(' ');
+  }
+
+  /**
+   * What is known about the session now. A CLOSE line is the end of it, a DENY line means none was
+   * created; for CREATE the last Sessions read is checked on the 5-tuple, not the id alone (Junos
+   * reuses session ids).
+   */
   refreshLiveLink() {
     const el = this.liveLinkEl;
     const row = this.liveLinkFor;
     if (!el || !row || this.panelSeq === null) return;
     const { h, put, icon } = this.dom;
-    if (!row.sid) {
+    const fl = row.p.flow;
+    if (!fl) {
       el.hidden = true;
       return;
     }
     el.hidden = false;
+    const at = row.time !== null ? `${stampMs(row.time, hasMs(row.p)).slice(11)} ${row.p.zoned ? 'UTC' : '(device clock)'}` : null;
+    const terms = this.sessionTerms(fl, null);
+    const go = (sel) => this.ctx.navigate('sessions', sel ? { q: terms, sel } : { q: terms });
+    const btn = (label, sel) => h('button', { class: 'btn sm', type: 'button', title: `Sessions with ${terms}`, on: { click: () => go(sel) } }, icon('sessions'), label);
+    if (row.fam === 'close') {
+      put(
+        el,
+        h('span', { class: 'lg-live-dot is-closed', 'aria-hidden': 'true' }),
+        h('span', null, h('b', null, 'Closed'), at ? ` at ${at}` : '', fl.elapsed !== null ? ` after ${this.fmt.duration(fl.elapsed)}` : '', fl.reason ? ' (' : '', fl.reason ? this.vis(fl.reason) : '', fl.reason ? ')' : '', '. This line is the end of the session.'),
+        btn('Same flow in Sessions now'),
+      );
+      return;
+    }
+    if (row.fam === 'deny') {
+      put(
+        el,
+        h('span', { class: 'lg-live-dot is-denied', 'aria-hidden': 'true' }),
+        h('span', null, h('b', null, 'Denied'), fl.policy ? [' by ', this.vis(fl.policy)] : '', '; no session was created, so Sessions has nothing to show for it.'),
+      );
+      return;
+    }
     const last = this.ctx.store.sessionsLast;
-    const rowsNow = (last && last.sessions && last.sessions.rows) || [];
-    const found = rowsNow.find((r) => String(r.session_id) === String(row.sid));
-    const open = () => this.ctx.navigate('sessions', found ? { q: `id:${row.sid}`, sel: found.id } : { q: `id:${row.sid}` });
-    const btn = (label) => h('button', { class: 'btn sm', type: 'button', on: { click: open } }, icon('sessions'), label);
-    if (!last || !last.sessions) {
+    const sessions = last && last.sessions;
+    if (!sessions) {
       put(el, h('span', { class: 'lg-live-dot is-unknown', 'aria-hidden': 'true' }), h('span', null, 'Sessions have not been read in this tab yet, so J-Wicket cannot say whether this session is still open.'), btn('Look for it in Sessions'));
       return;
     }
-    const hit = found;
-    const readAt = last.meta && last.meta.read_at ? this.fmt.time(last.meta.read_at) : '?';
+    const readMs = last.meta && last.meta.read_at ? Date.parse(last.meta.read_at) : NaN;
+    const readAt = Number.isFinite(readMs) ? `${this.fmt.time(last.meta.read_at)} UTC` : 'an earlier read';
+    if (sessions.status !== 'ok') {
+      put(el, h('span', { class: 'lg-live-dot is-unknown', 'aria-hidden': 'true' }), h('span', null, `The last Sessions read (${readAt}) was ${sessions.status}, so J-Wicket cannot say whether this session is open.`), btn('Look for it in Sessions'));
+      return;
+    }
+    const proto = fl.protocol && !/\s/.test(fl.protocol) ? fl.protocol : null;
+    const same = (r) => {
+      const w = r.in || {};
+      if (fl.src && w.src !== fl.src) return false;
+      if (fl.dst && w.dst !== fl.dst) return false;
+      if (fl.sport !== null && Number(w.sport) !== fl.sport) return false;
+      if (fl.dport !== null && Number(w.dport) !== fl.dport) return false;
+      if (proto && w.proto && String(w.proto).toLowerCase() !== proto) return false;
+      return !row.sid || String(r.session_id ?? r.id) === String(row.sid);
+    };
+    const hit = (sessions.rows || []).find(same);
+    const closed = row.sid ? this.rows.find((r) => !r.marker && r.sid === row.sid && r.fam === 'close' && r.seq > row.seq) : null;
+    if (closed) {
+      const cf = closed.p.flow || {};
+      put(el, h('span', { class: 'lg-live-dot is-closed', 'aria-hidden': 'true' }), h('span', null, h('b', null, 'Closed'), closed.time !== null ? ` at ${stampMs(closed.time, hasMs(closed.p)).slice(11)}` : '', cf.reason ? [' (', this.vis(cf.reason), ')'] : '', ': its CLOSE line is in this window (timeline above).'));
+      return;
+    }
     if (hit) {
       const bytes = ((hit.in && hit.in.bytes) || 0) + ((hit.out && hit.out.bytes) || 0);
       put(
         el,
         h('span', { class: 'lg-live-dot is-live', 'aria-hidden': 'true' }),
-        h('span', null, h('b', null, 'Still open'), ` in the Sessions read at ${readAt} UTC`, hit.duration !== null && hit.duration !== undefined ? ` · ${this.fmt.duration(hit.duration)} old` : '', bytes ? ` · ${this.fmt.bytes(bytes)} so far` : '', hit.location ? ` · ${hit.location}` : ''),
-        btn('Open in Sessions'),
+        h('span', null, h('b', null, 'Still open'), ` in the Sessions read at ${readAt} (same 5-tuple${row.sid ? ' and id' : ''})`, hit.duration !== null && hit.duration !== undefined ? ` · ${this.fmt.duration(hit.duration)} old` : '', bytes ? ` · ${this.fmt.bytes(bytes)} so far` : '', hit.location ? ` · ${hit.location}` : ''),
+        btn('Open in Sessions', hit.id),
       );
-    } else {
-      put(el, h('span', { class: 'lg-live-dot', 'aria-hidden': 'true' }), h('span', null, `Not in the last Sessions read (${readAt} UTC): it has ended, started after that read, or the read was filtered or capped.`), btn('Look for it in Sessions'));
+      return;
     }
+    const older = Number.isFinite(readMs) && row.time !== null && readMs < row.time;
+    put(
+      el,
+      h('span', { class: 'lg-live-dot', 'aria-hidden': 'true' }),
+      h('span', null, older ? `The last Sessions read (${readAt}) is older than this line, so it cannot show this session.` : `Not in the last Sessions read (${readAt}): it has ended, or that read was filtered or capped.`),
+      btn('Look for it in Sessions'),
+    );
+  }
+
+  /** The exact CLI to ask the device which policy matches this flow now (brief rule 8). */
+  testSection(fl) {
+    const { h, icon } = this.dom;
+    if (!fl.src || !fl.dst || !fl.from || !fl.to) return null;
+    const proto = ['tcp', 'udp', 'icmp'].includes(fl.protocol) ? fl.protocol : fl.protocolId;
+    const vals = [fl.from, fl.to, fl.src, fl.dst, fl.sport, fl.dport, proto, fl.lsys].filter((v) => v !== null && v !== undefined);
+    const safe = vals.every((v) => /^[A-Za-z0-9._:/-]+$/.test(String(v)));
+    const body = [];
+    if (!safe) {
+      body.push(h('p', { class: 'faint' }, 'A value in this line holds characters a CLI command cannot carry, so no command is offered.'));
+    } else {
+      const parts = ['show security match-policies', `from-zone ${fl.from}`, `to-zone ${fl.to}`, `source-ip ${fl.src}`, `destination-ip ${fl.dst}`];
+      if (fl.sport !== null) parts.push(`source-port ${fl.sport}`);
+      if (fl.dport !== null) parts.push(`destination-port ${fl.dport}`);
+      if (proto !== null && proto !== undefined) parts.push(`protocol ${proto}`);
+      const cli = parts.join(' ');
+      const full = fl.lsys ? `set cli logical-system ${fl.lsys}\n${cli}` : cli;
+      body.push(
+        h('div', { class: 'cli lg-d-cli' }, h('code', null, full), h('button', { class: 'btn sm icon', type: 'button', 'aria-label': 'Copy the command', title: 'Copy the command', on: { click: () => this.ctx.ui.copy(full, 'Command copied.') } }, icon('copy'))),
+        h('p', { class: 'faint lg-d-note' }, 'Junos answers for the configuration as it is now, which may differ from when this line was logged. J-Wicket does not reimplement the policy matcher.'),
+      );
+    }
+    const pair = `${fl.from} → ${fl.to}`;
+    if (!safe) return h('section', { class: 'panel-section' }, h('h3', null, 'Test on the device'), body);
+    body.push(
+      h(
+        'div',
+        { class: 'lg-d-acts' },
+        h('button', { class: 'btn sm', type: 'button', title: `The policies of zone pair ${pair}, in evaluation order`, on: { click: () => this.ctx.navigate('policies', { q: `from:${quoteValue(fl.from, true)} to:${quoteValue(fl.to, true)}` }) } }, icon('policies'), 'Policies for ', this.vis(pair)),
+      ),
+    );
+    return h('section', { class: 'panel-section' }, h('h3', null, 'Test on the device'), body);
   }
 
   fieldsSection(row) {
@@ -2500,7 +3546,7 @@ class LogsView {
           'tr',
           { class: ph ? 'is-ph' : null },
           h('th', { scope: 'row', class: 'mono' }, label),
-          h('td', { class: 'mono' }, opts.cls ? h('span', { class: opts.cls }, v) : v),
+          h('td', { class: 'mono' }, opts.cls ? h('span', { class: opts.cls }, this.vis(v)) : this.vis(v)),
           h(
             'td',
             { class: 'lg-d-act' },
@@ -2527,14 +3573,14 @@ class LogsView {
     for (const k of keys) {
       const qk = fieldKeys.get(k.toLowerCase()) || null;
       const cls = /address/.test(k) ? (/^nat-/.test(k) ? 'nat' : 'ip') : /interface/.test(k) ? 'iface' : null;
-      add(k, fields[k], qk, { cls, term: isPlaceholder(fields[k]) ? null : qk ? termText(qk, fields[k]) : termText(null, fields[k]) });
+      add(k, fields[k], qk, { cls, term: isPlaceholder(fields[k]) ? null : this.tokenTerm({ t: 'val', v: String(fields[k]), k: qk }) });
     }
     const fieldsTable = rows.length ? h('table', { class: 'lg-d-fields' }, h('tbody', null, rows.splice(0))) : null;
     // Lines without structured data: the typed tokens of the message are a second table.
     let partsTable = null;
     if (p.format !== 'rfc5424' || !p.sdid) {
       const seen = new Set();
-      const toks = this.tokensOf(row).filter((t) => t.t !== 'text' && !['ts', 'host', 'daemon', 'pid', 'tag', 'pri', 'key', 'sdid', 'arrow'].includes(t.t) && t.v.trim());
+      const toks = this.tokensOf(row).filter((t) => t.t !== 'text' && !['ts', 'host', 'daemon', 'pid', 'tag', 'pri', 'key', 'sdid', 'arrow', 'ctl'].includes(t.t) && t.v.trim());
       for (const t of toks) {
         const k = `${t.t}|${t.v}`;
         if (seen.has(k) || seen.size >= 40) continue;
@@ -2571,20 +3617,51 @@ class LogsView {
 
   showState(opts) {
     const { put, stateCard, skeleton, h } = this.dom;
-    const card = stateCard({ ...opts, compact: false });
-    put(this.stateEl, h('div', { class: 'lg-state-in' }, card, opts.skeleton ? skeleton(4) : null));
-    this.stateEl.hidden = false;
-    this.stateKind = opts.kind || opts.status;
-    // Nothing was read: the timeline has nothing to say, so it steps aside for the explanation.
     const bad = ['denied', 'unsupported', 'failed', 'offline', 'session-lost'].includes(opts.status);
-    this.el.classList.toggle('is-nodata', bad && !this.rows.length);
+    // Nothing was read: the explanation sits right under the header, not centred in an empty frame,
+    // and the timeline and stream step aside.
+    const block = bad && !this.rows.length;
+    if (block) {
+      const actions = [...(opts.actions || []), this.sessionsAction()].filter(Boolean);
+      put(this.blockEl, stateCard({ ...opts, actions, compact: false }));
+      this.blockEl.hidden = false;
+      this.stateEl.hidden = true;
+      this.stateEl.replaceChildren();
+    } else {
+      this.blockEl.hidden = true;
+      this.blockEl.replaceChildren();
+      put(this.stateEl, h('div', { class: 'lg-state-in' }, stateCard({ ...opts, compact: false }), opts.skeleton ? skeleton(4) : null));
+      this.stateEl.hidden = false;
+    }
+    this.stateKind = opts.kind || opts.status;
+    this.el.classList.toggle('is-nodata', block);
+    this.renderWhere();
   }
 
   hideState() {
     this.stateEl.hidden = true;
     this.stateEl.replaceChildren();
+    this.blockEl.hidden = true;
+    this.blockEl.replaceChildren();
     this.stateKind = null;
-    this.el.classList.remove('is-nodata');
+    if (this.el.classList.contains('is-nodata')) {
+      this.el.classList.remove('is-nodata');
+      this.renderWhere();
+    }
+  }
+
+  /** Logs failing does not mean Sessions does: they are read with different RPCs and permissions. */
+  sessionsAction() {
+    const { h, icon } = this.dom;
+    const last = this.ctx.store.sessionsLast;
+    const ok = Boolean(last && last.sessions && last.sessions.status === 'ok');
+    return h(
+      'button',
+      { class: 'btn sm ghost', type: 'button', title: 'Live flow sessions are read with another request and permission', on: { click: () => this.ctx.navigate('sessions', {}) } },
+      icon('sessions'),
+      ok ? 'Live sessions are still available: Sessions' : 'Live sessions are read separately: Sessions',
+      icon('arrow-right'),
+    );
   }
 
   /** Lines are in the window but none passes the filters: say why instead of a blank stream. */
@@ -2608,6 +3685,8 @@ class LogsView {
       actions.push(h('button', { class: 'btn sm', type: 'button', on: { click: () => { this.famOff = new Set(); this.writeRoute(); this.refilter(); } } }, icon('filter'), 'Show every family'));
     }
     if (this.selfHidden === total) why.push('your own J-Wicket reads being hidden');
+    const dev = this.plan && this.plan.device && Object.keys(this.plan.device).length;
+    const devNote = dev && this.queryText ? ` The device returned these ${this.fmt.plural(total, 'line')} for the gold terms; the exact field match in the browser then left none.` : '';
     const key = `${total}|${why.join(',')}`;
     if (this.stateKind === 'nomatch' && this.noMatchKey === key) return;
     this.noMatchKey = key;
@@ -2615,7 +3694,7 @@ class LogsView {
       status: 'empty',
       kind: 'nomatch',
       title: `None of the ${this.fmt.plural(total, 'line')} in this window match`,
-      message: why.length ? `Filtered out by ${why.join(' and ')}.` : null,
+      message: why.length ? `Filtered out by ${why.join(' and ')}.${devNote}` : null,
       hint: 'New lines that match appear here as they arrive.',
       actions,
       code: false,
@@ -2629,10 +3708,24 @@ class LogsView {
     this.renderNewPill();
     this.renderFoot();
     this.renderRange();
+    this.renderAges();
     this.histogram.setEmptyText(this.rows.length ? 'No line with a time passes the filters' : 'No timed lines to chart yet');
+    this.histogram.setNote(this.zoneNote());
     this.histogram.update({ times: this.hist.times, series: this.hist.series, selection: this.timeRange ? this.histSel() : null });
     this.scroller.setAttribute('aria-rowcount', String(this.visible.length));
+    // The how-to row is for a first look; once lines are in, token hover hints and ? say the same.
+    this.queryHint.hidden = this.rows.length > 0;
     this.renderNoMatch();
+    this.renderFacets();
+  }
+
+  /** "UTC" when the newest line carries its zone; else the device clock, read as UTC. */
+  zoneNote() {
+    for (let i = this.rows.length - 1; i >= 0 && i >= this.rows.length - 50; i -= 1) {
+      const r = this.rows[i];
+      if (!r.marker && r.time !== null) return r.p.zoned ? 'UTC' : 'device clock, read as UTC';
+    }
+    return 'UTC';
   }
 
   histSel() {
@@ -2660,7 +3753,7 @@ class LogsView {
     if (sel) {
       put(
         this.rangeEl,
-        h('span', { class: 'lg-range-txt' }, icon('clock'), h('b', { class: 'mono' }, `${clock(sel.lo)} \u2013 ${clock(sel.hi)}`)),
+        h('span', { class: 'lg-range-txt' }, icon('clock'), h('b', { class: 'mono' }, `${clock(sel.lo)} \u2013 ${clock(sel.hi)}`), h('span', { class: 'faint' }, this.zoneNote() === 'UTC' ? 'UTC' : 'device clock')),
         h('button', { class: 'btn ghost sm', type: 'button', title: 'Clear the time range (double-click the chart)', on: { click: () => this.onBrush(null) } }, icon('close'), 'Clear'),
       );
     } else {
@@ -2671,29 +3764,45 @@ class LogsView {
 
   renderFams() {
     const counts = this.famCounts || new Array(this.families.length).fill(0);
+    const only = this.famOff.size === this.families.length - 1;
+    let folded = 0;
     for (const [i, f] of this.families.entries()) {
       const { btn, count } = this.famBtns.get(f.id);
       const n = counts[i] || 0;
       const on = !this.famOff.has(f.id);
       btn.setAttribute('aria-pressed', on ? 'true' : 'false');
       btn.classList.toggle('is-zero', n === 0);
+      // Families with no line (and not hidden on purpose) fold into one "+N" chip.
+      const fold = n === 0 && on && !only && !this.famsExpanded;
+      btn.hidden = fold;
+      if (fold) folded += 1;
       tick(count, this.fmt.compact(n));
-      btn.title = `${f.label}: ${this.fmt.plural(n, 'line')} match${n === 1 ? 'es' : ''}. ${on ? 'Click to hide' : 'Click to show'}; Alt-click to show only this family.`;
+      const click = on && only ? 'Click to show every family' : `Click to show only ${f.label}`;
+      btn.title = `${f.label}: ${this.fmt.plural(n, 'line')}. ${click}; Alt-click to ${on ? 'hide' : 'show'} it; Shift-click to add or remove it.`;
       btn.setAttribute('aria-label', `${f.label}, ${n} lines, ${on ? 'shown' : 'hidden'}`);
     }
+    const empty = this.families.filter((f, i) => !(counts[i] || 0) && !this.famOff.has(f.id)).length;
+    this.famMore.hidden = !folded && !(this.famsExpanded && empty);
+    this.famMore.textContent = this.famsExpanded ? 'Fold empty' : `+${folded} with no lines`;
+    this.famMore.setAttribute('aria-expanded', this.famsExpanded ? 'true' : 'false');
+    this.famMore.title = this.famsExpanded ? 'Fold the families with no line in the window' : `Show the ${folded} families with no line in the window`;
   }
 
   renderBar() {
     const { h, put, icon } = this.dom;
     const shown = this.visible.reduce((n, r) => n + (r.marker ? 0 : 1), 0);
     const total = this.rows.reduce((n, r) => n + (r.marker ? 0 : 1), 0);
-    put(
-      this.countEl,
-      h('b', { class: 'mono' }, this.fmt.num(shown)),
-      shown !== total ? h('span', { class: 'faint' }, ` of ${this.fmt.num(total)}`) : null,
-      h('span', { class: 'faint' }, ` ${total === 1 && shown === total ? 'line' : 'lines'}`),
-      h('span', { class: 'faint lg-win' }, ` \u00b7 keeps ${this.fmt.compact(this.windowMax)}`),
-    );
+    if (!this.countNum) {
+      this.countNum = h('b', { class: 'mono lg-count-n' });
+      this.countOf = h('span', { class: 'faint' });
+      this.countWord = h('span', { class: 'faint' });
+      this.countWin = h('span', { class: 'faint lg-win' });
+      put(this.countEl, this.countNum, this.countOf, this.countWord, this.countWin);
+    }
+    tick(this.countNum, this.fmt.num(shown));
+    this.countOf.textContent = shown !== total ? ` of ${this.fmt.num(total)}` : '';
+    this.countWord.textContent = ` ${total === 1 && shown === total ? 'line' : 'lines'}`;
+    this.countWin.textContent = ` \u00b7 keeps ${this.fmt.compact(this.windowMax)}`;
     if (this.selfHidden || this.showSelf) {
       put(
         this.selfEl,

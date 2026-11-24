@@ -827,7 +827,7 @@
 .sx-m.m-rate .avg { color: var(--faint); }
 .sx-m.m-meta { grid-area: meta; font-size: 11.5px; line-height: 16px; color: var(--muted); display: flex; align-items: center; min-width: 0; }
 .sx-m.m-size { grid-area: size; text-align: right; color: var(--faint); font-size: 11px; }
-.sx-m .sep { color: var(--faint); }
+.sx-m .sep { color: var(--faint); white-space: pre; }
 .sx-m.m-meta .sx-nat { flex: 0 1 auto; min-width: 0; }
 
 /* ---- explicit states in place of the grid ----------------------------------------------------- */
@@ -1316,6 +1316,12 @@
   align-items: baseline;
   gap: 4px;
   margin-bottom: 6px;
+}
+
+/* "59 s left of 60 s": a proportional space between number and unit, not a monospace one */
+.sx-d-tline .num {
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
 }
 
 .sx-d-timeout .bar {

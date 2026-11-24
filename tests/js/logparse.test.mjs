@@ -336,6 +336,8 @@ test('RT_FLOW BSD positional bodies across releases (24.4 template, NAT rule typ
   assert.deepEqual([c.flow.app, c.flow.iface, c.fields.encrypted, c.flow.snatRule], ['SSL', 'ge-0/0/1.0', 'No', 'src-nat-egress']);
   assert.ok(lp.decode(c).startsWith('Session 129585 closed (TCP FIN) after 38 s'));
   assert.ok(lp.decode(c).includes('SNAT 10.10.0.12:51234 → 203.0.113.2:40123 (rule src-nat-egress)'));
+  // Decimal byte units, as format.bytes() and the Sessions view use: 2210 + 1153433 = 1155643 B.
+  assert.ok(lp.decode(c).includes('1.2 MB (↑ 2.2 kB ↓ 1.2 MB)'), lp.decode(c));
   const dnat = 'Nov 24 07:41:00 fw RT_FLOW: RT_FLOW_SESSION_CREATE: session created 198.51.100.130/51000->203.0.113.11/443 0x0 junos-https 198.51.100.130/51000->10.20.0.11/443 0x0 N/A N/A destination rule dnat-web 6 publish-web untrust dmz 129586 N/A(N/A) ge-0/0/0.0 SSL UNKNOWN No';
   const d = checkFlow(dnat, { sessionId: 129586, src: '198.51.100.130', sport: 51000, dst: '203.0.113.11', dport: 443, policy: 'publish-web', from: 'untrust', to: 'dmz', snat: false, dnat: true, natDst: '10.20.0.11', natDport: 443 });
   assert.equal(d.fields['dst-nat-rule-name'], 'dnat-web');
@@ -429,4 +431,79 @@ test('parse is memoised and never throws', () => {
     assert.equal(typeof p.format, 'string');
     assert.equal(typeof p.fields, 'object');
   }
+});
+
+test('control and format characters become their own "ctl" tokens and stay lossless', () => {
+  const rlo = '‮';
+  const line = `<14>1 2026-11-24T11:17:57.433Z branch-fw-01 RT_FLOW - RT_FLOW_SESSION_DENY [junos@2636.1.1.1.2.129 source-address="198.51.100.9" source-zone-name="untrust${rlo}" username="${rlo}resu"] x​y \u0085z ⁦w⁩`;
+  const toks = lp.tokenize(line);
+  assert.equal(joined(toks), line);
+  const ctl = toks.filter((t) => t.t === 'ctl');
+  assert.deepEqual(ctl.map((t) => t.v), [rlo, rlo, '​', '\u0085', '⁦', '⁩']);
+  for (const t of toks) if (t.t !== 'ctl') assert.ok(!lp.CONTROL_RE.test(t.v), `control char left inside ${JSON.stringify(t)}`);
+  const zone = toks.find((t) => t.t === 'zone' && t.v === 'untrust');
+  assert.equal(zone.k, 'from');
+  assert.equal(zone.q, `untrust${rlo}`, 'a split value keeps its exact filter value');
+  assert.equal(lp.countControls(line), 6);
+  assert.equal(lp.controlName(rlo), 'U+202E');
+  assert.ok(lp.escapeControls(line).endsWith('x<U+200B>y <U+0085>z <U+2066>w<U+2069>'));
+  assert.equal(lp.escapeControls('plain\ttext'), 'plain\ttext', 'tab is not a control here');
+  for (const l of [...DOCS, ...DEV]) assert.equal(lp.countControls(l), 0, 'the corpus holds no control characters');
+});
+
+test('header offsets (hdr) and zoned timestamps', () => {
+  for (const line of [...DOCS, ...DEV]) {
+    const p = lp.parse(line, { now: NOW });
+    const h = p.hdr;
+    assert.ok(h && Number.isInteger(h.body), line);
+    if (p.ts && h.ts) assert.equal(line.slice(h.ts[0], h.ts[1]), p.ts, `ts in ${line}`);
+    if (h.host) assert.equal(line.slice(h.host[0], h.host[1]).trimEnd(), p.host || '-', `host in ${line}`);
+    if (h.pri) assert.match(line.slice(h.pri[0], h.pri[1]), /^<\d{1,3}>\d{1,2} $/);
+    if (h.procid) assert.match(line.slice(h.procid[0], h.procid[1]), /^- ?$/);
+    if (h.sdid) assert.equal(line.slice(h.sdid[0], h.sdid[1]).trimEnd(), `[${p.sdid}`);
+    assert.equal(line.slice(h.body), p.message, `body in ${line}`);
+  }
+  assert.equal(lp.parse('<14>1 2026-11-24T07:54:52.741Z h RT_FLOW - X - m').zoned, true);
+  assert.equal(lp.parse('<14>1 2026-11-24T07:54:52 h RT_FLOW - X - m').zoned, false, 'report output carries no zone');
+  assert.equal(lp.parse('Nov 24 13:07:49 h mgd[1]: UI_COMMIT: x').zoned, false, 'BSD time is the device clock');
+  assert.equal(lp.parse('2026-11-24.13:08:16 flowd: RT_FLOW_SESSION_CREATE: x').zoned, false);
+});
+
+test('summary: the 5-tuple, policy, zones, NAT, reason and counters first, the rest faint', () => {
+  const close = DEV.find((l) => /RT_FLOW_SESSION_CLOSE \[/.test(l) && /src-nat-rule-type="source rule"/.test(l));
+  const p = lp.parse(close, { now: NOW });
+  const toks = lp.summary(p);
+  const text = joined(toks);
+  const fl = p.flow;
+  assert.ok(text.startsWith(`${fl.src}:${fl.sport} → ${fl.dst}:${fl.dport} tcp · ${fl.policy} · ${fl.from} → ${fl.to} · SNAT ${fl.natSrc}:${fl.natSport} · ${fl.reason} · `), text);
+  assert.ok(text.includes(`session-id=${fl.sessionId}`), 'session id among the rest');
+  assert.ok(!/source-address=|N\/A|UNKNOWN|connection-tag=0/.test(text), `summarised keys and placeholders left out: ${text}`);
+  const roles = Object.fromEntries(toks.filter((t) => t.k).map((t) => [t.k, t.q ?? t.v]));
+  assert.equal(roles.src, fl.src);
+  assert.equal(roles.sport, String(fl.sport));
+  assert.equal(roles.dport, String(fl.dport));
+  assert.equal(roles.policy, fl.policy);
+  assert.equal(roles.from, fl.from);
+  assert.equal(roles.reason, fl.reason);
+  const firstFaint = toks.findIndex((t) => t.f);
+  assert.ok(firstFaint > 0 && toks.slice(firstFaint).every((t) => t.f), 'faint tokens come last');
+  assert.ok(toks.some((t) => t.nc && t.t === 'num'), 'byte and duration totals are not filter values');
+  const padded = joined(lp.summary(p, { pad: true }));
+  assert.equal(padded.indexOf('→'), 22, 'padded: the arrow sits in a fixed column');
+  assert.equal(lp.flowBadge(p), 'CLOSE');
+  assert.equal(lp.summary(lp.parse('Nov 24 13:07:49 h mgd[1]: UI_COMMIT: x')), null);
+  // BSD text and buffer forms summarise too
+  for (const l of DEV.filter((x) => /RT_FLOW_SESSION_(CREATE|CLOSE|DENY)/.test(x))) {
+    const q = lp.parse(l, { now: NOW });
+    const s = joined(lp.summary(q));
+    assert.ok(s.includes(`${q.flow.src}:${q.flow.sport} → ${q.flow.dst}:${q.flow.dport}`), `${l} -> ${s}`);
+  }
+});
+
+test('summary without the remaining fields (phone rows)', () => {
+  const line = DEV.find((l) => /RT_FLOW_SESSION_CREATE \[/.test(l));
+  const p = lp.parse(line, { now: NOW });
+  const toks = lp.summary(p, { rest: false });
+  assert.ok(toks.length > 0 && toks.every((t) => !t.f), 'no faint fields');
+  assert.ok(!joined(toks).includes('session-id='));
 });

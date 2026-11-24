@@ -353,6 +353,24 @@
   display: none;
 }
 
+.qb-notice {
+  margin: 0;
+  padding: 4px 10px;
+  border-left: 2px solid var(--sky);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.qb-notice[data-kind="warn"] {
+  border-left-color: var(--amber);
+  color: var(--text);
+}
+
+.qb-notice[hidden] {
+  display: none;
+}
+
 .qb-err-msg {
   display: flex;
   flex-wrap: wrap;

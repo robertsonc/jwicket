@@ -76,6 +76,9 @@ function item(fields) {
 }
 
 const yesNo = (b) => (b ? ['yes', 'true'] : ['no', 'false']);
+// No group, nothing inherited, active: provenance says "direct", which a compact card leaves out.
+const isDirect = (o) => !o.group && !(o.inherited || []).length && !o.inactive;
+const MD_MQ = '(min-width: 1280px)'; // Zones: list and detail side by side
 
 const FIELDS = {
   zones: {
@@ -444,6 +447,11 @@ class ObjectsView {
     this.onKeyBound = (e) => this.onKey(e);
     document.addEventListener('keydown', this.onKeyBound);
     this.ageTimer = setInterval(() => this.renderSub(), AGE_TICK_MS);
+    this.mdSel = null;
+    this.mdPane = null;
+    this.mqMD = typeof window.matchMedia === 'function' ? window.matchMedia(MD_MQ) : null;
+    this.onMD = () => this.onMDChange();
+    if (this.mqMD && this.mqMD.addEventListener) this.mqMD.addEventListener('change', this.onMD);
     this.readRoute(ctx.route, true);
     this.load(false);
   }
@@ -478,6 +486,7 @@ class ObjectsView {
     this.snap = null;
     this.idx = null;
     this.sel = null;
+    this.mdSel = null;
     this.wantSel = null;
     this.cursor = -1;
     this.load(false);
@@ -492,7 +501,33 @@ class ObjectsView {
     clearInterval(this.ageTimer);
     for (const off of this.offs) off();
     document.removeEventListener('keydown', this.onKeyBound);
+    if (this.mqMD && this.mqMD.removeEventListener) this.mqMD.removeEventListener('change', this.onMD);
     for (const b of Object.values(this.bars)) if (b) b.destroy();
+  }
+
+  /** Zones at 1280 px and wider: the list and one zone's detail side by side (no overlay). */
+  isMD() {
+    return this.tab === 'zones' && Boolean(this.mqMD && this.mqMD.matches);
+  }
+
+  onMDChange() {
+    if (this.dead || !this.idx || this.tab !== 'zones') return;
+    const zoneSel = this.sel && String(this.sel).startsWith('zone|') ? this.sel : null;
+    if (this.isMD()) {
+      // Overlay -> pane: keep the zone that was open.
+      if (this.panelOpen && zoneSel) {
+        this.ctx.ui.closePanel();
+        this.sel = zoneSel;
+        this.mdSel = zoneSel;
+        this.saveRoute(false);
+      }
+    } else if (zoneSel && !this.panelOpen) {
+      // Pane -> narrow: the zone is no longer shown; drop it from the address.
+      this.sel = null;
+      this.mdSel = null;
+      this.saveRoute(false);
+    }
+    this.renderTab();
   }
 
   readRoute(route, first) {
@@ -510,6 +545,11 @@ class ObjectsView {
       } else if (this.panelOpen) {
         this.sel = null;
         this.ctx.ui.closePanel();
+      } else if (this.isMD() && this.sel) {
+        // Back to a link without a zone: the pane shows the first zone again.
+        this.sel = null;
+        this.mdSel = null;
+        if (this.idx) this.renderTab();
       }
     }
   }
@@ -913,7 +953,15 @@ class ObjectsView {
             h('button', { class: 'btn sm', type: 'button', on: { click: () => { this.limit += PAGE; this.renderTab(); } } }, `show ${this.fmt.num(Math.min(PAGE, shown.length - page.length))} more`),
           )
         : null;
-    this.ctx.dom.put(this.tableHost, h('div', { class: 'pv-tablecard ob-tablecard' }, table), more);
+    if (this.isMD()) {
+      const pick = page.find((it) => it.id === this.mdSel) || page.find((it) => it.id === this.sel) || page[0];
+      this.mdSel = pick ? pick.id : null;
+      this.mdPane = h('section', { class: 'ob-md-pane', 'aria-label': pick ? `Zone ${pick.z.name}` : 'Zone' }, pick ? this.zoneDetail(pick) : null);
+      this.ctx.dom.put(this.tableHost, h('div', { class: 'ob-md' }, h('div', { class: 'ob-md-list' }, h('div', { class: 'pv-tablecard ob-tablecard' }, table), more), this.mdPane));
+    } else {
+      this.mdPane = null;
+      this.ctx.dom.put(this.tableHost, h('div', { class: 'pv-tablecard ob-tablecard' }, table), more);
+    }
     this.markSelected();
     if (announce) this.ctx.ui.announce(`Showing ${shown.length} of ${this.fmt.plural(all.length, TABS.find((t) => t.id === tab).noun, TABS.find((t) => t.id === tab).plural)}.`);
   }
@@ -952,7 +1000,7 @@ class ObjectsView {
         h('th', { scope: 'row', class: 'c-name' }, h('button', { class: 'pv-name', type: 'button', 'aria-haspopup': 'dialog' }, this.hl(z.name)), z.description ? h('div', { class: 'pv-desc' }, z.description) : null),
         h(
           'td',
-          { class: 'c-ifaces', dataset: { label: 'Interfaces' } },
+          { class: ['c-ifaces', !ifaces.length && 'is-empty'], dataset: { label: 'Interfaces' } },
           ifaces.length
             ? h(
                 'ul',
@@ -971,9 +1019,9 @@ class ObjectsView {
               )
             : h('span', { class: 'faint' }, 'no interfaces'),
         ),
-        h('td', { class: 'c-svc', dataset: { label: 'Services' } }, this.svcChips(z.services, 'service', 'svc')),
-        h('td', { class: 'c-proto', dataset: { label: 'Protocols' } }, this.svcChips(z.protocols, 'proto', 'proto')),
-        h('td', { class: 'c-screen', dataset: { label: 'Screen' } }, z.screen ? this.token('screen', z.screen) : h('span', { class: 'faint' }, 'none')),
+        h('td', { class: ['c-svc', !(z.services || []).length && 'is-empty'], dataset: { label: 'Services' } }, this.svcChips(z.services, 'service', 'svc')),
+        h('td', { class: ['c-proto', !(z.protocols || []).length && 'is-empty'], dataset: { label: 'Protocols' } }, this.svcChips(z.protocols, 'proto', 'proto')),
+        h('td', { class: ['c-screen', !z.screen && 'is-empty'], dataset: { label: 'Screen' } }, z.screen ? this.token('screen', z.screen) : h('span', { class: 'faint' }, 'none')),
         h(
           'td',
           { class: 'c-used', dataset: { label: 'Policies' } },
@@ -981,7 +1029,7 @@ class ObjectsView {
             ? h('button', { class: 'ob-used', type: 'button', dataset: { zone: z.name }, title: `Show the policies with zone:${z.name}` }, h('b', null, fmt.num(it.use.count)), h('span', null, ` in ${fmt.plural(it.use.pairs.length, 'pair')}`), it.use.globals.length ? h('span', { class: 'faint' }, ` + ${it.use.globals.length} global`) : null)
             : h('span', { class: 'faint' }, '—'),
         ),
-        h('td', { class: 'c-prov', dataset: { label: 'Provenance' } }, h('div', { class: 'pv-badges' }, provBadges(h, z))),
+        h('td', { class: ['c-prov', isDirect(z) && 'is-empty'], dataset: { label: 'Provenance' } }, h('div', { class: 'pv-badges' }, provBadges(h, z))),
       );
     });
     return h(
@@ -996,12 +1044,12 @@ class ObjectsView {
           'tr',
           null,
           h('th', { scope: 'col', class: 'c-name' }, 'Zone'),
-          h('th', { scope: 'col' }, 'Interfaces'),
-          h('th', { scope: 'col', title: 'host-inbound-traffic system-services at zone level' }, 'Host-inbound services'),
-          h('th', { scope: 'col', title: 'host-inbound-traffic protocols at zone level' }, 'Protocols'),
-          h('th', { scope: 'col' }, 'Screen'),
-          h('th', { scope: 'col' }, 'Policies'),
-          h('th', { scope: 'col' }, 'Provenance'),
+          h('th', { scope: 'col', class: 'c-ifaces' }, 'Interfaces'),
+          h('th', { scope: 'col', class: 'c-svc', title: 'host-inbound-traffic system-services at zone level' }, 'Host-inbound services'),
+          h('th', { scope: 'col', class: 'c-proto', title: 'host-inbound-traffic protocols at zone level' }, 'Protocols'),
+          h('th', { scope: 'col', class: 'c-screen' }, 'Screen'),
+          h('th', { scope: 'col', class: 'c-used' }, 'Policies'),
+          h('th', { scope: 'col', class: 'c-prov' }, 'Provenance'),
         ),
       ),
       h('tbody', null, rows),
@@ -1059,10 +1107,10 @@ class ObjectsView {
           this.rowAttrs(it, i, (e.inactive || b.inactive) && 'is-inactive'),
           h('th', { scope: 'row', class: 'c-name' }, h('button', { class: 'pv-name', type: 'button', 'aria-haspopup': 'dialog' }, this.hl(it.name)), e.description ? h('div', { class: 'pv-desc' }, e.description) : null),
           h('td', { class: 'c-kind', dataset: { label: 'Kind' } }, h('span', { class: ['ob-kind', `k-${it.kind}`] }, it.kind)),
-          h('td', { class: 'c-value', dataset: { label: isSet ? 'Members' : 'Value' } }, value, isSet ? h('div', { class: 'pv-hint' }, `${fmt.plural([...it.closure].filter((n) => (b.addresses || []).some((a) => a.name === n)).length, 'address', 'addresses')} in all`) : null),
+          h('td', { class: ['c-value', !isSet && !e.value && 'is-empty'], dataset: { label: isSet ? 'Members' : 'Value' } }, value, isSet ? h('div', { class: 'pv-hint' }, `${fmt.plural([...it.closure].filter((n) => (b.addresses || []).some((a) => a.name === n)).length, 'address', 'addresses')} in all`) : null),
           h('td', { class: 'c-used', dataset: { label: 'Used by' } }, this.usedCell(it)),
-          h('td', { class: 'c-prov', dataset: { label: 'Provenance' } }, h('div', { class: 'pv-badges' }, provBadges(h, e))),
-          h('td', { class: 'c-zones', dataset: { label: 'Zones' } }, it.zones.length ? h('span', { class: 'ob-chips' }, it.zones.map((z) => (z === 'global' ? h('span', { class: 'zone pv-zone-any' }, 'any zone') : h('span', { class: 'zone' }, z)))) : h('span', { class: 'faint' }, 'none')),
+          h('td', { class: ['c-prov', isDirect(e) && 'is-empty'], dataset: { label: 'Provenance' } }, h('div', { class: 'pv-badges' }, provBadges(h, e))),
+          h('td', { class: ['c-zones', !it.zones.length && 'is-empty'], dataset: { label: 'Zones' } }, it.zones.length ? h('span', { class: 'ob-chips' }, it.zones.map((z) => (z === 'global' ? h('span', { class: 'zone pv-zone-any' }, 'any zone') : h('span', { class: 'zone' }, z)))) : h('span', { class: 'faint' }, 'none')),
         );
       });
       bodies.push(h('tbody', { class: 'pv-group' }, head, rows));
@@ -1118,18 +1166,18 @@ class ObjectsView {
         h('td', { class: 'c-kind', dataset: { label: 'Kind' } }, h('span', { class: ['ob-kind', isSet ? 'k-set' : 'k-app'] }, isSet ? 'set' : 'application')),
         h(
           'td',
-          { class: 'c-proto', dataset: { label: 'Protocol' } },
+          { class: ['c-proto', (isSet ? !it.protocols.length : !a.protocol && !a.terms) && 'is-empty'], dataset: { label: 'Protocol' } },
           isSet ? h('span', { class: 'faint' }, it.protocols.length ? it.protocols.join(', ') : '—') : a.protocol ? this.token('proto', a.protocol) : a.terms ? h('span', { class: 'muted' }, `${fmt.plural(a.terms, 'term')}`) : h('span', { class: 'faint' }, '—'),
         ),
         h(
           'td',
-          { class: 'c-port', dataset: { label: 'Port' } },
+          { class: ['c-port', (isSet ? !it.ports.length : !a.destination_port) && 'is-empty'], dataset: { label: 'Port' } },
           isSet ? h('span', { class: 'faint mono' }, it.ports.length ? it.ports.join(', ') : '—') : a.destination_port ? this.token('port', a.destination_port) : h('span', { class: 'faint' }, '—'),
           !isSet && a.source_port ? h('div', { class: 'pv-hint' }, `source ${a.source_port}`) : null,
         ),
         h(
           'td',
-          { class: 'c-members', dataset: { label: 'Members' } },
+          { class: ['c-members', !isSet && 'is-empty'], dataset: { label: 'Members' } },
           isSet
             ? h(
                 'span',
@@ -1141,7 +1189,7 @@ class ObjectsView {
             : h('span', { class: 'faint' }, '—'),
         ),
         h('td', { class: 'c-used', dataset: { label: 'Used by' } }, this.usedCell(it)),
-        h('td', { class: 'c-prov', dataset: { label: 'Provenance' } }, h('div', { class: 'pv-badges' }, provBadges(h, a))),
+        h('td', { class: ['c-prov', isDirect(a) && 'is-empty'], dataset: { label: 'Provenance' } }, h('div', { class: 'pv-badges' }, provBadges(h, a))),
       );
     });
     return h(
@@ -1205,9 +1253,10 @@ class ObjectsView {
     if (!this.el.isConnected || !this.idx || !this.visible.length) return;
     if (e.key === 'j' || e.key === 'k') {
       e.preventDefault();
-      const cur = this.panelOpen ? this.visible.findIndex((it) => it.id === this.sel) : this.cursor;
+      const md = this.isMD() && this.mdPane;
+      const cur = this.panelOpen ? this.visible.findIndex((it) => it.id === this.sel) : md ? this.visible.findIndex((it) => it.id === this.mdSel) : this.cursor;
       const next = cur < 0 ? 0 : Math.max(0, Math.min(this.visible.length - 1, cur + (e.key === 'j' ? 1 : -1)));
-      if (this.panelOpen && this.visible[next]) {
+      if ((this.panelOpen || md) && this.visible[next]) {
         this.openSel(this.visible[next].id, { push: false });
       } else {
         this.cursor = next;
@@ -1227,7 +1276,7 @@ class ObjectsView {
   }
 
   markSelected() {
-    const selId = this.panelOpen ? this.sel : null;
+    const selId = this.isMD() && this.mdPane ? this.mdSel : this.panelOpen ? this.sel : null;
     for (const tr of this.tableHost.querySelectorAll('tr.ob-row')) {
       const on = selId ? tr.dataset.id === selId : Number(tr.dataset.i) === this.cursor;
       if (on) tr.setAttribute('aria-selected', 'true');
@@ -1283,6 +1332,23 @@ class ObjectsView {
       }
     }
     if (tabOf !== this.tab) this.showTab(tabOf, { save: false });
+    if (this.isMD() && String(id).startsWith('zone|')) {
+      // Master-detail: the zone shows in the pane beside the list.
+      if (this.panelOpen) this.ctx.ui.closePanel();
+      const was = this.sel;
+      this.sel = id;
+      this.mdSel = id;
+      if (this.mdPane && this.mdPane.isConnected) {
+        this.ctx.dom.put(this.mdPane, content);
+        this.mdPane.setAttribute('aria-label', title);
+        this.mdPane.scrollTop = 0;
+      } else {
+        this.renderTab();
+      }
+      this.markSelected();
+      if (!refresh && was !== id) this.saveRoute(push);
+      return true;
+    }
     const token = ++this.panelToken;
     const was = this.sel;
     this.sel = id;
@@ -1563,7 +1629,12 @@ class ObjectsView {
           if (m && m.kind === 'application') {
             rows.push(h('tr', null, h('td', { class: 'mono' }, n), h('td', { class: 'mono' }, m.protocol || (m.terms ? `${m.terms} terms` : '—')), h('td', { class: 'mono' }, m.destination_port || '—'), h('td', { class: 'faint' }, via || 'direct')));
           } else if (/^junos-/.test(n)) {
-            rows.push(h('tr', null, h('td', { class: 'mono' }, n), h('td', { colspan: '2', class: 'muted' }, 'predefined (junos-defaults, not expanded)'), h('td', { class: 'faint' }, via || 'direct')));
+            const known = this.Q && this.Q.PREDEFINED_APPS ? this.Q.PREDEFINED_APPS[n] : null;
+            rows.push(
+              known
+                ? h('tr', null, h('td', { class: 'mono' }, n), h('td', { class: 'mono', title: 'junos-defaults, as J-Wicket knows it' }, known.protocol), h('td', { class: 'mono' }, known.port), h('td', { class: 'faint' }, via || 'direct'))
+                : h('tr', null, h('td', { class: 'mono' }, n), h('td', { colspan: '2', class: 'muted' }, 'predefined (junos-defaults); port not read by J-Wicket'), h('td', { class: 'faint' }, via || 'direct')),
+            );
           } else {
             rows.push(h('tr', null, h('td', { class: 'mono' }, n), h('td', { colspan: '2', class: 'pv-unres' }, 'not found'), h('td', { class: 'faint' }, via || 'direct')));
           }

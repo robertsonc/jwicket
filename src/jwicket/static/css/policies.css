@@ -7,7 +7,7 @@
 /* ---- frame ------------------------------------------------------------------------------------ */
 
 .pv-view {
-  gap: var(--s4);
+  gap: var(--s3);
 }
 
 .pv-head {
@@ -68,8 +68,38 @@
 .pv-body {
   display: flex;
   flex-direction: column;
-  gap: var(--s4);
+  gap: 10px;
   min-width: 0;
+}
+
+/* table and (at 1600 px and wider) the zone-pair matrix in a sticky card beside it */
+.pv-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
+  min-width: 0;
+}
+
+.pv-main.has-side {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+}
+
+.pv-main-l {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pv-side {
+  position: sticky;
+  top: var(--s3);
+  min-width: 0;
+}
+
+.pv-side .pv-mxcard .tile-body {
+  padding-top: var(--s2);
 }
 
 .pv-loading {
@@ -177,16 +207,275 @@
   align-items: stretch;
 }
 
-.pv-strip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--s3);
+.pv-cards.single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
-.pv-strip > * {
-  flex: 1 1 380px;
+/* ---- compact summary strip: ① zone-pair → ② global → ③ default │ mix │ live │ groups │ Summary ---- */
+
+.pv-sumstrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 0;
+  min-height: 48px;
+  padding: 6px 8px 6px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  background-image: linear-gradient(180deg, var(--raised), transparent 85%);
+  box-shadow: var(--shadow);
   min-width: 0;
+}
+
+.pv-ss-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 12px;
+  border-left: 1px solid var(--line);
+}
+
+.pv-ss-seg:first-child {
+  border-left: 0;
+  padding-left: 4px;
+}
+
+.pv-ss-flow {
+  gap: 4px;
+}
+
+.pv-ss-step {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.pv-ss-step:hover {
+  border-color: var(--line-strong);
+  background: var(--raised);
+}
+
+.pv-ss-n {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1px solid var(--gold-line);
+  background: var(--gold-soft);
+  color: var(--gold);
+  font: 700 10px/1 var(--font-mono);
+}
+
+.pv-ss-v {
+  color: var(--text);
+  font: 700 17px/1 var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+
+.pv-ss-step.deny .pv-ss-v { color: var(--deny); font-family: var(--font-mono); font-size: 14px; }
+.pv-ss-step.permit .pv-ss-v { color: var(--permit); font-family: var(--font-mono); font-size: 14px; }
+
+.pv-ss-l {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pv-ss-arrow {
+  color: var(--faint);
+  font-size: 13px;
+}
+
+.pv-ss-mix {
+  gap: 10px;
+}
+
+.pv-ss-mix .pv-meter {
+  width: 56px;
+  flex: none;
+}
+
+.pv-ss-mix .pv-mix {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pv-ss-livenum {
+  color: var(--sky);
+  font: 700 16px/1 var(--font-display);
+}
+
+.pv-ss-live .pv-inline-link {
+  font-size: 12px;
+}
+
+.pv-ss-pill {
+  margin-left: 4px;
+}
+
+.pv-ss-cap {
+  color: var(--faint);
+  font: 700 10px/1.2 var(--font-ui);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.pv-ss-groups .pv-chipbtn {
+  height: 24px;
+}
+
+.pv-ss-toggle {
+  flex: none;
+  gap: 4px;
+}
+
+.pv-ss-toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform var(--t-fast) var(--ease);
+}
+
+.pv-sumstrip.is-open .pv-ss-toggle svg {
+  transform: rotate(180deg);
+}
+
+.pv-sumstrip .spacer {
+  flex: 1 1 0;
+}
+
+/* narrower desktops: the strip stays one line (groups are in the cards and the quick filters) */
+@media (max-width: 1400px) and (min-width: 901px) {
+  .pv-ss-groups {
+    display: none;
+  }
+}
+
+@media (max-width: 1180px) and (min-width: 901px) {
+  .pv-ss-mix .pv-meter {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .pv-sumstrip {
+    padding: 6px;
+  }
+
+  .pv-ss-seg {
+    flex-wrap: wrap;
+    padding: 4px 6px;
+    border-left: 0;
+  }
+
+  .pv-ss-flow {
+    flex: 1 1 100%;
+  }
+
+  .pv-ss-mix .pv-mix {
+    white-space: normal;
+  }
+
+  .pv-ss-step {
+    padding: 0 4px;
+  }
+}
+
+/* ---- quick filters + central management / warnings chips (one row) ---------------------------- */
+
+.pv-quickrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+}
+
+.pv-quickrow .pv-quick {
+  flex: 1 1 auto;
+}
+
+.pv-info {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.pv-info[hidden] {
+  display: none;
+}
+
+.pv-infochip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 100%;
+  padding: 0 6px 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pv-infochip svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.pv-infochip svg:last-child {
+  width: 12px;
+  height: 12px;
+  opacity: .7;
+  transition: transform var(--t-fast) var(--ease);
+}
+
+.pv-infochip[aria-expanded="true"] svg:last-child {
+  transform: rotate(180deg);
+}
+
+.pv-infochip.is-gold {
+  border-color: var(--gold-line);
+  color: var(--text);
+}
+
+.pv-infochip.is-gold svg:first-child {
+  color: var(--gold);
+}
+
+.pv-infochip.is-amber {
+  border-color: var(--amber-line);
+  background: var(--amber-soft);
+  color: var(--text);
+}
+
+.pv-infochip.is-amber svg:first-child {
+  color: var(--amber);
+}
+
+.pv-infochip:hover {
+  border-color: var(--gold-line);
+}
+
+.pv-infopanel[hidden] {
+  display: none;
 }
 
 .pv-managed {
@@ -476,6 +765,11 @@
   border: 1px solid var(--amber-line);
   border-radius: var(--radius-sm);
   background: var(--amber-soft);
+  padding: 8px 10px 2px;
+}
+
+.pv-warn > .pv-warn-hint {
+  margin-bottom: 6px;
 }
 
 .pv-warn > summary {
@@ -527,7 +821,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 2px 10px 10px;
+  padding: 2px 0 8px;
 }
 
 .pv-warn li {
@@ -913,7 +1207,8 @@
 
 /* sections */
 
-.pv-sec th {
+.pv-sec th,
+.pv-table .pv-sec th {
   padding: 0;
   border-bottom: 1px solid var(--line-strong);
   background: var(--sunken);
@@ -930,7 +1225,7 @@
   align-items: center;
   gap: 4px 10px;
   min-height: 36px;
-  padding: 6px 10px 6px 14px;
+  padding: 5px 10px 5px 14px;
   font-size: 12.5px;
   font-weight: 400;
 }
@@ -1191,11 +1486,50 @@ mark.pv-hit {
 .pv-badge.b-group { color: var(--gold); border-color: var(--gold-line); background: var(--gold-soft); }
 .pv-badge.b-inherit { color: var(--gold); border-color: var(--gold-line); border-style: dashed; background: transparent; }
 .pv-badge.b-inactive { color: var(--muted); border-style: dashed; background: transparent; }
-.pv-badge.b-log { color: var(--sky); border-color: var(--sky-line); background: var(--sky-soft); }
-.pv-badge.b-sched,
-.pv-badge.b-svc { color: var(--violet); border-color: var(--violet-line); background: var(--violet-soft); }
-.pv-badge.b-tunnel { color: var(--teal); border-color: var(--teal-line); background: var(--teal-soft); }
-.pv-badge.b-match { color: var(--sky); border-color: var(--sky-line); }
+/* Log, count, schedule, services, tunnel, identity: settings, not signals. One neutral outline chip,
+   told apart by text and a small icon (sky, violet, teal and amber keep their signal meanings). */
+.pv-badge.b-note {
+  gap: 4px;
+  padding-left: 5px;
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+}
+
+.pv-badge.b-note svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  color: var(--faint);
+}
+
+.pv-badge.b-note > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the query mark in the Application cell: "any port" (neutral) or "port ?" (not known: amber) */
+.pv-qmark {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin-top: 3px;
+  padding: 0 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 5px;
+  color: var(--muted);
+  font: 600 10.5px/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.pv-qmark[data-mark="unknown"] {
+  border-color: var(--amber-line);
+  color: var(--amber);
+}
+
+.pv-qmark[hidden] {
+  display: none;
+}
 .pv-badge.b-warn { color: var(--amber); border-color: var(--amber-line); background: var(--amber-soft); font-weight: 600; }
 
 .pv-direct {
@@ -1839,6 +2173,71 @@ button.pv-ord-name:hover {
   border-color: var(--deny-line);
 }
 
+/* hints, not values: faint and italic, so an empty form never looks filled in */
+.pv-ex-input::placeholder {
+  color: var(--faint);
+  font-style: italic;
+  opacity: 1;
+}
+
+/* selects drawn like the inputs: native chevron off, an inline SVG chevron on the right */
+.pv-ex-selwrap {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.pv-ex-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 28px;
+  background-image: none;
+  cursor: pointer;
+}
+
+.pv-ex-chev {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.pv-ex-chev svg {
+  width: 14px;
+  height: 14px;
+}
+
+.pv-ex-f-proto {
+  min-width: 120px;
+}
+
+/* what the policy names for each <placeholder> of the match-policies example */
+.pv-cands {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.pv-cands dt {
+  color: var(--faint);
+}
+
+.pv-cands dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .pv-ex-err {
   color: var(--deny);
   font-size: 11px;
@@ -2343,11 +2742,24 @@ button.pv-ord-name:hover {
   white-space: nowrap;
 }
 
-.ob-kind.k-set { color: var(--violet); border-color: var(--violet-line); background: var(--violet-soft); }
-.ob-kind.k-prefix { color: var(--sky); border-color: var(--sky-line); }
-.ob-kind.k-range { color: var(--teal); border-color: var(--teal-line); }
-.ob-kind.k-dns { color: var(--amber); border-color: var(--amber-line); }
-.ob-kind.k-app { color: var(--sky); border-color: var(--sky-line); }
+/* Kinds are neutral outline chips, told apart by text and a glyph: signal colours (violet = NAT,
+   amber = reject/warning, teal = interfaces, sky = info) would imply meanings they do not have. */
+.ob-kind {
+  gap: 4px;
+  background: transparent;
+}
+
+.ob-kind::before {
+  color: var(--faint);
+  font-weight: 700;
+}
+
+.ob-kind.k-prefix::before { content: "/"; }
+.ob-kind.k-range::before { content: "\22EF"; }
+.ob-kind.k-set::before { content: "{}"; }
+.ob-kind.k-dns::before { content: "@"; }
+.ob-kind.k-wildcard::before { content: "*"; }
+.ob-kind.k-app::before { content: "\2192"; }
 
 .ob-members {
   display: flex;
@@ -2390,6 +2802,56 @@ button.pv-ord-name:hover {
 
 .ob-row .pv-name {
   font-size: 12.5px;
+}
+
+/* Zones at 1280 px and wider: list and detail side by side */
+
+.ob-md {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+.ob-md-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.ob-md .ob-zones .c-proto,
+.ob-md .ob-zones .c-screen,
+.ob-md .ob-zones .c-prov {
+  display: none;
+}
+
+.ob-md .ob-zones col.c-name { width: 21%; }
+.ob-md .ob-zones col.c-ifaces { width: 31%; }
+.ob-md .ob-zones col.c-svc { width: 28%; }
+.ob-md .ob-zones col.c-used { width: 20%; }
+
+.ob-md .ob-zones thead th {
+  white-space: normal;
+  text-overflow: clip;
+}
+
+.ob-md-pane {
+  position: sticky;
+  top: var(--s3);
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  background-image: linear-gradient(180deg, var(--raised), transparent 120px);
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.ob-md-pane > .pv-detail {
+  gap: var(--s4);
 }
 
 /* detail panels */
@@ -2532,6 +2994,50 @@ button.pv-ord-name:hover {
 }
 
 @media (max-width: 640px) {
+  /* Object cards in two lines: the name, then the non-empty fields joined by "·" (no labels). */
+  .ob-table tr.ob-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 3px 0;
+    padding: 8px 12px;
+  }
+  .ob-table tr.ob-row > th.c-name {
+    flex: 1 1 100%;
+  }
+  .ob-table tr.ob-row td[data-label] {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 6px;
+    max-width: 100%;
+    font-size: 12px;
+  }
+  .ob-table tr.ob-row td.is-empty {
+    display: none;
+  }
+  .ob-table tr.ob-row td[data-label]::before {
+    content: none;
+  }
+  .ob-table tr.ob-row td[data-label]:not(.is-empty) ~ td[data-label]:not(.is-empty)::before {
+    content: "\00b7";
+    margin: 0 0 0 7px;
+    color: var(--faint);
+    font: inherit;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .ob-table tr.ob-row td[data-label] > * {
+    grid-column: auto;
+  }
+  .ob-table .ob-ifaces {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+  }
+  .ob-table .pv-badges {
+    display: inline-flex;
+  }
   .ob-tab {
     font-size: 12px;
     gap: 5px;

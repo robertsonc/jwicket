@@ -1062,7 +1062,9 @@ function renderTopbar() {
   } else if (mg && mg.status !== 'ok') {
     TB.managed.hidden = false;
     TB.managed.className = 'chip chip-managed';
-    put(TB.managed, icon('broadcast'), h('span', { class: 'muted shrink' }, 'managed from: unknown'));
+    // Like the known variant: "managed from" is the part that hides when the bar is tight, so the
+    // chip still reads "(icon) unknown" rather than a bare icon.
+    put(TB.managed, icon('broadcast'), h('span', { class: 'muted shrink first' }, 'managed from:'), h('span', { class: 'shrink' }, 'unknown'));
     TB.managed.setAttribute('aria-label', 'Central management: not known. Details.');
     TB.managed.title = `Central management is read from the configuration, which could not be read (${mg.status}). Another system may also manage this device.`;
   } else {

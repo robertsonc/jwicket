@@ -24,7 +24,8 @@ const SEP = ' \u00b7 ';
 const ARROW = '\u2192';
 const LIST_LIMIT = 4;
 const AGE_TICK_MS = 30000;
-const SUMMARY_PREF = 'jwicket.policies.summary'; // UI preference only (never device data)
+const SUMMARY_PREF = 'jwicket.policies.summary'; // UI preference only (never device data): "open" or unset
+const WIDE_MQ = '(min-width: 1600px)'; // the zone-pair matrix moves beside the table
 
 export const view = {
   id: 'policies',
@@ -370,32 +371,67 @@ function policyFields(query, allZones) {
   return f;
 }
 
-/** A host or port this policy names unambiguously, to pre-fill the match-policies template. */
-function flowExample(row) {
+export const EXAMPLE_SOURCE_PORT = '40000'; // an ordinary client (ephemeral) port; match-policies needs one
+
+const HOST_V4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+/**
+ * What the match-policies example can take from this policy, without guessing (BRIEF rule 8): a host
+ * only when a side resolves to exactly one host address, a port and protocol only when the
+ * applications resolve to exactly one port/protocol pair. Otherwise the CLI keeps its <placeholder>
+ * and `candidates` lists what the policy names, for the operator to choose from.
+ */
+export function flowExample(row, Q) {
   const res = row.resolved || {};
-  const host = (list) => {
+  const side = (list) => {
+    const leaves = [];
+    let any = false;
+    let partial = false;
     for (const item of list || []) {
-      for (const leaf of item.leaves || []) {
-        const value = String(leaf.value || '');
-        if (leaf.kind === 'prefix' && /^\d{1,3}(\.\d{1,3}){3}\/32$/.test(value)) return value.slice(0, -3);
-        if (leaf.kind === 'prefix' && /^[0-9a-f:]+\/128$/i.test(value)) return value.slice(0, -4);
-      }
+      if (item.kind === 'any') any = true;
+      else if (item.kind === 'address' || item.kind === 'set') {
+        leaves.push(...(item.leaves || []).map((l) => ({ ...l, via: item.name })));
+        if (item.truncated) partial = true;
+      } else partial = true;
     }
-    return null;
+    let host = null;
+    if (!any && !partial && leaves.length === 1 && leaves[0].kind === 'prefix') {
+      const v = String(leaves[0].value || '');
+      if (/^\d{1,3}(\.\d{1,3}){3}\/32$/.test(v)) host = v.slice(0, -3);
+      else if (/^[0-9a-f:]+\/128$/i.test(v)) host = v.slice(0, -4);
+      else if (HOST_V4.test(v)) host = v;
+    }
+    return { host, any, leaves, partial };
   };
-  let proto = null;
-  let port = null;
-  for (const app of res.application || []) {
-    for (const leaf of app.leaves || []) {
-      if (!leaf.predefined && leaf.protocol && /^\d+$/.test(String(leaf.destination_port || ''))) {
-        proto = leaf.protocol;
-        port = leaf.destination_port;
-        break;
+  const src = side(res.source);
+  const dst = side(res.destination);
+  const ports = Q && Q.policyPorts ? Q.policyPorts(row) : { any: false, pairs: [], unknown: [] };
+  const uniq = new Map();
+  for (const p of ports.pairs) uniq.set(`${p.protocol || '?'}/${p.port}`, p);
+  const pairs = [...uniq.values()];
+  const single = !ports.any && !ports.unknown.length && pairs.length === 1 && /^\d+$/.test(pairs[0].port) && pairs[0].protocol ? pairs[0] : null;
+  // a source port the single application itself names, else an example client port
+  let sport = EXAMPLE_SOURCE_PORT;
+  let sportNamed = false;
+  if (single) {
+    for (const ref of res.application || []) {
+      for (const l of ref.leaves || []) {
+        if (l.name === single.name && /^\d+$/.test(String(l.source_port || ''))) {
+          sport = String(l.source_port);
+          sportNamed = true;
+        }
       }
     }
-    if (port) break;
   }
-  return { src: host(res.source), dst: host(res.destination), proto, port };
+  return {
+    src: src.host,
+    dst: dst.host,
+    proto: single ? single.protocol : null,
+    port: single ? single.port : null,
+    sport,
+    sportNamed,
+    candidates: { src, dst, ports: pairs, anyPort: ports.any, unknownPorts: ports.unknown },
+  };
 }
 
 function matchPoliciesCli(scopeId, from, to, ex = {}) {
@@ -405,7 +441,7 @@ function matchPoliciesCli(scopeId, from, to, ex = {}) {
   if (sp.kind === 'tenant') words.push('tenant', cliWord(sp.name));
   words.push('from-zone', from ? cliWord(from) : '<from-zone>', 'to-zone', to ? cliWord(to) : '<to-zone>');
   words.push('source-ip', ex.src || '<source-ip>', 'destination-ip', ex.dst || '<destination-ip>');
-  words.push('source-port', ex.sport || '<source-port>', 'destination-port', ex.port || '<destination-port>');
+  words.push('source-port', ex.sport || EXAMPLE_SOURCE_PORT, 'destination-port', ex.port || '<destination-port>');
   words.push('protocol', ex.proto || '<protocol>');
   return words.join(' ');
 }
@@ -439,7 +475,8 @@ const APP_KINDS = {
   any: 'any application',
   application: 'custom application',
   set: 'application set',
-  predefined: 'predefined (junos-defaults, not expanded)',
+  predefined: 'predefined (junos-defaults)',
+  'dynamic-defaults': 'the dynamic application’s defaults',
   unresolved: 'not found',
 };
 
@@ -471,16 +508,19 @@ class PoliciesView {
     this.termsKey = '';
     this.sel = null;
     this.wantSel = null;
+    this.wantName = null;
     this.cursor = -1;
     this.visible = [];
     this.panelToken = 0;
     this.panelKind = null;
     this.panelIdx = -1;
     this.panelLive = null;
-    this.warnOpen = false;
+    this.infoOpen = null;
     this.zonesAll = [];
     this.trs = [];
     this.liveCells = [];
+    this.qmarks = [];
+    this.markStamps = [];
     this.sections = [];
     this.mxCells = [];
     this.fields = this.Q && this.Q.FIELDS && this.Q.FIELDS.policies ? policyFields(this.Q, () => this.zonesAll) : null;
@@ -494,6 +534,9 @@ class PoliciesView {
     this.onKeyBound = (e) => this.onKey(e);
     document.addEventListener('keydown', this.onKeyBound);
     this.ageTimer = setInterval(() => this.renderSub(), AGE_TICK_MS);
+    this.mqWide = typeof window.matchMedia === 'function' ? window.matchMedia(WIDE_MQ) : null;
+    this.onWide = () => this.placeMatrix();
+    if (this.mqWide && this.mqWide.addEventListener) this.mqWide.addEventListener('change', this.onWide);
     this.readRoute(ctx.route, true);
     this.load(false);
   }
@@ -539,6 +582,7 @@ class PoliciesView {
     this.model = null;
     this.sel = null;
     this.wantSel = null;
+    this.wantName = null;
     this.cursor = -1;
     this.load(false);
   }
@@ -557,6 +601,7 @@ class PoliciesView {
     clearInterval(this.ageTimer);
     for (const off of this.offs) off();
     document.removeEventListener('keydown', this.onKeyBound);
+    if (this.mqWide && this.mqWide.removeEventListener) this.mqWide.removeEventListener('change', this.onWide);
     if (this.bar) this.bar.destroy();
   }
 
@@ -569,6 +614,9 @@ class PoliciesView {
       if (this.bar) this.bar.setValue(q);
       const parsed = this.bar ? this.bar.parsed : this.Q ? this.Q.parse(q, { view: 'policies' }) : { ast: null, error: null };
       this.setAst(parsed.error ? null : parsed.ast, false);
+      // A link that names one policy ("#/policies?q=name:allow-web", from a log line or the deny
+      // ticker) opens it, with its evaluation order, when the name is used in one place only.
+      this.wantName = !sel && !parsed.error ? this.singleName(parsed.ast) : null;
     }
     if (sel !== this.sel) {
       if (sel) {
@@ -578,7 +626,17 @@ class PoliciesView {
         this.sel = null;
         this.ctx.ui.closePanel();
       }
+    } else if (this.wantName) {
+      this.tryOpenWanted();
     }
+  }
+
+  /** The policy name when a query is exactly one name:<value> term (no wildcard, no alternatives). */
+  singleName(ast) {
+    if (!ast || ast.type !== 'term' || !ast.key || (ast.op !== ':' && ast.op !== '=') || ast.values.length !== 1) return null;
+    const v = ast.values[0];
+    if (v.kind === 'regex' || v.text.includes('*') || keyName(this.fields, ast.key) !== 'name') return null;
+    return v.text;
   }
 
   saveRoute(push = false) {
@@ -609,9 +667,9 @@ class PoliciesView {
     );
     this.summaryBtn = h(
       'button',
-      { class: 'btn ghost', type: 'button', 'aria-controls': 'pv-top', on: { click: () => this.toggleSummary() } },
-      icon('grid'),
-      h('span', { class: 'pv-hide-sm' }, 'Summary'),
+      { class: 'btn sm ghost pv-ss-toggle', type: 'button', 'aria-controls': 'pv-top', on: { click: () => this.toggleSummary() } },
+      h('span', null, 'Summary'),
+      icon('chevron-down'),
     );
     this.explainBtn = h(
       'button',
@@ -623,11 +681,14 @@ class PoliciesView {
       'div',
       { class: 'view-head pv-head' },
       h('div', { class: 'pv-titles' }, h('h1', { class: 'view-title' }, 'Policies'), this.subEl),
-      h('div', { class: 'view-actions' }, this.summaryBtn, this.explainBtn, this.exportSeg, this.refreshBtn),
+      h('div', { class: 'view-actions' }, this.explainBtn, this.exportSeg, this.refreshBtn),
     );
     this.noticeEl = h('div', { class: 'pv-notices' });
     this.stateEl = h('div', { class: 'pv-state', hidden: true });
-    this.topEl = h('div', { class: 'pv-top', id: 'pv-top' });
+    this.stripEl = h('section', { class: 'pv-sumstrip', 'aria-label': 'Evaluation order and summary' });
+    this.cardsEl = h('div', { class: 'pv-cards' });
+    this.topEl = h('div', { class: 'pv-top', id: 'pv-top' }, this.cardsEl);
+    this.sideEl = h('aside', { class: 'pv-side', hidden: true, 'aria-label': 'Zone pairs' });
     this.applySummaryPref();
     this.qbHost = h('div', { class: 'pv-qb' });
     const QB = this.ctx.QueryBar;
@@ -647,39 +708,60 @@ class PoliciesView {
       );
     }
     this.quickEl = h('div', { class: 'pv-quick', role: 'group', 'aria-label': 'Quick filters' });
+    this.infoEl = h('div', { class: 'pv-info' });
+    this.infoPanel = h('div', { class: 'pv-infopanel', id: 'pv-infopanel', hidden: true });
     this.noteEl = h('p', { class: 'pv-filter-note', hidden: true }, 'Global policies stay listed when they apply to the chosen zones: a global policy without a zone list applies to every zone.');
     this.tableHost = h('div', { class: 'pv-tablehost' });
-    this.bodyEl = h('div', { class: 'pv-body', hidden: true }, this.topEl, h('div', { class: 'pv-filter' }, this.qbHost, this.quickEl, this.noteEl), this.tableHost);
+    this.mainEl = h(
+      'div',
+      { class: 'pv-main' },
+      h('div', { class: 'pv-main-l' }, h('div', { class: 'pv-filter' }, this.qbHost, h('div', { class: 'pv-quickrow' }, this.quickEl, this.infoEl), this.infoPanel, this.noteEl), this.tableHost),
+      this.sideEl,
+    );
+    this.bodyEl = h('div', { class: 'pv-body', hidden: true }, this.stripEl, this.topEl, this.mainEl);
     this.loadingEl = h('div', { class: 'pv-loading' }, this.ctx.dom.skeleton(3), this.ctx.dom.skeleton(5));
     this.el.append(head, this.noticeEl, this.stateEl, this.loadingEl, this.bodyEl);
     this.tableHost.addEventListener('click', (e) => this.onTableClick(e));
   }
 
   applySummaryPref() {
-    let hidden = false;
+    let open = false;
     try {
-      hidden = window.localStorage.getItem(SUMMARY_PREF) === 'hidden';
+      open = window.localStorage.getItem(SUMMARY_PREF) === 'open';
     } catch (_err) {
-      hidden = false;
+      open = false;
     }
-    this.setSummary(hidden);
+    this.setSummary(open);
   }
 
-  setSummary(hidden) {
-    this.topEl.hidden = hidden;
-    this.summaryBtn.setAttribute('aria-expanded', hidden ? 'false' : 'true');
-    this.summaryBtn.title = hidden ? 'Show the evaluation order and the zone-pair matrix' : 'Hide the evaluation order and the zone-pair matrix (more room for the table)';
+  /** The compact strip is always shown; "Summary" opens the full cards (evaluation order, matrix). */
+  setSummary(open) {
+    this.topEl.hidden = !open;
+    this.stripEl.classList.toggle('is-open', open);
+    this.summaryBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    this.summaryBtn.title = open ? 'Hide the summary cards (more room for the table)' : 'Show the evaluation order, facts and the zone-pair matrix';
   }
 
   toggleSummary() {
-    const hide = !this.topEl.hidden;
+    const open = this.topEl.hidden;
     try {
-      if (hide) window.localStorage.setItem(SUMMARY_PREF, 'hidden');
+      if (open) window.localStorage.setItem(SUMMARY_PREF, 'open');
       else window.localStorage.removeItem(SUMMARY_PREF);
     } catch (_err) {
       // Storage blocked: the choice lasts for this page only.
     }
-    this.setSummary(hide);
+    this.setSummary(open);
+  }
+
+  /** At 1600 px and wider the matrix sits in a sticky card beside the table; narrower, in the cards. */
+  placeMatrix() {
+    if (!this.mxCard) return;
+    const wide = Boolean(this.mqWide && this.mqWide.matches);
+    const host = wide ? this.sideEl : this.cardsEl;
+    if (this.mxCard.parentNode !== host) host.append(this.mxCard);
+    this.sideEl.hidden = !wide;
+    this.mainEl.classList.toggle('has-side', wide);
+    this.cardsEl.classList.toggle('single', wide);
   }
 
   renderLoading() {
@@ -787,7 +869,13 @@ class PoliciesView {
   }
 
   tryOpenWanted() {
-    if (!this.wantSel || !this.model) return;
+    if (!this.model) return;
+    if (!this.wantSel && this.wantName) {
+      const idxs = this.model.byName.get(this.wantName) || [];
+      this.wantName = null;
+      if (idxs.length === 1) this.wantSel = this.model.rows[idxs[0]].id;
+    }
+    if (!this.wantSel) return;
     const want = this.wantSel;
     this.wantSel = null;
     const idx = this.model.idById.get(want);
@@ -805,6 +893,81 @@ class PoliciesView {
   // ---- top: evaluation order, facts, matrix ----------------------------------------------------
 
   renderTop() {
+    this.renderStrip();
+    this.renderCards();
+    this.renderInfo();
+  }
+
+  /**
+   * The compact summary (one line on desktop): ① zone-pair → ② global → ③ default │ action mix │ live
+   * │ groups │ Summary ▾. The steps scroll to their section of the table.
+   */
+  renderStrip() {
+    const { h } = this;
+    const fmt = this.fmt;
+    const m = this.model;
+    const c = m.counts;
+    const dp = m.pol.default_policy;
+    const arrow = () => h('span', { class: 'pv-ss-arrow', 'aria-hidden': 'true' }, ARROW);
+    const step = (n, value, label, target, cls, tip) =>
+      h(
+        'button',
+        { class: ['pv-ss-step', cls], type: 'button', title: tip, on: { click: () => this.scrollToSection(target) } },
+        h('span', { class: 'pv-ss-n', 'aria-hidden': 'true' }, String(n)),
+        h('b', { class: 'pv-ss-v' }, value),
+        label ? h('span', { class: 'pv-ss-l' }, label) : null,
+      );
+    const flow = h(
+      'div',
+      { class: 'pv-ss-seg pv-ss-flow', role: 'group', 'aria-label': 'Junos evaluation order: first match wins' },
+      step(1, fmt.num(c.zone), 'zone-pair', 'pairs', '', `Checked first: the policies of the flow’s from-zone to to-zone pair, top to bottom (${fmt.plural(m.pairs.size, 'zone pair')})`),
+      arrow(),
+      step(2, fmt.num(c.global), 'global', 'global', '', c.global ? 'Checked next, in order, for each zone pair they apply to' : 'No global policies are configured'),
+      arrow(),
+      step(3, dp || 'deny-all', '', 'default', dp === 'permit-all' ? 'permit' : 'deny', dp ? `The default policy decides when nothing above matched (configured${m.pol.default_policy_group ? `, from group ${m.pol.default_policy_group}` : ''})` : 'No default-policy configured: the Junos default, deny-all, decides when nothing above matched'),
+    );
+    const total = Math.max(1, m.rows.length);
+    const seg = (cls, v) => (v ? h('i', { class: cls, style: { '--w': `${(v / total) * 100}%` } }) : null);
+    const mix = h(
+      'div',
+      { class: 'pv-ss-seg pv-ss-mix', title: `${fmt.plural(m.rows.length, 'policy')} in this scope` },
+      h('div', { class: 'meter pv-meter', 'aria-hidden': 'true' }, seg('permit', c.permit), seg('deny', c.deny), seg('reject', c.reject), seg('inactive', c.inactive), seg('', c.unknown)),
+      h(
+        'span',
+        { class: 'pv-mix' },
+        h('span', { class: 'act-permit' }, `${fmt.num(c.permit)} permit`),
+        SEP,
+        h('span', { class: 'act-deny' }, `${fmt.num(c.deny)} deny`),
+        SEP,
+        h('span', { class: 'act-reject' }, `${fmt.num(c.reject)} reject`),
+        SEP,
+        h('span', { class: 'muted' }, `${fmt.num(c.inactive)} inactive`),
+        c.unknown ? [SEP, h('span', { class: 'act-unknown' }, `${fmt.num(c.unknown)} no action`)] : null,
+      ),
+    );
+    this.liveStrip = h('div', { class: 'pv-ss-seg pv-ss-live' });
+    const groups = m.scope.groups || [];
+    const groupSeg = groups.length
+      ? h(
+          'div',
+          { class: 'pv-ss-seg pv-ss-groups' },
+          h('span', { class: 'pv-ss-cap' }, groups.length === 1 ? 'group' : 'groups'),
+          groups.slice(0, 3).map((g) =>
+            h(
+              'button',
+              { class: 'pv-chipbtn gold', type: 'button', title: `Show the policies with parts from configuration group ${g.name} (${g.policies})`, on: { click: () => this.toggleTerm('group', g.name) } },
+              h('span', { class: 'mono' }, g.name),
+              h('span', { class: 'pv-chipcount' }, fmt.num(g.policies)),
+            ),
+          ),
+          groups.length > 3 ? h('span', { class: 'faint' }, `+${groups.length - 3}`) : null,
+        )
+      : null;
+    this.ctx.dom.put(this.stripEl, flow, mix, this.liveStrip, groupSeg, h('span', { class: 'spacer' }), this.summaryBtn);
+  }
+
+  /** The full summary cards (opened with "Summary"): evaluation order and facts, zone-pair matrix. */
+  renderCards() {
     const { h } = this;
     const { icon, put } = this.ctx.dom;
     const fmt = this.fmt;
@@ -847,30 +1010,7 @@ class PoliciesView {
       'J-Wicket shows the order Junos checks; it does not decide which policy a flow matches. ',
       h('button', { class: 'link pv-inline-link', type: 'button', on: { click: () => this.openExplainer(null, null) } }, 'Test a flow on the device', icon('arrow-right')),
     );
-
-    // facts
-    const total = Math.max(1, m.rows.length);
-    const seg = (cls, v) => (v ? h('i', { class: cls, style: { '--w': `${(v / total) * 100}%` } }) : null);
-    const meter = h('div', { class: 'meter pv-meter', 'aria-hidden': 'true' }, seg('permit', c.permit), seg('deny', c.deny), seg('reject', c.reject), seg('inactive', c.inactive), seg('', c.unknown));
-    const mix = h(
-      'span',
-      { class: 'pv-mix' },
-      h('span', { class: 'act-permit' }, `${fmt.num(c.permit)} permit`),
-      SEP,
-      h('span', { class: 'act-deny' }, `${fmt.num(c.deny)} deny`),
-      SEP,
-      h('span', { class: 'act-reject' }, `${fmt.num(c.reject)} reject`),
-      SEP,
-      h('span', { class: 'muted' }, `${fmt.num(c.inactive)} inactive`),
-      c.unknown ? [SEP, h('span', { class: 'act-unknown' }, `${fmt.num(c.unknown)} no action`)] : null,
-    );
-    const groups = m.scope.groups || [];
     this.liveFact = h('dd', { class: 'pv-live-fact' });
-    const mixRow = h(
-      'div',
-      { class: 'pv-mixrow' },
-      h('div', { class: 'pv-mixrow-l' }, h('span', { class: 'pv-cap' }, fmt.plural(m.rows.length, 'policy')), meter, mix),
-    );
     const facts = h(
       'dl',
       { class: 'pv-facts' },
@@ -882,7 +1022,7 @@ class PoliciesView {
         h('dd', null, pol.policy_rematch ? h('span', { title: 'Existing sessions are re-checked when policies change' }, 'on: re-checked on change') : h('span', { class: 'muted' }, 'off (not configured)')),
       ),
       pol.pre_id_default_policy
-        ? h('div', { class: 'pv-fact' }, h('dt', null, 'Pre-ID default policy'), h('dd', null, 'configured', h('span', { class: 'faint' }, '\u00a0(contents not shown)')))
+        ? h('div', { class: 'pv-fact' }, h('dt', null, 'Pre-ID default policy'), h('dd', null, 'configured', h('span', { class: 'faint' }, ' (contents not shown)')))
         : null,
       h(
         'div',
@@ -891,8 +1031,8 @@ class PoliciesView {
         h(
           'dd',
           { class: 'pv-groups' },
-          groups.length
-            ? groups.map((g) =>
+          (m.scope.groups || []).length
+            ? m.scope.groups.map((g) =>
                 h(
                   'button',
                   { class: 'pv-chipbtn gold', type: 'button', title: `Show the policies with parts from group ${g.name}`, on: { click: () => this.toggleTerm('group', g.name) } },
@@ -906,18 +1046,62 @@ class PoliciesView {
     );
     const evalCard = h(
       'section',
-      { class: 'tile pv-eval', 'aria-label': 'Evaluation order and summary' },
+      { class: 'tile pv-eval', 'aria-label': 'Evaluation order and facts' },
       h('div', { class: 'tile-head' }, h('h2', { class: 'tile-title' }, icon('policies'), 'Evaluation order'), h('span', { class: 'tile-meta' }, scopeTitle(this.snap, this.ctx.store.scope))),
-      h('div', { class: 'tile-body pv-eval-body' }, flow, explain, mixRow, facts),
+      h('div', { class: 'tile-body pv-eval-body' }, flow, explain, facts),
     );
-    const matrixCard = h(
+    this.mxCard = h(
       'section',
       { class: 'tile pv-mxcard', 'aria-labelledby': 'pv-mx-title' },
-      h('div', { class: 'tile-head' }, h('h2', { class: 'tile-title', id: 'pv-mx-title' }, icon('grid'), 'Zone pairs'), h('span', { class: 'tile-meta' }, 'from \u2193  to \u2192')),
+      h('div', { class: 'tile-head' }, h('h2', { class: 'tile-title', id: 'pv-mx-title' }, icon('grid'), 'Zone pairs'), h('span', { class: 'tile-meta' }, 'from ↓  to →')),
       h('div', { class: 'tile-body' }, this.buildMatrix()),
     );
-    const strip = [this.managedStrip(), this.warningsBlock()].filter(Boolean);
-    put(this.topEl, h('div', { class: 'pv-cards' }, evalCard, matrixCard), strip.length ? h('div', { class: 'pv-strip' }, strip) : null);
+    put(this.cardsEl, evalCard);
+    put(this.sideEl);
+    this.placeMatrix();
+  }
+
+  /** Central management and warnings as two chips beside the quick filters; each opens a short panel. */
+  renderInfo() {
+    const { h } = this;
+    const { icon } = this.ctx.dom;
+    const mg = this.snap.management || {};
+    const warnings = [...(this.snap.warnings || []), ...((this.snap.scope && this.snap.scope.warnings) || [])];
+    const chips = [];
+    const chip = (key, cls, kids, title) => {
+      const on = this.infoOpen === key;
+      return h(
+        'button',
+        { class: ['pv-infochip', cls], type: 'button', title, dataset: { info: key }, 'aria-expanded': on ? 'true' : 'false', 'aria-controls': 'pv-infopanel', on: { click: () => this.toggleInfo(key) } },
+        kids,
+        icon('chevron-down'),
+      );
+    };
+    if (mg.status !== 'ok') {
+      chips.push(chip('managed', 'is-unknown', [icon('broadcast'), h('span', null, 'central management not known')], 'Whether another system manages this device could not be read'));
+    } else if (mg.managed) {
+      const names = (mg.clients || []).map((c) => c.client);
+      chips.push(chip('managed', 'is-gold', [icon('broadcast'), h('span', null, 'managed from '), h('b', { class: 'mono' }, names.slice(0, 2).join(', ')), names.length > 2 ? h('span', null, ` +${names.length - 2}`) : null], 'Another system also manages this device (outbound-ssh). Select for details.'));
+    }
+    if (warnings.length) {
+      chips.push(chip('warnings', 'is-amber', [icon('alert'), h('b', null, String(warnings.length)), h('span', null, warnings.length === 1 ? ' warning' : ' warnings')], 'What J-Wicket could not show, or what is not in effect. Select to read them.'));
+    }
+    if (!chips.some((c) => c.dataset.info === this.infoOpen)) this.infoOpen = null;
+    this.ctx.dom.put(this.infoEl, chips);
+    this.infoEl.hidden = !chips.length;
+    this.renderInfoPanel();
+  }
+
+  toggleInfo(key) {
+    this.infoOpen = this.infoOpen === key ? null : key;
+    for (const b of this.infoEl.querySelectorAll('.pv-infochip')) b.setAttribute('aria-expanded', b.dataset.info === this.infoOpen ? 'true' : 'false');
+    this.renderInfoPanel();
+  }
+
+  renderInfoPanel() {
+    const node = this.infoOpen === 'managed' ? this.managedStrip() : this.infoOpen === 'warnings' ? this.warningsBlock() : null;
+    this.ctx.dom.put(this.infoPanel, node);
+    this.infoPanel.hidden = !node;
   }
 
   managedStrip() {
@@ -968,17 +1152,12 @@ class PoliciesView {
       }
       return h('li', null, icon(/^Fixture/.test(w) ? 'info' : 'alert'), h('span', null, w));
     };
-    const det = h(
-      'details',
-      { class: 'pv-warn' },
-      h('summary', null, icon('alert'), `Warnings`, h('span', { class: 'badge amber' }, String(list.length)), h('span', { class: 'pv-warn-hint' }, 'what J-Wicket could not show, or what is not in effect')),
+    return h(
+      'div',
+      { class: 'pv-warn', role: 'note' },
+      h('p', { class: 'pv-warn-hint' }, 'What J-Wicket could not show, or what is not in effect:'),
       h('ul', null, list.map(item)),
     );
-    det.open = this.warnOpen;
-    det.addEventListener('toggle', () => {
-      this.warnOpen = det.open;
-    });
-    return det;
   }
 
   buildMatrix() {
@@ -1099,6 +1278,8 @@ class PoliciesView {
     const pol = m.pol;
     this.trs = [];
     this.liveCells = [];
+    this.qmarks = [];
+    this.markStamps = [];
     this.sections = [];
     const table = h('table', { class: 'pv-table', id: 'pv-table' });
     const cols = ['seq', 'name', 'src', 'dst', 'app', 'act', 'live', 'notes'];
@@ -1252,6 +1433,8 @@ class PoliciesView {
     const nameBtn = h('button', { class: 'pv-name', type: 'button', 'aria-haspopup': 'dialog', title: `Open ${r.name}` }, h('span', { class: 'pv-hl', dataset: { text: r.name } }, r.name));
     const liveCell = h('td', { class: 'c-live', dataset: { label: 'Live' } });
     this.liveCells[idx] = liveCell;
+    const qmark = h('span', { class: 'pv-qmark', hidden: true, dataset: { mark: '' } });
+    this.qmarks[idx] = qmark;
     return h(
       'tr',
       { class: ['pv-row', r.inactive && 'is-inactive'], dataset: { idx: String(idx) } },
@@ -1265,7 +1448,7 @@ class PoliciesView {
       ),
       h('td', { class: 'c-src', dataset: { label: 'Source' } }, this.addrList(r, 'source')),
       h('td', { class: 'c-dst', dataset: { label: 'Destination' } }, this.addrList(r, 'destination')),
-      h('td', { class: 'c-app', dataset: { label: 'Application' } }, this.appList(r)),
+      h('td', { class: 'c-app', dataset: { label: 'Application' } }, this.appList(r), qmark),
       h('td', { class: 'c-act' }, this.actionPill(r.action)),
       liveCell,
       h('td', { class: 'c-notes', dataset: { label: 'Notes' } }, h('div', { class: 'pv-badges' }, this.notes(r))),
@@ -1319,6 +1502,10 @@ class PoliciesView {
       else if (res.kind === 'application' && leaves[0] && leaves[0].protocol) {
         hint = h('span', { class: 'pv-hint' }, `${leaves[0].protocol}${leaves[0].destination_port ? `/${leaves[0].destination_port}` : ''}`);
       } else if (res.kind === 'application' && leaves[0] && leaves[0].terms) hint = h('span', { class: 'pv-hint' }, `${leaves[0].terms} terms`);
+      else if (res.kind === 'predefined' && this.Q && this.Q.PREDEFINED_APPS && this.Q.PREDEFINED_APPS[name]) {
+        const k = this.Q.PREDEFINED_APPS[name];
+        hint = h('span', { class: 'pv-hint', title: 'junos-defaults, as J-Wicket knows it' }, `${k.protocol}/${k.port}`);
+      }
       const bad = res.kind === 'unresolved' || (res.unresolved || []).length;
       ul.append(h('li', null, this.valueToken('app', name, name === 'any' && 'is-any'), hint, bad ? h('span', { class: 'pv-tag bad', title: 'No application or application set with this name is defined' }, 'not found') : null));
     });
@@ -1330,21 +1517,24 @@ class PoliciesView {
 
   notes(r) {
     const { h } = this;
+    const { icon } = this.ctx.dom;
     const out = [];
     const b = (text, cls, title) => h('span', { class: ['pv-badge', cls], title: title || text }, text);
+    // Settings that are neither a signal nor provenance: one neutral chip style, told apart by icon.
+    const nb = (iconName, text, title) => h('span', { class: 'pv-badge b-note', title: title || text }, icon(iconName, { size: 11 }), h('span', null, text));
     if (r.inactive) out.push(b(inactiveText(r), 'b-inactive', inactiveSentence(r)));
     if (r.group) out.push(b(`group ${r.group}`, 'b-group', `Comes from configuration group ${r.group}`));
     if ((r.inherited || []).length) out.push(b(`inherits ${r.inherited.join(', ')}`, 'b-inherit', `Partly inherited from another group: ${r.inherited.join(', ')}`));
     const log = [r.log && r.log.init ? 'init' : null, r.log && r.log.close ? 'close' : null].filter(Boolean);
-    if (log.length) out.push(b(`log ${log.join('+')}`, 'b-log', `Logs session-${log.join(' and session-')}`));
-    if (r.count) out.push(b('count', 'b-log', 'Counts traffic (then count)'));
-    if (r.scheduler) out.push(b(`schedule ${r.scheduler}`, 'b-sched', `In effect only while scheduler ${r.scheduler} is active`));
-    if ((r.application_services || []).length) out.push(b(`services: ${r.application_services.join(', ')}`, 'b-svc', `Application services: ${r.application_services.join(', ')}`));
-    if (r.tunnel) out.push(b(`tunnel ${r.tunnel}`, 'b-tunnel', `Permits into IPsec VPN ${r.tunnel}`));
+    if (log.length) out.push(nb('logs', `log ${log.join('+')}`, `Logs session-${log.join(' and session-')}`));
+    if (r.count) out.push(nb('rows', 'count', 'Counts traffic (then count)'));
+    if (r.scheduler) out.push(nb('clock', `schedule ${r.scheduler}`, `In effect only while scheduler ${r.scheduler} is active`));
+    if ((r.application_services || []).length) out.push(nb('shield', r.application_services.join(', '), `Application services: ${r.application_services.join(', ')}`));
+    if (r.tunnel) out.push(nb('lock', `tunnel ${r.tunnel}`, `Permits into IPsec VPN ${r.tunnel}`));
     const mm = r.match || {};
-    if ((mm.source_identity || []).length) out.push(b('source identity', 'b-match', `source-identity ${mm.source_identity.join(', ')}`));
-    if ((mm.url_category || []).length) out.push(b('URL category', 'b-match', `url-category ${mm.url_category.join(', ')}`));
-    if ((mm.source_end_user_profile || []).length) out.push(b('end-user profile', 'b-match', `source-end-user-profile ${mm.source_end_user_profile.join(', ')}`));
+    if ((mm.source_identity || []).length) out.push(nb('user', 'source identity', `source-identity ${mm.source_identity.join(', ')}`));
+    if ((mm.url_category || []).length) out.push(nb('globe', 'URL category', `url-category ${mm.url_category.join(', ')}`));
+    if ((mm.source_end_user_profile || []).length) out.push(nb('user', 'end-user profile', `source-end-user-profile ${mm.source_end_user_profile.join(', ')}`));
     if ((r.inactive_parts || []).length && !r.inactive) out.push(b('parts deactivated', 'b-warn', `Deactivated, not in effect: ${r.inactive_parts.join(', ')}`));
     if ((r.unmodeled || []).length) out.push(b('settings not shown', 'b-warn', `J-Wicket does not display: ${r.unmodeled.join(', ')}`));
     return out;
@@ -1401,20 +1591,57 @@ class PoliciesView {
   }
 
   compile() {
+    this.matchAny = null;
+    this.queryKeys = new Set();
     if (!this.Q || !this.fields) {
       this.match = () => true;
       this.terms = [];
       return;
     }
-    const fn = this.Q.compile(this.ast, this.fields, { inventory: this.snap });
-    this.match = (row) => {
+    const safe = (fn) => (row) => {
       try {
         return fn(row);
       } catch (_err) {
         return false;
       }
     };
+    // Three-valued: true, false, or null when the answer depends on what J-Wicket cannot read (an
+    // application port it does not know, an address it cannot compare); null rows stay listed, marked.
+    const tri = this.Q.compileTri || this.Q.compile;
+    this.match = safe(tri(this.ast, this.fields, { inventory: this.snap }));
+    const walk = (n) => {
+      if (!n) return;
+      if (n.type === 'and' || n.type === 'or') n.items.forEach(walk);
+      else if (n.type === 'not') walk(n.item);
+      else if (n.key) {
+        const k = keyName(this.fields, n.key);
+        if (k) this.queryKeys.add(k);
+      }
+    };
+    walk(this.ast);
+    // A second pass where application "any" covers no port tells which rows matched only through it.
+    if (this.queryKeys.has('port') && this.Q.compileTri) this.matchAny = safe(this.Q.compileTri(this.ast, this.fields, { inventory: this.snap, strictAny: true }));
     this.terms = this.ast ? this.Q.highlightTerms(this.ast) : [];
+  }
+
+  /** Why a row's answer is unknown for the current query: [{name, why}]. */
+  unknownReasons(row) {
+    const Q = this.Q;
+    const out = [];
+    if (!Q) return out;
+    if (this.queryKeys.has('port') && Q.policyPorts) out.push(...Q.policyPorts(row).unknown.map((u) => ({ ...u, what: 'port' })));
+    const sides = [];
+    if (this.queryKeys.has('src')) sides.push('source');
+    if (this.queryKeys.has('dst')) sides.push('destination');
+    if (this.queryKeys.has('addr')) sides.push('both');
+    if (Q.policyAddrUnknown) for (const side of sides) out.push(...Q.policyAddrUnknown(row, side).map((u) => ({ ...u, what: 'address' })));
+    const seen = new Set();
+    return out.filter((u) => {
+      const k = `${u.what}|${u.name}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   }
 
   applyFilter(announce) {
@@ -1422,12 +1649,25 @@ class PoliciesView {
     if (!m || !this.table) return;
     let shown = 0;
     const order = [];
+    const viaAny = [];
+    const unknown = [];
     for (const sec of this.sections) {
       let n = 0;
       for (const idx of sec.idxs) {
-        const vis = this.match(m.rows[idx]);
+        const row = m.rows[idx];
+        const res = this.match(row);
+        const vis = res !== false;
         const tr = this.trs[idx];
         if (tr && tr.hidden === vis) tr.hidden = !vis;
+        let mark = null;
+        if (vis && res === null) {
+          mark = 'unknown';
+          unknown.push(idx);
+        } else if (vis && this.matchAny && this.matchAny(row) === false) {
+          mark = 'any';
+          viaAny.push(idx);
+        }
+        this.setMark(idx, mark);
         if (vis) {
           n += 1;
           order.push(idx);
@@ -1456,12 +1696,52 @@ class PoliciesView {
     }
     this.noMatch.hidden = shown !== 0;
     if (this.bar) this.bar.setStatus(this.ast ? `${this.fmt.num(shown)} of ${this.fmt.num(total)}` : '');
+    this.renderResultNote(viaAny, unknown);
     if (this.cursor >= 0 && !order.includes(this.cursor)) this.cursor = -1;
     this.renderPressed();
     this.renderQuick();
     this.highlight();
     this.markSelected();
     if (announce) this.ctx.ui.announce(`Showing ${shown} of ${this.fmt.plural(total, 'policy')}.`);
+  }
+
+  /** The "matched only through application any" / "answer unknown" mark in a row's Application cell. */
+  setMark(idx, mark) {
+    const el = this.qmarks[idx];
+    if (!el) return;
+    const key = mark || '';
+    const stamp = mark ? `${mark}\u0000${this.text}` : '';
+    if (el.dataset.mark === key && this.markStamps[idx] === stamp) return;
+    el.dataset.mark = key;
+    this.markStamps[idx] = stamp;
+    el.hidden = !mark;
+    if (!mark) {
+      el.textContent = '';
+      el.removeAttribute('title');
+      return;
+    }
+    if (mark === 'any') {
+      el.textContent = 'any port';
+      el.title = 'Listed because its application is any, which covers every port';
+      return;
+    }
+    const reasons = this.unknownReasons(this.model.rows[idx]);
+    const what = new Set(reasons.map((r) => r.what));
+    el.textContent = what.size === 1 && what.has('address') ? 'address ?' : what.size === 1 && what.has('port') ? 'port ?' : 'not known';
+    el.title = `Kept: J-Wicket cannot tell whether this policy matches. ${reasons.map((r) => `${r.name}: ${r.why}`).join('; ') || 'Part of the match is not readable.'}`;
+  }
+
+  /** One sentence under the query bar when rows matched through application any or are unknown. */
+  renderResultNote(viaAny, unknown) {
+    if (!this.bar || !this.bar.setNotice) return;
+    const fmt = this.fmt;
+    const parts = [];
+    if (viaAny.length) parts.push(`${fmt.plural(viaAny.length, 'policy matches', 'policies match')} through application any (every port), marked “any port”.`);
+    if (unknown.length) {
+      const names = [...new Set(unknown.flatMap((i) => this.unknownReasons(this.model.rows[i]).map((r) => r.name)))];
+      parts.push(`${fmt.plural(unknown.length, 'policy is', 'policies are')} kept but not certain: J-Wicket cannot read ${names.slice(0, 4).join(', ')}${names.length > 4 ? ', …' : ''} (marked “?”). The device decides: use “Explain a flow”.`);
+    }
+    this.bar.setNotice(parts.join(' '), unknown.length ? 'warn' : 'info');
   }
 
   highlight() {
@@ -1648,6 +1928,19 @@ class PoliciesView {
       }
     }
     if (this.mxLegendLive) this.mxLegendLive.hidden = !ok;
+    // compact strip
+    if (this.liveStrip) {
+      const { put } = this.ctx.dom;
+      if (this.ctx.store.scope !== 'root') {
+        put(this.liveStrip, h('span', { class: 'faint', title: 'Flow sessions are read for the root system only' }, 'live: root only'));
+      } else if (!live) {
+        put(this.liveStrip, h('button', { class: 'link pv-inline-link', type: 'button', title: 'Read the session table once (one device read) to count live sessions per policy', on: { click: () => this.readSessionsOnce() } }, icon('sessions'), 'count live'));
+      } else if (!ok) {
+        put(this.liveStrip, h('span', { class: 'muted', title: live.message || '' }, `live: ${live.status}`));
+      } else {
+        put(this.liveStrip, h('b', { class: 'num pv-ss-livenum', title: `${fmt.plural(live.total, 'live session')} in the Sessions poll at ${fmt.time(live.at)} UTC${live.truncated ? ' (partial list)' : ''}` }, fmt.num(live.total)), h('span', { class: 'pv-ss-l' }, ' live'), live.truncated ? h('span', { class: 'pill reject pv-ss-pill' }, 'partial') : null);
+      }
+    }
     // summary fact
     if (this.liveFact) {
       if (this.ctx.store.scope !== 'root') {
@@ -2047,6 +2340,8 @@ class PoliciesView {
       const body = [];
       if (item.kind === 'any') body.push(h('p', { class: 'pv-small muted' }, 'Matches every application.'));
       if (item.kind === 'unresolved') body.push(h('p', { class: 'pv-unres' }, `Not found: no application or application set named ${item.name} is defined.`));
+      if (item.kind === 'predefined') body.push(this.predefinedLine(item.name));
+      if (item.kind === 'dynamic-defaults') body.push(h('p', { class: 'pv-small muted' }, 'Unified policy: each dynamic application’s own default ports and protocols. The port filter keeps this policy and marks it “port ?”.'));
       const leaves = item.leaves || [];
       if (leaves.length && item.kind !== 'predefined') {
         body.push(
@@ -2059,7 +2354,7 @@ class PoliciesView {
               null,
               leaves.map((l) =>
                 l.predefined
-                  ? h('tr', null, h('td', { class: 'mono' }, l.name), h('td', { colspan: '3', class: 'muted' }, 'predefined (junos-defaults, not expanded)'))
+                  ? this.predefinedRow(l.name)
                   : h(
                       'tr',
                       null,
@@ -2082,6 +2377,38 @@ class PoliciesView {
       return h('div', { class: ['pv-res', item.kind === 'unresolved' && 'is-bad'] }, h('div', { class: 'pv-res-head' }, nameEl, h('span', { class: ['pv-tag', item.kind === 'unresolved' && 'bad'] }, APP_KINDS[item.kind] || item.kind)), body);
     });
     return this.section('Applications, resolved', blocks.length ? blocks : h('p', { class: 'pv-small muted' }, 'No applications in the match.'));
+  }
+
+  /** A predefined application: its factory port when J-Wicket knows it, else say the port is not read. */
+  predefinedLine(name) {
+    const { h } = this;
+    const known = this.Q && this.Q.PREDEFINED_APPS ? this.Q.PREDEFINED_APPS[name] : null;
+    if (known) {
+      return h('p', { class: 'pv-small' }, h('span', { class: 'mono' }, `${known.protocol}/${known.port}`), h('span', { class: 'muted' }, ' — the junos-defaults definition as J-Wicket knows it (the inventory does not read junos-defaults).'));
+    }
+    return h(
+      'div',
+      { class: 'pv-small' },
+      h('p', { class: 'muted' }, 'Port not read: J-Wicket does not expand junos-defaults, so the port filter keeps this policy and marks it “port ?”. To see the definition:'),
+      cliBlock(this.ctx, `show configuration groups junos-defaults applications application ${cliWord(name)}`),
+    );
+  }
+
+  predefinedRow(name) {
+    const { h } = this;
+    const known = this.Q && this.Q.PREDEFINED_APPS ? this.Q.PREDEFINED_APPS[name] : null;
+    if (known) {
+      // The fourth column is the source port; the provenance note belongs with the name.
+      return h(
+        'tr',
+        null,
+        h('td', { class: 'mono' }, name, h('span', { class: 'faint', title: 'junos-defaults, as J-Wicket knows it' }, ' predefined')),
+        h('td', { class: 'mono' }, known.protocol),
+        h('td', { class: 'mono' }, known.port),
+        h('td', { class: 'faint' }, '—'),
+      );
+    }
+    return h('tr', null, h('td', { class: 'mono' }, name), h('td', { colspan: '3', class: 'muted' }, 'predefined (junos-defaults); port not read by J-Wicket'));
   }
 
   thenSection(row) {
@@ -2201,6 +2528,37 @@ class PoliciesView {
     return kids;
   }
 
+  /** What this policy names for each <placeholder> of the match-policies example. */
+  exampleCandidates(ex) {
+    const { h } = this;
+    const c = ex.candidates;
+    const rows = [];
+    const hostList = (sd) => {
+      if (sd.any) return h('span', { class: 'muted' }, 'any address');
+      const shown = sd.leaves.slice(0, 4).map((l, i) => [i ? ', ' : null, h('span', { class: 'mono' }, l.value || l.name), l.via && l.via !== l.value ? h('span', { class: 'faint' }, ` (${l.via})`) : null]);
+      return [shown, sd.leaves.length > 4 ? h('span', { class: 'faint' }, `, +${sd.leaves.length - 4} more`) : null, sd.partial ? h('span', { class: 'faint' }, ' (list incomplete)') : null];
+    };
+    const within = (sd) => (sd.any ? hostList(sd) : [h('span', { class: 'muted' }, sd.leaves.length === 1 ? 'an address in ' : 'an address in one of '), hostList(sd)]);
+    if (!ex.src) rows.push(['source-ip', within(c.src)]);
+    if (!ex.dst) rows.push(['destination-ip', within(c.dst)]);
+    if (!ex.port) {
+      const list = c.ports.slice(0, 6).map((p, i) => [i ? ', ' : null, h('span', { class: 'mono' }, `${p.port}${p.protocol ? `/${p.protocol}` : ''}`), h('span', { class: 'faint' }, ` (${p.name})`)]);
+      const extra = [];
+      if (c.ports.length > 6) extra.push(h('span', { class: 'faint' }, `, +${c.ports.length - 6} more`));
+      if (c.anyPort) extra.push(h('span', { class: 'muted' }, `${c.ports.length ? '; ' : ''}any port (application any)`));
+      if (c.unknownPorts.length) extra.push(h('span', { class: 'muted' }, `${c.ports.length || c.anyPort ? '; ' : ''}port not read by J-Wicket: ${c.unknownPorts.map((u) => u.name).join(', ')}`));
+      rows.push(['destination-port', [list, extra]]);
+      const protos = [...new Set(c.ports.map((p) => p.protocol).filter(Boolean))];
+      if (protos.length) rows.push(['protocol', [h('span', { class: 'mono' }, protos.join(', ')), c.anyPort || c.unknownPorts.length ? h('span', { class: 'faint' }, ' (and what the other applications use)') : null]]);
+    }
+    if (!rows.length) return null;
+    return h(
+      'dl',
+      { class: 'pv-cands', 'aria-label': 'What this policy names for each placeholder' },
+      rows.map(([k, v]) => [h('dt', { class: 'mono' }, `<${k}>`), h('dd', null, v)]),
+    );
+  }
+
   evaluationSection(row, idx, scopeId) {
     const { h } = this;
     const m = this.model;
@@ -2248,10 +2606,18 @@ class PoliciesView {
         h('button', { class: 'btn sm', type: 'button', on: { click: () => this.openExplainer(null, null) } }, this.ctx.dom.icon('help'), 'Pick a zone pair to see its full order'),
       );
     }
+    const ex = flowExample(row, this.Q);
     kids.push(
       h('p', { class: 'pv-small' }, 'This shows order, not a match result. To test a flow, run on the device:'),
-      cliBlock(this.ctx, matchPoliciesCli(scopeId, from, to, flowExample(row))),
-      h('p', { class: 'pv-small muted' }, 'Values come from this policy where it names a single host or port. Replace each <placeholder> with the flow you want to test.'),
+      cliBlock(this.ctx, matchPoliciesCli(scopeId, from, to, ex)),
+      this.exampleCandidates(ex),
+      h(
+        'p',
+        { class: 'pv-small muted' },
+        'Values are filled in only where this policy names exactly one host, or exactly one port and protocol. ',
+        ex.sportNamed ? `Source port ${ex.sport} is the one its application names. ` : `Source port ${ex.sport} is an example client port (Junos needs one). `,
+        'Replace each <placeholder> with the flow you want to test.',
+      ),
     );
     const sp = scopeParts(scopeId);
     if (sp.kind !== 'root') {
@@ -2278,10 +2644,12 @@ class PoliciesView {
     }
     this.explainState = st;
     const scopeId = this.ctx.store.scope;
+    // A select drawn like the inputs: native chevron hidden, an inline SVG one on the right.
+    const selectWrap = (sel) => h('span', { class: 'pv-ex-selwrap' }, sel, h('span', { class: 'pv-ex-chev', 'aria-hidden': 'true' }, icon('chevron-down')));
     const zoneSelect = (key, label) => {
-      const sel = h('select', { class: 'input pv-ex-select', id: `pv-ex-${key}`, on: { change: () => { st[key] = sel.value || null; draw(); } } }, h('option', { value: '' }, `${label}\u2026`), m.zones.map((z) => h('option', { value: z }, z)));
+      const sel = h('select', { class: 'input pv-ex-select', id: `pv-ex-${key}`, on: { change: () => { st[key] = sel.value || null; draw(); } } }, h('option', { value: '' }, 'choose a zone'), m.zones.map((z) => h('option', { value: z }, z)));
       sel.value = st[key] || '';
-      return h('div', { class: ['field', 'pv-ex-field', `pv-ex-f-${key}`] }, h('label', { for: `pv-ex-${key}` }, label), sel);
+      return h('div', { class: ['field', 'pv-ex-field', `pv-ex-f-${key}`] }, h('label', { for: `pv-ex-${key}` }, label), selectWrap(sel));
     };
     const textField = (key, label, placeholder, check) => {
       const err = h('span', { class: 'pv-ex-err', hidden: true });
@@ -2311,7 +2679,7 @@ class PoliciesView {
     const protoSel = h(
       'select',
       { class: 'input pv-ex-select', id: 'pv-ex-proto', on: { change: () => { st.proto = protoSel.value; draw(); } } },
-      h('option', { value: '' }, 'protocol\u2026'),
+      h('option', { value: '' }, 'choose'),
       ['tcp', 'udp', 'icmp', 'icmp6', 'gre', 'esp'].map((p) => h('option', { value: p }, p)),
     );
     protoSel.value = st.proto || '';
@@ -2319,12 +2687,12 @@ class PoliciesView {
       'div',
       { class: 'pv-ex-form' },
       zoneSelect('from', 'From zone'),
-      textField('src', 'Source IP', '10.10.3.4', (s) => isIp(this.Q, s)),
-      textField('sport', 'Source port', '40000', isPort),
-      h('div', { class: 'field pv-ex-field pv-ex-f-proto' }, h('label', { for: 'pv-ex-proto' }, 'Protocol'), protoSel),
+      textField('src', 'Source IP', 'e.g. 10.10.3.4', (s) => isIp(this.Q, s)),
+      textField('sport', 'Source port', `e.g. ${EXAMPLE_SOURCE_PORT}`, isPort),
+      h('div', { class: 'field pv-ex-field pv-ex-f-proto' }, h('label', { for: 'pv-ex-proto' }, 'Protocol'), selectWrap(protoSel)),
       zoneSelect('to', 'To zone'),
-      textField('dst', 'Destination IP', '198.51.100.20', (s) => isIp(this.Q, s)),
-      textField('port', 'Destination port', '443', isPort),
+      textField('dst', 'Destination IP', 'e.g. 198.51.100.20', (s) => isIp(this.Q, s)),
+      textField('port', 'Destination port', 'e.g. 443', isPort),
     );
     const out = h('div', { class: 'pv-ex-out' });
     const draw = () => {
@@ -2345,7 +2713,7 @@ class PoliciesView {
       kids.push(
         h('h4', { class: 'pv-ex-h' }, 'Test the flow on the device'),
         cliBlock(this.ctx, matchPoliciesCli(scopeId, st.from, st.to, ex)),
-        h('p', { class: 'pv-small muted' }, 'Junos answers with the policy that matches. Fill in the fields above, or replace each <placeholder> in the command.'),
+        h('p', { class: 'pv-small muted' }, `Junos answers with the policy that matches. Fill in the fields above, or replace each <placeholder> in the command. ${ex.sport ? '' : `An empty source port uses ${EXAMPLE_SOURCE_PORT}, an example client port.`}`),
       );
       const terms = [];
       if (st.from) terms.push(`from:${qv(st.from)}`);

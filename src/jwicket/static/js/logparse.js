@@ -172,7 +172,10 @@ function readStructured(line, p, out, bare) {
       const im = idm.exec(line);
       if (im) {
         spans.push([p, p + im[0].length, 'sdid']);
-        if (!out.sdid) out.sdid = im[0];
+        if (!out.sdid) {
+          out.sdid = im[0];
+          out.sdidAt = [p, p + im[0].length];
+        }
         p += im[0].length;
       }
     }
@@ -608,11 +611,11 @@ function analyze(line, now) {
   const fields = {};
   const spans = [];
   const r = {
-    format: 'unknown', ts: null, time: null, host: null, daemon: null, pid: null, tag: null,
+    format: 'unknown', ts: null, time: null, zoned: false, host: null, daemon: null, pid: null, tag: null,
     family: 'other', severity: null, severitySource: null, facility: null, fields, message: line,
-    line, sdid: null, flow: null,
+    line, sdid: null, flow: null, hdr: null,
   };
-  const state = { spans, fields, sdid: null };
+  const state = { spans, fields, sdid: null, sdidAt: null };
   let msgStart = 0;
   let m;
   const I = (g) => (m.indices[g] ? m.indices[g] : null);
@@ -620,15 +623,21 @@ function analyze(line, now) {
     const ix = I(g);
     if (ix && ix[1] > ix[0]) spans.push([ix[0], ix[1], type, k, q]);
   };
+  // Header offsets ([start, end) into the line) for displays that paint a shorter header; a range
+  // that ends in a separator includes it (see `hdr` in parse()).
+  const hdr = { pri: null, ts: null, host: null, procid: null, sdid: null, body: 0 };
+  const withSpace = (ix) => (ix ? [ix[0], ix[1] + (line[ix[1]] === ' ' ? 1 : 0)] : null);
 
   if ((m = R_BUFFER.exec(line))) {
     r.format = 'buffer';
     r.ts = m[1] === '-' ? null : m[1];
     r.time = r.ts ? bufferTime(r.ts) : null;
+    r.zoned = Boolean(r.ts && /(?:Z|[+-]\d\d:?\d\d)$/.test(r.ts));
     r.daemon = m[2];
     r.pid = m[4] || null;
     r.tag = m[5] === '-' ? null : m[5];
     if (r.ts) span(1, 'ts');
+    if (r.ts) hdr.ts = I(1).slice();
     span(2, 'daemon', 'daemon', m[2]);
     span(3, 'pid');
     if (r.tag) span(5, 'tag', 'tag', r.tag);
@@ -641,16 +650,21 @@ function analyze(line, now) {
       r.facility = pri >> 3;
       r.severitySource = 'pri';
       span(1, 'pri');
+      hdr.pri = withSpace(I(1));
     }
     r.ts = m[4];
     r.time = isoTime(m[4]);
+    r.zoned = /(?:Z|[+-]\d\d:?\d\d)$/.test(m[4]);
     span(4, 'ts');
+    hdr.ts = I(4).slice();
     r.host = m[5] === '-' ? null : m[5];
     if (r.host) span(5, 'host', 'host', r.host);
+    hdr.host = withSpace(I(5));
     r.daemon = m[6] === '-' ? null : m[6];
     if (r.daemon) span(6, 'daemon', 'daemon', r.daemon);
     r.pid = m[7] === '-' ? null : m[7];
     if (r.pid) span(7, 'pid');
+    else hdr.procid = withSpace(I(7));
     r.tag = m[8] === '-' ? null : m[8];
     if (r.tag) span(8, 'tag', 'tag', r.tag);
     let p = m[0].length;
@@ -665,13 +679,17 @@ function analyze(line, now) {
     }
     msgStart = p;
     r.sdid = state.sdid;
+    // "[sd-id " (bracket, id and the space after it): a compact display keeps only the bracket.
+    if (state.sdidAt) hdr.sdid = [state.sdidAt[0] - 1, state.sdidAt[1] + (line[state.sdidAt[1]] === ' ' ? 1 : 0)];
   } else if ((m = R_BSD.exec(line))) {
     r.format = 'bsd';
     r.ts = m[1];
     r.time = bsdTime(m, now);
     span(1, 'ts');
+    hdr.ts = I(1).slice();
     r.host = m[10];
     span(10, 'host', 'host', m[10]);
+    hdr.host = withSpace(I(10));
     r.daemon = m[11];
     span(11, 'daemon', 'daemon', m[11]);
     r.pid = m[13] || null;
@@ -695,11 +713,15 @@ function analyze(line, now) {
     r.ts = m[1];
     r.time = bsdTime(m, now);
     span(1, 'ts');
+    hdr.ts = I(1).slice();
     r.host = m[10];
     span(10, 'host', 'host', m[10]);
+    hdr.host = withSpace(I(10));
     msgStart = m[0].length;
   }
 
+  hdr.body = msgStart;
+  r.hdr = hdr;
   r.message = line.slice(msgStart);
   if (r.severity === null) {
     const s = tagSeverity(r.tag);
@@ -776,7 +798,10 @@ function remember(cache, key, value) {
 /**
  * Parses one log line. Results without `opts` are memoised: treat them as read-only.
  * `opts.now` (ms) anchors the year of BSD timestamps, which carry none. Timestamps without a zone
- * are read as UTC (the device's local zone is not known to the browser).
+ * are read as UTC (the device's local zone is not known to the browser); `zoned` says whether the
+ * line's own timestamp carried one. `hdr` holds header offsets ([start, end) or null): `pri`, `host`
+ * and `procid` (an RFC 5424 "-") include the space after them, `sdid` covers "[" + SD-ID + space,
+ * `ts` the timestamp, `body` where the message (after structured data) starts.
  */
 export function parse(line, opts) {
   const s = String(line ?? '');
@@ -789,8 +814,9 @@ export function parse(line, opts) {
     r = analyze(s, opts && Number.isFinite(opts.now) ? opts.now : Date.now()).r;
   } catch (_err) {
     r = {
-      format: 'unknown', ts: null, time: null, host: null, daemon: null, pid: null, tag: null, family: 'other',
+      format: 'unknown', ts: null, time: null, zoned: false, host: null, daemon: null, pid: null, tag: null, family: 'other',
       severity: null, severitySource: null, facility: null, fields: {}, message: s, line: s, sdid: null, flow: null,
+      hdr: { pri: null, ts: null, host: null, procid: null, sdid: null, body: 0 },
     };
   }
   return opts ? r : remember(PARSE_CACHE, s, r);
@@ -1006,12 +1032,70 @@ function toSet(x) {
   return null;
 }
 
+// Characters that are invisible or change the direction of the text around them (C0 and C1 controls
+// other than tab, bidirectional embeddings, overrides, isolates and marks, zero-width and other
+// format characters, line and paragraph separators). Device text is attacker-influenced (user names,
+// URLs, attack names): a right-to-left override would reorder the rest of a line on screen. tokenize()
+// gives each one its own "ctl" token so a display can show it as a visible escape instead.
+const CONTROL_CLASS = '\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb';
+export const CONTROL_RE = new RegExp(`[${CONTROL_CLASS}]`);
+const CONTROL_ALL = new RegExp(`[${CONTROL_CLASS}]`, 'g');
+
+/** "U+202E" for one character. */
+export function controlName(ch) {
+  return `U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
+/** `s` with every control or format character written as "<U+XXXX>" (for copying and plain text). */
+export function escapeControls(s) {
+  const str = String(s ?? '');
+  return CONTROL_RE.test(str) ? str.replace(CONTROL_ALL, (c) => `<${controlName(c)}>`) : str;
+}
+
+/** How many control or format characters `s` holds. */
+export function countControls(s) {
+  const str = String(s ?? '');
+  if (!CONTROL_RE.test(str)) return 0;
+  return (str.match(CONTROL_ALL) || []).length;
+}
+
+/** Splits tokens around control characters; the pieces keep their type, key and filter value. */
+function splitControls(toks) {
+  const out = [];
+  for (const tk of toks) {
+    if (!CONTROL_RE.test(tk.v)) {
+      out.push(tk);
+      continue;
+    }
+    let buf = '';
+    const flush = () => {
+      if (!buf) return;
+      const piece = { t: tk.t, v: buf };
+      if (tk.k) piece.k = tk.k;
+      if (tk.t !== 'text') piece.q = tk.q !== undefined ? tk.q : tk.v;
+      out.push(piece);
+      buf = '';
+    };
+    for (const ch of tk.v) {
+      if (CONTROL_RE.test(ch)) {
+        flush();
+        out.push({ t: 'ctl', v: ch });
+      } else {
+        buf += ch;
+      }
+    }
+    flush();
+  }
+  return out;
+}
+
 /** Statistics for tests: how many lines needed the lossless fallback (should stay 0). */
 export const _stats = { fallbacks: 0 };
 
 /**
  * Tokens for one line, `[{t, v, k?, q?}]`: `t` is the highlight type (tk-<t>), `v` the exact text,
- * `k` the query key a click should filter on, `q` the filter value when it differs from `v`.
+ * `k` the query key a click should filter on, `q` the filter value when it differs from `v`. Each
+ * control or format character (CONTROL_RE) is a token of its own with type "ctl".
  * `hints` ({zones, policies, ifaces} as Sets or arrays) mark known names inside free text.
  */
 export function tokenize(line, hints) {
@@ -1040,21 +1124,24 @@ export function tokenize(line, hints) {
     _stats.fallbacks += 1;
     toks = s ? [{ t: 'text', v: s }] : [];
   }
+  if (CONTROL_RE.test(s)) toks = splitControls(toks);
   return h ? toks : remember(TOKEN_CACHE, s, toks);
 }
 
 // --- decode ----------------------------------------------------------------------------------------
 
+// Decimal units (1 kB = 1000 B), the same rule as format.bytes(), so a decoded CLOSE line and the
+// Sessions view show the same figure for the same byte count.
 function fmtBytes(n) {
   if (!Number.isFinite(n)) return null;
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const units = ['B', 'kB', 'MB', 'GB', 'TB'];
   let v = n;
   let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
+  while (Math.abs(v) >= 1000 && i < units.length - 1) {
+    v /= 1000;
     i += 1;
   }
-  return `${i === 0 ? v : v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  return `${i === 0 ? v : Math.abs(v) >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
 function fmtDuration(s) {
@@ -1211,6 +1298,145 @@ export function decode(parsed) {
     if (m) return `Interface ${m[1]} link ${tag.endsWith('UP') ? 'up' : 'down'}`;
   }
   return null;
+}
+
+// --- compact summary ---------------------------------------------------------------------------------
+
+// Structured-data keys the summary already shows (or that only repeat it).
+const SUMMARY_KEYS = new Set([
+  'source-address', 'source-port', 'destination-address', 'destination-port', 'protocol-id', 'protocol',
+  'policy-name', 'source-zone-name', 'destination-zone-name', 'nat-source-address', 'nat-source-port',
+  'nat-destination-address', 'nat-destination-port', 'src-nat-rule-type', 'dst-nat-rule-type', 'reason',
+  'bytes-from-client', 'bytes-from-server', 'elapsed-time', 'logical-system-name', 'session-id-32',
+]);
+const QUIET_ZERO = new Set(['connection-tag', 'nat-connection-tag', 'icmp-type']);
+const EVENT_BADGE = { create: 'CREATE', close: 'CLOSE', deny: 'DENY', update: 'UPDATE' };
+
+/** A short badge for an RT_FLOW tag ("CREATE", "CLOSE", "DENY"); null for other lines. */
+export function flowBadge(parsed) {
+  const fl = parsed && parsed.flow;
+  return fl ? EVENT_BADGE[fl.event] || null : null;
+}
+
+/**
+ * Display tokens for an RT_FLOW line: "src:sport → dst:dport proto · policy · from→to · SNAT/DNAT ·
+ * reason · bytes · duration", then the remaining fields as `key=value` with `f: 1` (faint). Tokens are
+ * `{t, v, k?, q?, nc?, f?}` like tokenize()'s (`nc`: not a filter value). They describe the line; they
+ * do not reproduce it. `pad` aligns the endpoints and the protocol in columns; `rest: false` leaves out
+ * the remaining fields. Null for other lines.
+ */
+export function summary(parsed, { pad = false, rest = true } = {}) {
+  const p = typeof parsed === 'string' ? parse(parsed) : parsed;
+  const fl = p && p.flow;
+  if (!fl) return null;
+  const out = [];
+  const text = (v, faint) => {
+    if (!v) return;
+    const last = out[out.length - 1];
+    if (last && last.t === 'text' && Boolean(last.f) === Boolean(faint)) last.v += v;
+    else out.push(faint ? { t: 'text', v, f: 1 } : { t: 'text', v });
+  };
+  const tok = (t, v, k, q, extra) => {
+    if (v === null || v === undefined || v === '') return;
+    const o = { t, v: String(v) };
+    if (k) o.k = k;
+    if (q !== undefined && q !== null && String(q) !== o.v) o.q = String(q);
+    if (extra) Object.assign(o, extra);
+    out.push(o);
+  };
+  const endpoint = (ip, port, kIp, kPort) => {
+    let n = 0;
+    if (ip) {
+      const v6 = ip.includes(':') && port !== null;
+      if (v6) text('[');
+      tok('ip', ip, kIp);
+      if (v6) text(']');
+      n += ip.length + (v6 ? 2 : 0);
+    } else {
+      text('?');
+      n += 1;
+    }
+    if (port !== null && port !== undefined) {
+      tok('port', `:${port}`, kPort, String(port));
+      n += String(port).length + 1;
+    }
+    return n;
+  };
+  const sep = () => text(' · ');
+  const n1 = endpoint(fl.src, fl.sport, 'src', 'sport');
+  if (pad && n1 < 21) text(' '.repeat(21 - n1));
+  tok('arrow', ' → ');
+  const n2 = endpoint(fl.dst, fl.dport, 'dst', 'dport');
+  if (pad && n2 < 21) text(' '.repeat(21 - n2));
+  // Buffer events carry the protocol beside the line (fields.protocol), not inside it.
+  const pf = p.fields && p.fields.protocol;
+  const protocol = fl.protocol || (pf && !isPlaceholder(pf) ? String(pf).toLowerCase() : null);
+  if (protocol) {
+    text(' ');
+    tok('proto', protocol, 'proto');
+    if (pad && protocol.length < 4) text(' '.repeat(4 - protocol.length));
+  }
+  if (fl.policy) {
+    sep();
+    tok('policy', fl.policy, 'policy');
+  }
+  if (fl.from || fl.to) {
+    sep();
+    if (fl.from) tok('zone', fl.from, 'from');
+    else text('?');
+    tok('arrow', ' → ');
+    if (fl.to) tok('zone', fl.to, 'to');
+    else text('?');
+  }
+  if (fl.snat) {
+    sep();
+    text('SNAT ');
+    endpoint(fl.natSrc, fl.natSport, 'natsrc', null);
+  }
+  if (fl.dnat) {
+    sep();
+    text('DNAT → ');
+    endpoint(fl.natDst, fl.natDport, 'natdst', null);
+  }
+  if (fl.reason && !isPlaceholder(fl.reason)) {
+    sep();
+    const [rt] = valueType('reason', fl.reason);
+    tok(rt === 'val' ? 'str' : rt, fl.reason, 'reason');
+  }
+  if (fl.event === 'close') {
+    if (fl.bytesClient !== null || fl.bytesServer !== null) {
+      sep();
+      tok('num', fmtBytes((fl.bytesClient || 0) + (fl.bytesServer || 0)), null, null, { nc: 1 });
+    }
+    if (fl.elapsed !== null) {
+      sep();
+      tok('num', fmtDuration(fl.elapsed), null, null, { nc: 1 });
+    }
+  }
+  if (fl.lsys) {
+    sep();
+    text('lsys ');
+    tok('val', fl.lsys, 'lsys');
+  }
+  if (fl.user) {
+    sep();
+    tok('user', fl.user, 'user');
+  }
+  if (!rest) return out;
+  // The rest, faint: session id first, then the other fields in line order, without placeholders.
+  const f = p.fields || {};
+  const keys = Object.keys(f).filter((k) => !SUMMARY_KEYS.has(k) && !isPlaceholder(f[k]) && !(QUIET_ZERO.has(k) && String(f[k]) === '0'));
+  keys.sort((a, b) => (a === 'session-id' ? -1 : b === 'session-id' ? 1 : 0));
+  if (keys.length) text('   ', true);
+  keys.forEach((k, i) => {
+    if (i) text(' ', true);
+    const value = String(f[k]);
+    const [vt, vk] = valueType(k, value);
+    tok('key', k, null, null, { f: 1 });
+    text('=', true);
+    tok(vt, /\s/.test(value) ? `"${value}"` : value, vk, value, { f: 1 });
+  });
+  return out;
 }
 
 /** True for the UI_NETCONF_CMD lines that record `user`'s own reads (J-Wicket polling noise). */

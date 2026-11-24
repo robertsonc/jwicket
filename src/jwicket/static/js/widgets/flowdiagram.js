@@ -271,9 +271,9 @@ export class FlowDiagram {
    * The device's policy index, labelled as the internal ID it is ("id 5"), never "#5": operators
    * read "#" as the rule position, which is a different number (Policies shows it).
    */
-  _policyId(x, y, m, word) {
-    const t = text(x, y, `${word} ${m.policyIndex}`, 'fd-sub fd-pid', { 'text-anchor': 'end' });
+  _policyId(x, y, m, word, withPos = false) {
     const pos = m.policyPos;
+    const t = text(x, y, `${word} ${m.policyIndex}${withPos && pos ? ` · rule ${pos.n} of ${pos.of}` : ''}`, 'fd-sub fd-pid', { 'text-anchor': 'end' });
     const where = pos ? `: ${m.policy || 'this policy'} is ${pos.n} of ${pos.of} in ${pos.where}` : '';
     t.append(svg('title', null, `Junos policy index ${m.policyIndex}, an internal ID, not the rule position${where}.`));
     return t;
@@ -502,7 +502,7 @@ export class FlowDiagram {
     srx.append(svg('rect', { x: x0, y, width: W, height: 100, rx: 12, class: 'fd-node srx' }));
     srx.append(this._stumps(14, y + 12, 0.9));
     srx.append(text(36, y + 24, 'SRX', 'fd-srx-t'));
-    srx.append(m.policyIndex ? this._policyId(W - 14, y + 24, m, 'policy id') : text(W - 14, y + 24, 'policy', 'fd-sub', { 'text-anchor': 'end' }));
+    srx.append(m.policyIndex ? this._policyId(W - 14, y + 24, m, 'policy id', true) : text(W - 14, y + 24, 'policy', 'fd-sub', { 'text-anchor': 'end' }));
     srx.append(this._policy(cx, y + 50, m, 30));
     const appLine = [m.proto, m.app].filter(Boolean).join(' · ') || '—';
     srx.append(text(cx, y + 68, clip(appLine, 34), 'fd-app', { 'text-anchor': 'middle' }));

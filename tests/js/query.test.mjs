@@ -46,7 +46,10 @@ const INVENTORY = {
           log: { init: true, close: true }, match: { source: ['corp-lan'], destination: ['dmz-jump'], application: ['junos-ssh'] },
           resolved: { source: [{ name: 'corp-lan', kind: 'address', leaves: [{ name: 'corp-lan', kind: 'prefix', value: '10.10.0.0/16' }] }], destination: [{ name: 'dmz-jump', kind: 'address', leaves: [{ name: 'dmz-jump', kind: 'prefix', value: '10.20.0.50/32' }] }], application: [{ name: 'junos-ssh', kind: 'predefined', leaves: [] }] },
         }),
-        POLICY('publish-web', 'untrust', 'dmz', { match: { source: ['any'], destination: ['web-servers'], application: ['junos-https'] } }),
+        POLICY('publish-web', 'untrust', 'dmz', {
+          match: { source: ['any'], destination: ['web-servers'], application: ['junos-https'] },
+          resolved: { source: [{ name: 'any', kind: 'any', leaves: [] }], destination: [{ name: 'web-servers', kind: 'set', leaves: [{ name: 'web-1', kind: 'prefix', value: '10.20.0.11/32' }, { name: 'web-dns', kind: 'dns', value: 'www.example.net' }] }], application: [{ name: 'junos-https', kind: 'predefined', leaves: [] }] },
+        }),
         POLICY('block-telnet', 'trust', 'untrust', { action: 'deny', inactive: true, inactive_reason: 'policy' }),
         POLICY('global-printers', 'trust', 'dmz', {
           kind: 'global', group: 'corp-baseline', match: { source: ['branch-printers'], destination: ['any'], application: ['junos-ipp'] },
@@ -293,13 +296,21 @@ test('CIDR-aware address matching (IPv4 and IPv6)', () => {
 });
 
 test('sizes, durations and integer comparisons', () => {
+  // Decimal like Junos counters and format.bytes(); KiB/MiB/GiB are 1024-based when named.
   assert.equal(q.parseSize('1500'), 1500);
-  assert.equal(q.parseSize('64k'), 65536);
-  assert.equal(q.parseSize('1M'), 1048576);
-  assert.equal(q.parseSize('1.5MB'), 1572864);
-  assert.equal(q.parseSize('2G'), 2147483648);
+  assert.equal(q.parseSize('64k'), 64000);
+  assert.equal(q.parseSize('1M'), 1000000);
+  assert.equal(q.parseSize('1.5MB'), 1500000);
+  assert.equal(q.parseSize('2G'), 2000000000);
   assert.equal(q.parseSize('10KiB'), 10240);
+  assert.equal(q.parseSize('1MiB'), 1048576);
+  assert.equal(q.parseSize('1Gi'), 1073741824);
   assert.equal(q.parseSize('1X'), null);
+  assert.equal(q.parseSize('1iB'), null);
+  // A session of 1,040,000 bytes reads "1.0 MB" in Sessions, so bytes>1M must keep it.
+  const mb = [session(9, 'allow-web', wingIn('10.10.0.9', 40009, '198.51.100.20', 443, 'tcp', 'ge-0/0/1.0', 40_000, 10), wingIn('198.51.100.20', 443, '203.0.113.2', 50009, 'tcp', 'ge-0/0/0.0', 1_000_000, 700))];
+  assert.deepEqual(ids('bytes>1M', 'sessions', mb), ['9']);
+  assert.deepEqual(ids('bytes>1MiB', 'sessions', mb), []);
   assert.equal(q.parseDuration('30'), 30);
   assert.equal(q.parseDuration('5m'), 300);
   assert.equal(q.parseDuration('1h30m'), 5400);
@@ -369,10 +380,12 @@ test('policies: names, CIDR-aware resolved addresses, ports, flags', () => {
   assert.deepEqual(names('action:deny'), ['block-telnet', 'global-blocklist']);
   assert.deepEqual(names('src:corp-lan'), ['baseline-dns', 'allow-web', 'admin-to-dmz']);
   assert.deepEqual(names('src:10.10.40.15 -src:any'), ['baseline-dns', 'allow-web', 'admin-to-dmz', 'global-printers']);
-  assert.deepEqual(names('addr:10.20.0.50 -dst:any'), ['admin-to-dmz']);
-  assert.deepEqual(names('port:8443'), ['allow-web']);
-  assert.deepEqual(names('port:22'), ['admin-to-dmz']);
-  assert.deepEqual(names('port:443'), ['allow-web']);
+  // publish-web stays: its web-servers set holds a DNS name, which an address cannot be compared with
+  assert.deepEqual(names('addr:10.20.0.50 -dst:any'), ['admin-to-dmz', 'publish-web']);
+  // application any covers every port, and a port J-Wicket cannot read keeps the policy (see below)
+  assert.deepEqual(names('port:8443'), ['allow-web', 'block-telnet', 'global-printers', 'global-blocklist']);
+  assert.deepEqual(names('port:22 -app:any'), ['admin-to-dmz', 'global-printers']);
+  assert.deepEqual(names('port:443 -app:any'), ['allow-web', 'publish-web', 'global-printers']);
   assert.deepEqual(names('inactive:yes'), ['block-telnet']);
   assert.deepEqual(names('log:init'), ['admin-to-dmz']);
   assert.deepEqual(names('log:none'), ['baseline-dns', 'publish-web', 'block-telnet', 'global-printers', 'global-blocklist']);
@@ -382,6 +395,86 @@ test('policies: names, CIDR-aware resolved addresses, ports, flags', () => {
   assert.deepEqual(names('group:corp-baseline'), ['baseline-dns', 'global-printers']);
   assert.deepEqual(names('app:junos-https'), ['allow-web', 'publish-web']);
   assert.deepEqual(names('zone:dmz action:permit'), ['admin-to-dmz', 'publish-web', 'global-printers']);
+});
+
+test('policies: application any matches every port, unknown ports are kept and reported', () => {
+  const P = INVENTORY.scope.policies.rows;
+  const tri = (s) => {
+    const f = q.compileTri(ok(s, 'policies'), q.FIELDS.policies, {});
+    return P.map((r) => [r.name, f(r)]).filter(([, v]) => v !== false).map(([n, v]) => (v === null ? `${n}?` : n));
+  };
+  // "what handles a flow to port 3389": the permit-all style rules are not hidden
+  assert.deepEqual(tri('port=3389'), ['block-telnet', 'global-printers?', 'global-blocklist']);
+  assert.deepEqual(tri('port:3389 action:deny'), ['block-telnet', 'global-blocklist']);
+  // port and port!= agree: any never fails "=", always fails "!="; unknown stays unknown both ways
+  assert.deepEqual(tri('port!=3389'), ['baseline-dns', 'allow-web', 'admin-to-dmz', 'publish-web', 'global-printers?']);
+  assert.deepEqual(tri('-port:443'), ['baseline-dns', 'admin-to-dmz', 'global-printers?']);
+  assert.deepEqual(tri('port>=8000'), ['allow-web', 'block-telnet', 'global-printers?', 'global-blocklist']);
+  assert.deepEqual(tri('port:443'), ['allow-web', 'publish-web', 'block-telnet', 'global-printers?', 'global-blocklist']);
+  // strictAny: the view's second pass, to say how many rows matched only through application any
+  const strict = q.compileTri(ok('port:3389', 'policies'), q.FIELDS.policies, { strictAny: true });
+  assert.deepEqual(P.filter((r) => strict(r) !== false).map((r) => r.name), ['global-printers']);
+  // compile() keeps unknown rows
+  assert.deepEqual(ids('port:3389', 'policies', P, {}), ['block-telnet', 'global-printers', 'global-blocklist']);
+  const ports = q.policyPorts(P.find((r) => r.name === 'allow-web'));
+  assert.deepEqual(ports.pairs.map((x) => `${x.port}/${x.protocol} ${x.name}`), ['443/tcp junos-https', '8443/tcp tcp-8443']);
+  assert.equal(ports.any, false);
+  assert.deepEqual(q.policyPorts(P.find((r) => r.name === 'global-printers')).unknown.map((x) => x.name), ['junos-ipp']);
+  const named = { resolved: { application: [{ name: 'web', kind: 'application', leaves: [{ name: 'web', protocol: 'tcp', destination_port: 'https' }] }, { name: 'ping', kind: 'application', leaves: [{ name: 'ping', protocol: 'icmp' }] }, { name: 'odd', kind: 'application', leaves: [{ name: 'odd', protocol: 'tcp', destination_port: 'kerberos-sec' }] }] } };
+  assert.deepEqual(q.policyPorts(named).pairs.map((x) => x.port), ['443']);
+  assert.deepEqual(q.policyPorts(named).unknown.map((x) => x.name), ['odd']);
+});
+
+test('policies: an address cannot be compared with a DNS name; wildcards match prefixes as in Sessions', () => {
+  const P = INVENTORY.scope.policies.rows;
+  const tri = (s) => {
+    const f = q.compileTri(ok(s, 'policies'), q.FIELDS.policies, {});
+    return P.map((r) => [r.name, f(r)]).filter(([, v]) => v !== false).map(([n, v]) => (v === null ? `${n}?` : n));
+  };
+  // web-servers holds a DNS name: an address query cannot rule it out
+  assert.deepEqual(tri('dst:10.20.0.99 -dst:any'), ['publish-web?']);
+  assert.deepEqual(tri('dst:10.20.0.11 -dst:any'), ['publish-web']);
+  assert.deepEqual(tri('dst:web-servers'), ['publish-web'], 'names are known: no unknown');
+  // 10.10.0.1* holds 10.10.0.1, 10.10.0.10-19 and 10.10.0.100-199: inside corp-lan (10.10.0.0/16)
+  assert.deepEqual(tri('src:10.10.0.1* -src:any'), ['baseline-dns', 'allow-web', 'admin-to-dmz']);
+  // branch-printers is 10.10.40.10-10.10.40.19
+  assert.deepEqual(tri('src:10.10.40.1* -src:corp-lan -src:any'), ['global-printers']);
+  assert.deepEqual(tri('src:10.10.40.2* -src:corp-lan -src:any'), []);
+  // the same wildcard over single addresses in Sessions
+  assert.deepEqual(ids('src:10.10.0.1*'), ['1', '2']);
+  assert.deepEqual(ids('src:10.10.0.2*'), ['4']);
+});
+
+test('wildcards and regular expressions stay fast on long text', () => {
+  const g = q.globMatcher('x*x*x*x*y', false);
+  const line = 'x'.repeat(400);
+  const t0 = Date.now();
+  for (let i = 0; i < 2000; i++) assert.equal(g(line), false);
+  assert.ok(Date.now() - t0 < 500, 'linear-time wildcard');
+  assert.equal(q.globMatcher('RT_FLOW*CLOSE*443', false)('rt_flow_session_close ... 10.20.0.11/443'), true);
+  assert.equal(q.globMatcher('ab*cd', true)('abXcd'), true);
+  assert.equal(q.globMatcher('ab*cd', true)('abcdX'), false);
+  assert.equal(q.globMatcher('a*a', true)('a'), false, 'prefix and suffix cannot overlap');
+  assert.equal(q.globMatcher('*', true)(''), true);
+  const lines = Array.from({ length: 50 }, (_, i) => ({ line: `${'a'.repeat(577)} ${i}`, fields: {} }));
+  const f = q.compile(ok('a*a*a*a*q', 'logs'), q.FIELDS.logs, {});
+  const t1 = Date.now();
+  assert.deepEqual(lines.filter(f), []);
+  assert.ok(Date.now() - t1 < 500, 'no backtracking on 577-character lines');
+  assert.ok(q.REGEX_INPUT_MAX >= 1024);
+});
+
+test('filterTimed stops at the budget and says so', () => {
+  let t = 0;
+  const clock = () => t;
+  const rows = Array.from({ length: 1000 }, (_, i) => i);
+  const res = q.filterTimed(rows, (r) => { t += 1; return r % 2 === 0; }, 200, clock);
+  assert.equal(res.complete, false);
+  assert.ok(res.checked < 1000 && res.checked >= 200);
+  const all = q.filterTimed(rows, (r) => r < 3, 200, () => 0);
+  assert.deepEqual(all.rows, [0, 1, 2]);
+  assert.equal(all.complete, true);
+  assert.equal(all.checked, 1000);
 });
 
 test('logs fields over parsed lines: severity order, NAT, time and age', () => {

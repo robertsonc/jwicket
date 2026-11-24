@@ -56,6 +56,20 @@ function scopeKindLabel(id) {
   return 'Root system';
 }
 
+/**
+ * The Policies row id ("sel") for a policy named on a log line. A name used in several zone pairs
+ * is resolved with the line's own zones (a global policy with no zones applies to any); null when
+ * the inventory does not know the name or the zones do not single one row out.
+ */
+function policySel(idx, name, from, to) {
+  const p = idx ? idx.get(name) : null;
+  if (!p) return null;
+  if (!p.ambiguous) return p.id || null;
+  const fits = (list, z) => !list || !list.length || (z !== null && z !== undefined && list.includes(z));
+  const hits = (p.all || []).filter((e) => fits(e.from, from) && fits(e.to, to));
+  return hits.length === 1 ? hits[0].id || null : null;
+}
+
 function tile(cls, title, iconName) {
   const meta = h('div', { class: 'tile-meta' });
   const body = h('div', { class: 'tile-body' }, skeleton(3));
@@ -1184,7 +1198,7 @@ class Overview {
     const label = `Denied ${d.src || '?'} to ${d.dst || '?'} port ${d.dport || '?'} ${proto}${d.policy ? ` by policy ${d.policy}` : ''}${d.count > 1 ? `, ${d.count} times` : ''}`;
     const policy =
       d.policy && d.policy !== 'N/A'
-        ? h('button', { class: 'policy-link', type: 'button', title: `Open policy ${d.policy}`, on: { click: () => this.ctx.navigate('policies', { q: `name:${quote(d.policy)}` }) } }, d.policy)
+        ? h('button', { class: 'policy-link', type: 'button', title: `Open policy ${d.policy}`, on: { click: () => this.ctx.navigate('policies', { q: `name:${quote(d.policy)}`, sel: policySel(this.ctx.store.policyIndex(), d.policy, d.from, d.to) }) } }, d.policy)
         : h('span', { class: 'faint mono', title: 'The log line names no policy' }, 'policy N/A');
     return h(
       'div',

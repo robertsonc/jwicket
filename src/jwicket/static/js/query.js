@@ -11,9 +11,14 @@
 //   value  := word | "quoted" | 'quoted' | /regex/flags | v1|v2|v3   ("|" inside a value: any of)
 //
 // Values are typed by the key: addresses are CIDR-aware (src:10.10.0.0/16, 10.10.*), sizes take k/M/G
-// (bytes>1M, 1024-based), durations take s/m/h/d (dur>5m), words take * wildcards, text matches are
-// case-insensitive. plan() splits a query into what the device can filter (sessions RPC parameters,
-// log substring terms, the on-box report expression) and what the browser filters.
+// (bytes>1M, decimal like Junos counters; KiB/MiB for 1024-based), durations take s/m/h/d (dur>5m),
+// words take * wildcards (matched in linear time), text matches are case-insensitive. plan() splits a
+// query into what the device can filter (sessions RPC parameters, log substring terms, the on-box
+// report expression) and what the browser filters.
+//
+// Policies are matched three-valued (compileTri): application "any" covers every port, and a term
+// J-Wicket cannot decide (a predefined application port it does not know, an address compared with a
+// DNS name) is unknown, so the view keeps the policy and says why instead of hiding it.
 
 // --- errors -----------------------------------------------------------------------------------------
 
@@ -149,13 +154,18 @@ function isLiteralWord(w) {
 
 // --- sizes, durations, times --------------------------------------------------------------------------
 
-const SIZE_UNITS = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
+// Decimal, as network counters, Junos and format.bytes() count (1 kB = 1000 B); KiB/MiB/GiB/TiB are
+// 1024-based when asked for by name.
+const SIZE_UNITS = { '': 1, k: 1e3, m: 1e6, g: 1e9, t: 1e12 };
+const SIZE_UNITS_BINARY = { k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
 
-/** "1500", "64k", "1.5M", "2GB", "10KiB" -> bytes (1024-based); null when not a size. */
+/** "1500", "64k", "1.5M", "2GB" (decimal), "10KiB", "1MiB" (1024-based) -> bytes; null when not a size. */
 export function parseSize(text) {
-  const m = /^(\d+(?:\.\d+)?)\s*([kmgt]?)(i?b)?$/i.exec(String(text).trim());
+  const m = /^(\d+(?:\.\d+)?)\s*(?:([kmgt])(i)?)?(b)?$/i.exec(String(text).trim());
   if (!m) return null;
-  return Math.round(Number(m[1]) * SIZE_UNITS[m[2].toLowerCase()]);
+  const unit = (m[2] || '').toLowerCase();
+  const factor = unit && m[3] ? SIZE_UNITS_BINARY[unit] : SIZE_UNITS[unit];
+  return Math.round(Number(m[1]) * factor);
 }
 
 const DUR_UNITS = { ms: 0.001, s: 1, m: 60, min: 60, h: 3600, d: 86400, w: 604800 };
@@ -706,13 +716,84 @@ function sessionZones(row, ctx, side) {
   return z ? z[side] || [] : [];
 }
 
-// Predefined Junos applications whose ports are part of the factory defaults (policy "port:" filter).
-const PREDEFINED_PORTS = {
-  'junos-http': '80', 'junos-https': '443', 'junos-ssh': '22', 'junos-telnet': '23', 'junos-ftp': '21',
-  'junos-smtp': '25', 'junos-dns-udp': '53', 'junos-dns-tcp': '53', 'junos-ntp': '123', 'junos-pop3': '110',
-  'junos-imap': '143', 'junos-imaps': '993', 'junos-ldap': '389', 'junos-syslog': '514', 'junos-bgp': '179',
-  'junos-tftp': '69', 'junos-ms-sql': '1433',
+// Predefined Junos applications (junos-defaults) whose protocol and destination port J-Wicket knows.
+// The inventory does not expand junos-defaults, so any other predefined application has a port that
+// is not known here: the policy filter keeps such a policy and marks it instead of guessing.
+export const PREDEFINED_APPS = Object.freeze({
+  'junos-http': { protocol: 'tcp', port: '80' },
+  'junos-https': { protocol: 'tcp', port: '443' },
+  'junos-ssh': { protocol: 'tcp', port: '22' },
+  'junos-telnet': { protocol: 'tcp', port: '23' },
+  'junos-ftp': { protocol: 'tcp', port: '21' },
+  'junos-smtp': { protocol: 'tcp', port: '25' },
+  'junos-dns-udp': { protocol: 'udp', port: '53' },
+  'junos-dns-tcp': { protocol: 'tcp', port: '53' },
+  'junos-ntp': { protocol: 'udp', port: '123' },
+  'junos-pop3': { protocol: 'tcp', port: '110' },
+  'junos-imap': { protocol: 'tcp', port: '143' },
+  'junos-imaps': { protocol: 'tcp', port: '993' },
+  'junos-ldap': { protocol: 'tcp', port: '389' },
+  'junos-syslog': { protocol: 'udp', port: '514' },
+  'junos-bgp': { protocol: 'tcp', port: '179' },
+  'junos-tftp': { protocol: 'udp', port: '69' },
+  'junos-ms-sql': { protocol: 'tcp', port: '1433' },
+});
+
+// Port keywords Junos accepts in "destination-port", for the common IANA services.
+const NAMED_PORTS = {
+  ftp: '21', ssh: '22', telnet: '23', smtp: '25', domain: '53', tftp: '69', http: '80', pop3: '110',
+  ntp: '123', imap: '143', snmp: '161', snmptrap: '162', bgp: '179', ldap: '389', https: '443', syslog: '514',
 };
+const PORTS_CACHE = new WeakMap();
+
+const PORTLESS = new Set(['icmp', 'icmp6', 'icmpv6', 'gre', 'esp', 'ah', 'ospf', 'pim', 'igmp', 'vrrp', '1', '2', '47', '50', '51', '58', '89', '103', '112']);
+
+/**
+ * What a policy's applications say about destination ports, for the "port:" filter and the
+ * match-policies example: `{ any, pairs: [{name, protocol, port}], unknown: [{name, why}] }`. "any"
+ * (application any) covers every port; `unknown` lists applications whose port J-Wicket cannot read
+ * (predefined applications it does not know, applications with terms or without a port, names it
+ * could not resolve). Portless protocols (ICMP, GRE, ...) add nothing.
+ */
+export function policyPorts(row) {
+  if (row && typeof row === 'object') {
+    const hit = PORTS_CACHE.get(row);
+    if (hit) return hit;
+  }
+  const out = { any: false, pairs: [], unknown: [] };
+  const leaf = (l) => {
+    if (!l || !l.name) return;
+    if (l.predefined) {
+      const p = PREDEFINED_APPS[l.name];
+      if (p) out.pairs.push({ name: l.name, protocol: p.protocol, port: p.port, predefined: true });
+      else out.unknown.push({ name: l.name, why: 'predefined application whose port J-Wicket does not read' });
+      return;
+    }
+    const proto = l.protocol ? String(l.protocol).toLowerCase() : null;
+    if (l.destination_port !== null && l.destination_port !== undefined && l.destination_port !== '') {
+      const raw = String(l.destination_port).trim().toLowerCase();
+      const port = /^\d+(-\d+)?$/.test(raw) ? raw : NAMED_PORTS[raw] || null;
+      if (port) out.pairs.push({ name: l.name, protocol: proto, port });
+      else out.unknown.push({ name: l.name, why: `destination port ${raw}, a name J-Wicket does not translate` });
+    } else if (proto && PORTLESS.has(proto)) {
+      // no ports to compare
+    } else {
+      out.unknown.push({ name: l.name, why: l.terms ? 'application with terms (not expanded)' : 'application without a destination port' });
+    }
+  };
+  for (const ref of (row && row.resolved && row.resolved.application) || []) {
+    if (ref.kind === 'any') out.any = true;
+    else if (ref.kind === 'predefined') leaf({ name: ref.name, predefined: true });
+    else if (ref.kind === 'dynamic-defaults') out.unknown.push({ name: ref.name, why: 'the dynamic application’s own default ports' });
+    else if (ref.kind === 'unresolved') out.unknown.push({ name: ref.name, why: 'not found in the configuration' });
+    else (ref.leaves || []).forEach(leaf);
+    for (const n of ref.unresolved || []) if (n !== ref.name) out.unknown.push({ name: n, why: 'not found in the configuration' });
+  }
+  if (row && typeof row === 'object') PORTS_CACHE.set(row, out);
+  return out;
+}
+
+const PORT_ANY = '0-65535';
 
 function policyAddr(row, side) {
   const m = row.match || {};
@@ -730,6 +811,36 @@ function policyAddr(row, side) {
     }
   }
   return out;
+}
+
+/**
+ * Address-book entries of a policy side that an address cannot be compared with: DNS names, wildcard
+ * addresses, sets cut short, names not found. `[{name, why}]`.
+ */
+export function policyAddrUnknown(row, side) {
+  const out = [];
+  const sides = side === 'both' ? ['source', 'destination'] : [side];
+  for (const sd of sides) {
+    for (const ref of (row && row.resolved && row.resolved[sd]) || []) {
+      if (ref.kind === 'unresolved') out.push({ name: ref.name, why: 'not found in an address book' });
+      if (ref.truncated) out.push({ name: ref.name, why: 'address set longer than J-Wicket lists' });
+      for (const n of ref.unresolved || []) if (n !== ref.name) out.push({ name: n, why: 'not found in an address book' });
+      for (const l of ref.leaves || []) {
+        if (l.kind === 'dns') out.push({ name: l.name, why: `DNS name ${l.value || ''}`.trim() });
+        else if (l.kind === 'wildcard') out.push({ name: l.name, why: `wildcard address ${l.value || ''}`.trim() });
+        else if (!l.value) out.push({ name: l.name, why: 'no address value' });
+      }
+    }
+  }
+  return out;
+}
+
+/** For src/dst/addr in Policies: an address (or IPv4 wildcard) query cannot be decided on such entries. */
+function addrUnknown(side) {
+  return (row, ctx, node) => {
+    if (!node || !node.values.some((v) => v.kind === 'word' && (parseNet(v.text) || ipv4Glob(v.text)))) return false;
+    return policyAddrUnknown(row, side).length > 0;
+  };
 }
 
 const FIELD_FN = (obj, text) => {
@@ -804,7 +915,7 @@ export const FIELDS = {
     }, values: () => ['src', 'dst', 'both', 'none'] },
     natsrc: { aliases: ['xsrc', 'snat'], type: 'ip', label: 'translated source address', get: (r) => ((r.nat || {}).source ? wing(r, 'out').dst : null) },
     natdst: { aliases: ['xdst', 'dnat'], type: 'ip', label: 'translated destination address', get: (r) => ((r.nat || {}).destination ? wing(r, 'out').src : null) },
-    bytes: { aliases: ['size', 'volume'], type: 'size', label: 'bytes, both directions (k, M, G)', get: (r) => sum(wing(r, 'in').bytes, wing(r, 'out').bytes) },
+    bytes: { aliases: ['size', 'volume'], type: 'size', label: 'bytes, both directions (k, M, G are 1000-based like Junos; KiB, MiB 1024)', get: (r) => sum(wing(r, 'in').bytes, wing(r, 'out').bytes) },
     pkts: { aliases: ['packets'], type: 'int', label: 'packets, both directions', get: (r) => sum(wing(r, 'in').packets, wing(r, 'out').packets) },
     rate: { aliases: ['bps', 'throughput'], type: 'size', label: 'live rate in bytes/s (from poll deltas)', get: (r) => nz(r.rate) },
     dur: { aliases: ['duration', 'age'], type: 'duration', label: 'session age (s, m, h)', get: (r) => r.duration },
@@ -861,25 +972,23 @@ export const FIELDS = {
     from: { aliases: ['from-zone', 'fromzone'], type: 'text', label: 'from-zone ("any" for global policies without one)', get: (r) => (r.from && r.from.length ? r.from : ['any']), values: (rows, inv) => merge(invZones(inv), ['any']) },
     to: { aliases: ['to-zone', 'tozone'], type: 'text', label: 'to-zone', get: (r) => (r.to && r.to.length ? r.to : ['any']), values: (rows, inv) => merge(invZones(inv), ['any']) },
     zone: { aliases: [], type: 'text', label: 'from- or to-zone', get: (r) => [...(r.from && r.from.length ? r.from : ['any']), ...(r.to && r.to.length ? r.to : ['any'])], values: (rows, inv) => invZones(inv) },
-    src: { aliases: ['source', 'source-address'], type: 'ip', label: 'source address name, or an address inside it (CIDR-aware)', get: (r) => policyAddr(r, 'source'), values: (rows, inv) => merge(invAddresses(inv), ['any']) },
-    dst: { aliases: ['destination', 'destination-address'], type: 'ip', label: 'destination address name, or an address inside it', get: (r) => policyAddr(r, 'destination'), values: (rows, inv) => merge(invAddresses(inv), ['any']) },
-    addr: { aliases: ['address', 'ip'], type: 'ip', label: 'source or destination (resolved, CIDR-aware)', get: (r) => policyAddr(r, 'both'), values: (rows, inv) => invAddresses(inv) },
+    src: { aliases: ['source', 'source-address'], type: 'ip', label: 'source address name, or an address inside it (CIDR-aware)', get: (r) => policyAddr(r, 'source'), unknown: addrUnknown('source'), values: (rows, inv) => merge(invAddresses(inv), ['any']) },
+    dst: { aliases: ['destination', 'destination-address'], type: 'ip', label: 'destination address name, or an address inside it', get: (r) => policyAddr(r, 'destination'), unknown: addrUnknown('destination'), values: (rows, inv) => merge(invAddresses(inv), ['any']) },
+    addr: { aliases: ['address', 'ip'], type: 'ip', label: 'source or destination (resolved, CIDR-aware)', get: (r) => policyAddr(r, 'both'), unknown: addrUnknown('both'), values: (rows, inv) => invAddresses(inv) },
     app: { aliases: ['application'], type: 'text', label: 'application or set (and its members)', get: (r) => {
       const out = [...((r.match && r.match.application) || [])];
       for (const ref of (r.resolved && r.resolved.application) || []) for (const l of ref.leaves || []) if (l.name) out.push(l.name);
       return out;
     }, values: (rows, inv) => invApps(inv) },
-    port: { aliases: ['dport', 'destination-port'], type: 'int', label: 'destination port of the applications', get: (r) => {
-      const out = [];
-      for (const ref of (r.resolved && r.resolved.application) || []) {
-        if (PREDEFINED_PORTS[ref.name]) out.push(PREDEFINED_PORTS[ref.name]);
-        for (const l of ref.leaves || []) {
-          if (l.destination_port) out.push(String(l.destination_port));
-          else if (PREDEFINED_PORTS[l.name]) out.push(PREDEFINED_PORTS[l.name]);
-        }
-      }
+    // "application any" covers every port (port:3389 keeps a permit-all; port!=3389 drops it). A port
+    // J-Wicket cannot read (an unknown predefined application, terms) leaves the answer unknown: the
+    // policy stays listed, and compileTri() reports it as unknown so the view can mark it.
+    port: { aliases: ['dport', 'destination-port'], type: 'int', label: 'destination port of the applications ("any" covers every port)', get: (r, c) => {
+      const p = policyPorts(r);
+      const out = p.pairs.map((x) => x.port);
+      if (p.any && !(c && c.strictAny)) out.push(PORT_ANY);
       return out;
-    } },
+    }, unknown: (r) => policyPorts(r).unknown.length > 0 },
     action: { aliases: ['then'], type: 'enum', label: 'permit, deny or reject', get: (r) => r.action, values: () => ['permit', 'deny', 'reject'] },
     group: { aliases: ['groups', 'apply-group'], type: 'text', label: 'configuration group', get: (r) => merge([r.group], r.groups || []), values: (rows, inv) => merge(((scopeOf(inv) || {}).groups || []).map((g) => g.name), topValues(rows, (r) => r.group)) },
     inactive: { aliases: ['disabled'], type: 'enum', label: 'yes or no', get: (r) => (r.inactive ? ['yes', 'true', r.inactive_reason || 'policy'] : ['no', 'false']), values: () => ['yes', 'no'] },
@@ -914,10 +1023,117 @@ function hasWildcard(v) {
   return v.kind === 'word' && v.text.includes('*');
 }
 
-function globRegex(text, anchored) {
-  const body = text.split('*').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
-  return new RegExp(anchored ? `^${body}$` : body, 'i');
+/**
+ * A case-insensitive "*" wildcard matcher that runs in linear time (no backtracking RegExp, so a
+ * pattern such as a*a*a*a*q cannot freeze the tab): the literal pieces are found left to right with
+ * indexOf, and an anchored pattern also checks its first piece as a prefix and its last as a suffix.
+ * The returned function takes the text to test; pass `lowered` when it is already lower case.
+ */
+export function globMatcher(pattern, anchored) {
+  const parts = String(pattern).toLowerCase().split('*');
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  const single = parts.length === 1;
+  return (input, lowered) => {
+    const s = lowered ? String(input) : String(input).toLowerCase();
+    let pos = 0;
+    let limit = s.length;
+    let from = 0;
+    let to = parts.length;
+    if (anchored) {
+      if (single) return s === first;
+      if (s.length < first.length + last.length || !s.startsWith(first) || !s.endsWith(last)) return false;
+      pos = first.length;
+      limit = s.length - last.length;
+      from = 1;
+      to = parts.length - 1;
+    }
+    for (let i = from; i < to; i++) {
+      const p = parts[i];
+      if (!p) continue;
+      const at = s.indexOf(p, pos);
+      if (at < 0 || at + p.length > limit) return false;
+      pos = at + p.length;
+    }
+    return true;
+  };
 }
+
+/**
+ * An IPv4 wildcard ("10.10.0.1*", "10.*.0.1", "192.168.1*") as a test on an address range: true when
+ * some address in [lo, hi], written in dotted decimal, matches the wildcard text. A single address is
+ * then matched exactly as Sessions matches its addresses, and a policy's prefix or range matches when
+ * it holds such an address. Null when the text is not an IPv4 wildcard.
+ */
+const GLOB4_CACHE = new Map();
+export function ipv4Glob(text) {
+  const pat = String(text);
+  if (!pat.includes('*') || !/^[0-9.*]+$/.test(pat) || pat.length > 40) return null;
+  if (GLOB4_CACHE.has(pat)) return GLOB4_CACHE.get(pat);
+  if (GLOB4_CACHE.size > 200) GLOB4_CACHE.clear();
+  const made = makeIpv4Glob(pat);
+  GLOB4_CACHE.set(pat, made);
+  return made;
+}
+
+function makeIpv4Glob(pat) {
+  const n = pat.length;
+  const close = (set) => {
+    for (const p of set) if (pat[p] === '*') set.add(p + 1); // a Set visits what is added while iterating
+    return set;
+  };
+  const feed = (states, str) => {
+    let cur = states;
+    for (const ch of str) {
+      const next = new Set();
+      for (const p of cur) {
+        if (p >= n) continue;
+        if (pat[p] === '*') next.add(p);
+        else if (pat[p] === ch) next.add(p + 1);
+      }
+      cur = close(next);
+      if (!cur.size) break;
+    }
+    return cur;
+  };
+  const key = (level, states) => `${level}|${[...states].sort((a, b) => a - b).join(',')}`;
+  const memo = new Map();
+  // Whether any address completes the pattern from these states with `level` octets already read.
+  const any = (level, states) => {
+    if (level === 4) return states.has(n);
+    const k = key(level, states);
+    if (memo.has(k)) return memo.get(k);
+    let ok = false;
+    for (let v = 0; v < 256 && !ok; v++) {
+      const next = feed(states, level < 3 ? `${v}.` : String(v));
+      if (next.size && any(level + 1, next)) ok = true;
+    }
+    memo.set(k, ok);
+    return ok;
+  };
+  const within = (lo, hi, level, states, base) => {
+    if (level === 4) return states.has(n);
+    const size = 256 ** (3 - level);
+    const vlo = Math.floor((lo - base) / size);
+    const vhi = Math.floor((hi - base) / size);
+    for (let v = vlo; v <= vhi; v++) {
+      const next = feed(states, level < 3 ? `${v}.` : String(v));
+      if (!next.size) continue;
+      const b = base + v * size;
+      const full = lo <= b && hi >= b + size - 1;
+      if (full ? any(level + 1, next) : within(Math.max(lo, b), Math.min(hi, b + size - 1), level + 1, next, b)) return true;
+    }
+    return false;
+  };
+  const start = close(new Set([0]));
+  if (!any(0, start)) return null; // "1*1*1*1*1*1" and the like: no IPv4 address can match
+  return (lo, hi) => within(Number(lo), Number(hi), 0, start, 0);
+}
+
+// Regular expressions are user input: the text they run over is capped, so one term cannot take
+// seconds per row on long log lines (the views time-box a whole refilter as well).
+export const REGEX_INPUT_MAX = 2048;
+const capped = (s) => (s.length > REGEX_INPUT_MAX ? s.slice(0, REGEX_INPUT_MAX) : s);
 
 function userRegex(v) {
   let flags = v.flags || '';
@@ -946,7 +1162,7 @@ function valueMatcher(def, v, op, ctx) {
       throw new Error(`Invalid regular expression: ${String(e.message || e).replace(/^Invalid regular expression: /, '')}`);
     }
     if (op !== '~' && op !== ':' && op !== '=' && op !== '!=') throw new Error(`'${op}' cannot compare with a regular expression`);
-    return (item) => re.test(String(item));
+    return (item) => re.test(capped(String(item)));
   }
   const text = v.text;
   if (type === 'ip') {
@@ -961,9 +1177,23 @@ function valueMatcher(def, v, op, ctx) {
       };
     }
     if (/^[\d.]+\/?\d*$/.test(text) && /\d/.test(text)) throw new Error(`'${text}' is not an IP address or prefix`);
-    const re = hasWildcard(v) ? globRegex(text, true) : null;
+    if (hasWildcard(v)) {
+      // "10.10.0.1*": an address matches by its text (as in Sessions); a prefix or range matches when
+      // it holds such an address (as in Policies); names match the wildcard as text.
+      const g4 = ipv4Glob(text);
+      const name = globMatcher(text, true);
+      return (item) => {
+        const s = String(item);
+        if (g4) {
+          if (s === 'any') return true;
+          const n = netOf(s);
+          if (n && n.v === 4) return g4(n.lo, n.hi);
+        }
+        return name(s);
+      };
+    }
     const low = text.toLowerCase();
-    return (item) => (re ? re.test(String(item)) : String(item).toLowerCase() === low);
+    return (item) => String(item).toLowerCase() === low;
   }
   if (type === 'int') {
     const r = parseIntValue(text);
@@ -998,8 +1228,8 @@ function valueMatcher(def, v, op, ctx) {
   }
   if (def.rank && def.rank(text) === null) throw new Error(`Unknown value '${text}'`);
   if (hasWildcard(v)) {
-    const re = globRegex(text, !def.contains);
-    return (item) => re.test(String(item));
+    const g = globMatcher(text, !def.contains);
+    return (item) => g(item);
   }
   const low = text.toLowerCase();
   if (def.contains) return (item) => String(item).toLowerCase().includes(low);
@@ -1113,7 +1343,7 @@ function ipsOf(h) {
 function freeMatcher(v, fields) {
   if (v.kind === 'regex') {
     const re = userRegex(v);
-    return (row) => re.test(haystackOf(row, fields).raw);
+    return (row) => re.test(capped(haystackOf(row, fields).raw));
   }
   if (v.kind === 'word') {
     const net = /[.:]/.test(v.text) ? parseNet(v.text) : null;
@@ -1121,8 +1351,8 @@ function freeMatcher(v, fields) {
       return (row) => ipsOf(haystackOf(row, fields)).some((n) => overlaps(n, net));
     }
     if (hasWildcard(v)) {
-      const re = globRegex(v.text, false);
-      return (row) => re.test(haystackOf(row, fields).raw);
+      const g = globMatcher(v.text, false);
+      return (row) => g(haystackOf(row, fields).text, true);
     }
   }
   const low = v.text.toLowerCase();
@@ -1135,7 +1365,7 @@ function asItems(v) {
   return v === '' ? [] : [v];
 }
 
-function buildTerm(node, fields, ctx) {
+function buildTerm(node, fields, ctx, tri) {
   if (!node.key) {
     const ms = node.values.map((v) => freeMatcher(v, fields));
     return (row) => ms.some((m) => m(row));
@@ -1162,43 +1392,140 @@ function buildTerm(node, fields, ctx) {
     for (const it of items) for (const m of ms) if (m(it)) return true;
     return false;
   };
+  const unknown = tri && typeof hit.def.unknown === 'function' ? hit.def.unknown : null;
+  if (unknown) {
+    // A known value decides; otherwise a value J-Wicket cannot read leaves the term unknown (null).
+    const positive = node.op !== '!=';
+    return (row) => {
+      if (any(row)) return positive;
+      let unk = false;
+      try {
+        unk = Boolean(unknown(row, ctx, node));
+      } catch (_e) {
+        unk = false;
+      }
+      return unk ? null : !positive;
+    };
+  }
   return node.op === '!=' ? (row) => !any(row) : any;
 }
 
-function build(node, fields, ctx) {
+function build(node, fields, ctx, tri) {
   switch (node.type) {
     case 'and': {
-      const fs = node.items.map((n) => build(n, fields, ctx));
+      const fs = node.items.map((n) => build(n, fields, ctx, tri));
+      if (tri) {
+        // Three-valued (Kleene): false wins, then unknown.
+        return (row) => {
+          let out = true;
+          for (const f of fs) {
+            const r = f(row);
+            if (r === false) return false;
+            if (r === null) out = null;
+          }
+          return out;
+        };
+      }
       return (row) => {
         for (const f of fs) if (!f(row)) return false;
         return true;
       };
     }
     case 'or': {
-      const fs = node.items.map((n) => build(n, fields, ctx));
+      const fs = node.items.map((n) => build(n, fields, ctx, tri));
+      if (tri) {
+        return (row) => {
+          let out = false;
+          for (const f of fs) {
+            const r = f(row);
+            if (r === true) return true;
+            if (r === null) out = null;
+          }
+          return out;
+        };
+      }
       return (row) => {
         for (const f of fs) if (f(row)) return true;
         return false;
       };
     }
     case 'not': {
-      const f = build(node.item, fields, ctx);
+      const f = build(node.item, fields, ctx, tri);
+      if (tri) {
+        return (row) => {
+          const r = f(row);
+          return r === null ? null : !r;
+        };
+      }
       return (row) => !f(row);
     }
     default:
-      return buildTerm(node, fields, ctx);
+      return buildTerm(node, fields, ctx, tri);
   }
+}
+
+const TRI_FIELDS = new WeakMap();
+function hasUnknown(fields) {
+  if (!fields || typeof fields !== 'object') return false;
+  let v = TRI_FIELDS.get(fields);
+  if (v === undefined) {
+    v = Object.values(fields).some((d) => d && typeof d.unknown === 'function');
+    TRI_FIELDS.set(fields, v);
+  }
+  return v;
 }
 
 /**
  * A row predicate for an AST. `fields` is FIELDS.<view> (or a view name); `ctx` may carry `now` (ms),
- * `policyIndex` (Map name -> {from, to}) or `inventory` (for Sessions zone keys). Never throws.
+ * `policyIndex` (Map name -> {from, to}) or `inventory` (for Sessions zone keys). Never throws. A row
+ * whose answer is unknown (see compileTri) is kept.
  */
 export function compile(ast, fields, ctx = {}) {
   if (!ast) return () => true;
-  const fs = typeof fields === 'string' ? FIELDS[viewOf(fields).base] : fields;
+  const fs = (typeof fields === 'string' ? FIELDS[viewOf(fields).base] : fields) || {};
   const c = { ...ctx, now: ctx.now ?? Date.now() };
-  return build(ast, fs || {}, c);
+  if (!hasUnknown(fs)) return build(ast, fs, c, false);
+  const f = build(ast, fs, c, true);
+  return (row) => f(row) !== false;
+}
+
+/**
+ * Like compile(), but three-valued: the predicate returns true, false, or null when the answer depends
+ * on something J-Wicket cannot read (for Policies: an application port it does not know, an address
+ * it cannot compare). NOT of unknown is unknown; AND/OR follow Kleene logic. Views keep null rows and
+ * say why.
+ */
+export function compileTri(ast, fields, ctx = {}) {
+  if (!ast) return () => true;
+  const fs = (typeof fields === 'string' ? FIELDS[viewOf(fields).base] : fields) || {};
+  const c = { ...ctx, now: ctx.now ?? Date.now() };
+  return build(ast, fs, c, hasUnknown(fs));
+}
+
+const clockNow = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+
+/**
+ * Filters `rows` with `pred` within a time budget (checked every 64 rows), so a slow pattern cannot
+ * freeze the tab on a large window. Returns `{rows, complete, checked, ms}`; when `complete` is false
+ * only the first `checked` rows were tested and the view should say the query is too slow for this
+ * many rows (QueryBar.setNotice). `clock` is for tests.
+ */
+export function filterTimed(rows, pred, budgetMs = 200, clock = clockNow) {
+  const list = Array.isArray(rows) ? rows : [];
+  const out = [];
+  const t0 = clock();
+  let i = 0;
+  for (; i < list.length; i++) {
+    if ((i & 63) === 0 && i && clock() - t0 > budgetMs) break;
+    let keep = false;
+    try {
+      keep = pred(list[i]);
+    } catch (_e) {
+      keep = false;
+    }
+    if (keep) out.push(list[i]);
+  }
+  return { rows: out, complete: i >= list.length, checked: i, ms: clock() - t0 };
 }
 
 // --- printing -----------------------------------------------------------------------------------------

@@ -2649,6 +2649,16 @@ tr:hover .cell-actions,
   margin-top: var(--s3);
 }
 
+/* Four across only when each count has room for its label ("applications" is the longest);
+   otherwise two by two, rather than cutting the labels to "applicati…". */
+.ov-device .tile-body {
+  container-type: inline-size;
+}
+
+@container (max-width: 389px) {
+  .inv-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 .inv-count {
   display: flex;
   flex-direction: column;

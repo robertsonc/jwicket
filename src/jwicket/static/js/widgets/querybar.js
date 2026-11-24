@@ -124,6 +124,7 @@ export class QueryBar {
     this._plan = null;
     this._items = [];
     this._active = -1;
+    this._keyActive = false;
     this._open = false;
     this._timers = { change: 0, error: 0 };
     this._lastEmitted = null;
@@ -193,6 +194,17 @@ export class QueryBar {
     this._renderMirror();
   }
 
+  /**
+   * A one-line notice under the bar that is not a syntax error, for example "This pattern is too slow
+   * for 5,000 lines" or "2 policies match through application any"; "" or null hides it.
+   * `kind` is "info" (default) or "warn".
+   */
+  setNotice(textValue, kind = 'info') {
+    this.noticeEl.textContent = textValue || '';
+    this.noticeEl.hidden = !textValue;
+    this.noticeEl.dataset.kind = kind === 'warn' ? 'warn' : 'info';
+  }
+
   /** A short status shown inside the bar (for example "41 of 150"); "" hides it. */
   setStatus(textValue) {
     this.statusEl.textContent = textValue || '';
@@ -223,7 +235,7 @@ export class QueryBar {
     this.input = el('input', 'qb-input', {
       id: `${id}-input`, type: 'text', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off',
       spellcheck: 'false', enterkeyhint: 'search', role: 'combobox', 'aria-autocomplete': 'list',
-      'aria-expanded': 'false', 'aria-controls': `${id}-list`, 'aria-describedby': `${id}-err ${id}-explain`,
+      'aria-expanded': 'false', 'aria-controls': `${id}-list`, 'aria-describedby': `${id}-err ${id}-notice ${id}-explain`,
       placeholder: opts.placeholder || `Filter ${viewName}: key:value, words, -exclude, a OR b`,
     });
     this.field.append(this.mirror, this.input);
@@ -243,12 +255,14 @@ export class QueryBar {
     this.wrap.append(this.box, this.list, this.help);
     this.errEl = el('div', 'qb-err', { id: `${id}-err`, role: 'status', 'aria-live': 'polite' });
     this.errEl.hidden = true;
+    this.noticeEl = el('p', 'qb-notice', { id: `${id}-notice`, role: 'status', 'aria-live': 'polite' });
+    this.noticeEl.hidden = true;
     this.planEl = el('div', 'qb-plan');
     this.planEl.hidden = true;
     this.chips = el('ul', 'qb-chips', { 'aria-label': 'Where each filter runs' });
     this.explainEl = el('p', 'qb-explain', { id: `${id}-explain` });
     this.planEl.append(this.chips, this.explainEl);
-    this.el.append(label, this.wrap, this.errEl, this.planEl);
+    this.el.append(label, this.wrap, this.errEl, this.noticeEl, this.planEl);
 
     this.input.addEventListener('input', () => this._onInput());
     this.input.addEventListener('keydown', (ev) => this._onKey(ev));
@@ -361,12 +375,20 @@ export class QueryBar {
         this._emit(true);
         if (this.onSubmit) this.onSubmit(this._text, this._parsed);
         return;
-      case 'Tab':
-        if (this._open && n && !ev.shiftKey) {
+      case 'Tab': {
+        // Tab completes only an option the user moved to with the arrow keys, and never fills an
+        // empty bar with an example or a saved query: otherwise the list closes and focus moves on,
+        // so tabbing past the bar cannot change the filter (or, in Sessions, the device query).
+        const item = this._open && this._active >= 0 && this._keyActive ? this._items[this._active] : null;
+        const fillsEmpty = item && !this._text.trim() && (item.kind === 'example' || item.kind === 'saved');
+        if (item && !ev.shiftKey && !fillsEmpty) {
           ev.preventDefault();
-          this._accept(this._active >= 0 ? this._active : 0);
+          this._accept(this._active);
+          return;
         }
+        this._closeList();
         return;
+      }
       case 'Escape':
         if (this._open) {
           ev.preventDefault();
@@ -438,6 +460,7 @@ export class QueryBar {
     }
     this._items = items.slice(0, 14);
     this._active = -1;
+    this._keyActive = false;
     if (!this._items.length) {
       this._closeList();
       return;
@@ -456,6 +479,7 @@ export class QueryBar {
   _closeList() {
     this._open = false;
     this._active = -1;
+    this._keyActive = false;
     this.list.hidden = true;
     this.input.setAttribute('aria-expanded', 'false');
     this.input.removeAttribute('aria-activedescendant');
@@ -465,6 +489,7 @@ export class QueryBar {
     const prev = this.list.querySelector('.qb-opt[aria-selected="true"]');
     if (prev) prev.setAttribute('aria-selected', 'false');
     this._active = i;
+    this._keyActive = Boolean(scroll); // moved there with the arrow keys (not the pointer)
     const li = this.list.children[i];
     if (!li) {
       this.input.removeAttribute('aria-activedescendant');
@@ -577,7 +602,7 @@ export class QueryBar {
       ['a b  a AND b', 'both'],
       ['a OR b  (a b) OR c', 'either, grouped'],
       ['key:v1|v2', 'any of these values'],
-      ['bytes>1M  dur>=5m', 'compare sizes (k M G) and durations (s m h)'],
+      ['bytes>1M  dur>=5m', 'compare sizes (k M G = 1000-based, KiB MiB = 1024) and durations (s m h)'],
       ['src:10.10.0.0/16', 'addresses are CIDR-aware'],
       ['"two words"  /re/i  key~re', 'phrase, regular expression'],
     ];
