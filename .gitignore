@@ -13,6 +13,7 @@ build/
 *.pem
 *.key
 *.log
+!tests/fixtures/*/logs/*.log
 *.jsonl
 .playwright/
 screenshots/
