@@ -1,0 +1,4 @@
+# Allow J-Wicket through a security zone when it listens on TCP 8443.
+# Verified: host-inbound filtering is by port, so this one named service is enough.
+# Do NOT use "system-services any-service": it opens every routing-engine port to the zone.
+set security zones security-zone <zone> host-inbound-traffic system-services webapi-ssl

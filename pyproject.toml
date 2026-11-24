@@ -1,0 +1,41 @@
+# J-Wicket ships as one generated file (dist/jwicket.py, built by tools/bundle.py) because the
+# on-box runtime is unsigned Python under Junos. This file configures development tooling only;
+# J-Wicket has no install-time or runtime dependencies beyond the Python standard library and the
+# PyEZ that Junos ships on the device.
+[project]
+name = "jwicket"
+version = "0.1.0.dev0"
+description = "On-box, read-first web UI for Juniper SRX firewalls (foundation stage, not for production)"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+src = ["src", "tests", "tools"]
+# The spike daemon is preserved verbatim as evidence; it is not product code.
+extend-exclude = ["docs/evidence"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "S", "UP", "N", "BLE", "A", "C4", "RET", "SIM", "PTH", "TRY", "RUF"]
+ignore = [
+  "TRY003",  # explicit messages at raise sites are the point: errors must say what failed and why
+  "UP006", "UP007", "UP035",  # keep 3.9-compatible typing spellings (on-box Python version is unverified)
+  "N818",    # exception names are domain terms (RpcDenied, SessionLost), not *Error
+  "TRY400",  # startup refusals are expected outcomes: log the reason, not a stack trace
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "S311", "PTH"]
+"tools/bundle.py" = ["S102"]  # the bundle template exec()s its own embedded, build-time source
+
+[tool.mypy]
+python_version = "3.9"
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+files = ["src/jwicket", "tools"]
+
+[[tool.mypy.overrides]]
+module = ["jnpr.*", "lxml.*"]
+ignore_missing_imports = true
