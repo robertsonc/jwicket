@@ -9,6 +9,9 @@ Stdlib only, Python 3.9 syntax, no network. What each check covers:
 * every spec named as ``Spec NNN`` (or ``Specs NNN and MMM``) has a file in docs/specs/;
 * the README's "Start here" table links only to files that exist, and the README links to every
   document in the project's document set;
+* every HTML ``<img src>`` and ``<source srcset>`` path in the README exists, every file in
+  docs/images/readme/ is used by the README, and those images stay within a size budget (each file
+  is kept forever in the public history, so an unused or oversized image is a permanent cost);
 * every ``junos_hierarchy`` cell of the parity ledger carries a marker (docs/parity/README.md, section 4),
   and the cells the ledger summary copies from the CSV (status, priority, spec, reason) still match it.
 """
@@ -29,6 +32,10 @@ SPECS = DOCS / "specs"
 GOVERNANCE = DOCS / "governance.md"
 README = ROOT / "README.md"
 LEDGER = DOCS / "parity" / "jweb-24.4.csv"
+README_IMAGES = DOCS / "images" / "readme"
+# Size budget for the README's images: one animated hero, the rest stills.
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+MAX_IMAGES_TOTAL_BYTES = 5 * 1024 * 1024
 
 # The documents the README must link to (the project's document set).
 DOCUMENT_SET = (
@@ -54,6 +61,7 @@ CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 REF_DEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(\S+)")
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 HTML_ANCHOR = re.compile(r"<a\s+(?:id|name)=\"([^\"]+)\"")
+HTML_IMAGE_SOURCE = re.compile(r"<(?:img|source)\b[^>]*?\b(?:src|srcset)=\"([^\"]+)\"", re.IGNORECASE)
 Q_ID = re.compile(r"\bQ-[A-Z]+-[0-9]{2}\b")
 SPEC_REF = re.compile(r"\bSpecs? ([0-9]{3}(?:(?:,\s*|\s+and\s+|\s+to\s+|\s+or\s+)[0-9]{3})*)\b")
 THREE_DIGITS = re.compile(r"[0-9]{3}")
@@ -272,6 +280,40 @@ class ReadmeTests(unittest.TestCase):
         }
         missing = [doc for doc in DOCUMENT_SET if (ROOT / doc).resolve() not in linked]
         self.assertEqual(missing, [], "documents the README does not link to")
+
+    def html_image_sources(self) -> List[Tuple[int, str]]:
+        found = []
+        for number, line in prose_lines(README):
+            for match in HTML_IMAGE_SOURCE.finditer(line):
+                # A srcset may list several candidates ("a.webp 1x, b.webp 2x"): check each URL.
+                for candidate in match.group(1).split(","):
+                    url = candidate.strip().split()[0] if candidate.strip() else ""
+                    if url and relative(url):
+                        found.append((number, url))
+        return found
+
+    def test_html_image_sources_exist(self) -> None:
+        sources = self.html_image_sources()
+        self.assertTrue(sources, "no <img> or <source> found in the README; is the pattern still right?")
+        missing = [
+            f"README.md:{number}: {url}"
+            for number, url in sources
+            if not split_target(README, url)[0].is_file()
+        ]
+        self.assertEqual(missing, [], "README image paths that do not exist")
+
+    def test_every_readme_image_is_used_and_within_budget(self) -> None:
+        used = {split_target(README, url)[0] for _, url in self.html_image_sources()}
+        used |= {split_target(README, t)[0] for _, t in links(README) if relative(t)}
+        files = sorted(p for p in README_IMAGES.rglob("*") if p.is_file())
+        unused = [str(p.relative_to(ROOT)) for p in files if p.resolve() not in used]
+        self.assertEqual(unused, [], "files in docs/images/readme/ the README does not use")
+        oversized = [
+            f"{p.relative_to(ROOT)}: {p.stat().st_size} bytes" for p in files if p.stat().st_size > MAX_IMAGE_BYTES
+        ]
+        self.assertEqual(oversized, [], f"README images over {MAX_IMAGE_BYTES} bytes")
+        total = sum(p.stat().st_size for p in files)
+        self.assertLessEqual(total, MAX_IMAGES_TOTAL_BYTES, "README images over the total budget")
 
 
 def ledger_rows() -> List[Dict[str, str]]:

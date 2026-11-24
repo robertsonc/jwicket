@@ -26,8 +26,8 @@ Junos already has users, login classes and remote authentication (RADIUS, TACACS
 - Least privilege comes from Junos, not from J-Wicket code. A read-only class sees a read-only UI;
   a denied read shows as "denied", never as empty.
 - Each signed-in operator holds one NETCONF session on the routing engine; sessions are capped
-  (`max_sessions`, default 4), limited to one per Junos user by default (a new sign-in closes that
-  user's older session, `max_sessions_per_user`), and closed on idle and absolute timeouts.
+  (`max_sessions`, default 4), limited per Junos user (`max_sessions_per_user`, default 2 since 2026-11-24, when Spec 004 let one
+  operator keep two tabs; a sign-in over the limit closes that user's oldest session), and closed on idle and absolute timeouts.
 - Only the typed password may sign anyone in: J-Wicket tells PyEZ not to offer the daemon account's
   SSH keys and not to read its SSH client configuration, so the daemon account's own credentials
   cannot stand in for an operator's.

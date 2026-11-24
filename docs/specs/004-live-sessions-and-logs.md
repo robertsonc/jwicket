@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Backend and browser engines implemented on synthetic fixtures. Sessions and Logs views built in the working tree, not yet committed, not yet checked in a browser. Never run on a device. Nothing qualified.** |
+| Status | **Backend and browser engines implemented on synthetic fixtures. Sessions and Logs views built and committed, exercised by hand on the development server; browser acceptance (AC-004-20) not signed off. Never run on a device. Nothing qualified.** |
 | Parity priority | `P0`, with Spec 001 (the owner's binding addition to the first slices; see the [charter](../charter.md)). The J-Web rows it covers are in the [parity ledger](../parity/jweb-24.4.csv) |
 | Gate | Part of G1 (foundation exit: Q-LOAD-02, Q-LOAD-03 are G1 tests); qualified at G2 with Q-LOG-01 |
 | Decides scope | Project owner. G1 sign-off: the named security reviewer |
@@ -24,7 +24,7 @@ only**. The per-session XML element names are J-Wicket's inference; no recorded 
 | `/api/logs`: parameters checked before any device read, file tail with cursor and rotation, report reads with `expression`, buffer reads | Implemented | `TailTests`, `ReportHttpTests`, `ReportReleaseTests`, `ModeAndExpressionTests`, `LogSourcesFailureTests`, `MalformedReplyTests`: pass |
 | Query language and pushdown planner (`query.js`) | Implemented | `tests/js/query.test.mjs`: pass (2026-11-24) |
 | Log tokeniser, parser, decoder, self-read detection (`logparse.js`) | Implemented | `tests/js/logparse.test.mjs`: pass (2026-11-24) on 46 verbatim documentation lines and the development-server corpus |
-| Sessions view, Logs view, flow diagram, histogram, query bar widget | **Built in the working tree, not yet committed, not yet checked in a browser** (AC-004-20 not met) | None yet: no browser check has run |
+| Sessions view, Logs view, flow diagram, histogram, query bar widget | **Built and committed; exercised by hand on the development server** (AC-004-20 not signed off) | None yet: no browser acceptance check has been signed off |
 | On a device | **Not run.** The spike called `get-flow-session-information` with `summary` on one vSRX as the daemon's account; no reply was recorded and the panel was not checked | [Spike report](../evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md) |
 
 In parity-ledger terms the 26 rows this backend covers stay `specified` until AC-004-20 passes:
@@ -649,8 +649,8 @@ puts RT_FLOW there: **unknown** (Q-LOG-01). The operator-facing `where` text for
 
 The Sessions and Logs views are part of UI v2. These are requirements. "Engine" means the
 pure-logic module exists and is unit-tested; "open" means not yet confirmed in the view. The views
-are built in the working tree, not yet committed, and no requirement has been checked in a browser
-(AC-004-20).
+are built and committed and have been exercised by hand on the development server, but no requirement
+has been signed off against AC-004-20 yet.
 
 **Shared**
 
@@ -768,7 +768,7 @@ in [`test_live.py`](../../tests/test_live.py) unless another file is named.
 | AC-004-17 | Every corpus line tokenises back to exactly itself | [`logparse.test.mjs`](../../tests/js/logparse.test.mjs): "every corpus line tokenises back to exactly itself", "tokenisation stays lossless on every prefix of every corpus line, and with hints" | Met (unit) on 46 documentation lines and the development-server corpus |
 | AC-004-18 | RT_FLOW decoding (structured data, BSD text across releases, buffer), other families, formats | `logparse.test.mjs`: "every documented RT_FLOW line decodes with the right session id, 5-tuple, policy, zones and NAT", "every dev-server RT_FLOW line decodes correctly (structured data, BSD text and buffer)", "RT_FLOW BSD positional bodies across releases (24.4 template, NAT rule types, LSYS)", "RFC 5424: PRI severity and facility, SD-ID, no SD-ID, bracketless, no PRI", "BSD: default, explicit-priority, year and millisecond time formats, year inference", "decode: screen, IDP, commit, configuration mode, login, VPN, link" | Met (unit) |
 | AC-004-19 | Own-read detection: `UI_NETCONF_CMD` lines of the signed-in user only | `logparse.test.mjs`: "isSelfRead: UI_NETCONF_CMD lines of the signed-in user only" | Met (unit); hiding in the view open |
-| AC-004-20 | UI requirements UI-004-01 to UI-004-42 in a browser against the development server (`branch`: event mode, syslog files, buffer; `cluster-lsys`: cluster, stream mode, on-box report; `auditor`), with no console errors or CSP violations, and smooth at 2,000 rows | Browser check against the development server, by hand or driven by an external, development-only browser tool ([CONTRIBUTING, browser rules](../../CONTRIBUTING.md#browser)), screenshots at desktop and phone widths | **Not met**: the views are built in the working tree, not yet committed, and not yet checked in a browser |
+| AC-004-20 | UI requirements UI-004-01 to UI-004-42 in a browser against the development server (`branch`: event mode, syslog files, buffer; `cluster-lsys`: cluster, stream mode, on-box report; `auditor`), with no console errors or CSP violations, and smooth at 2,000 rows | Browser check against the development server, by hand or driven by an external, development-only browser tool ([CONTRIBUTING, browser rules](../../CONTRIBUTING.md#browser)), screenshots at desktop and phone widths | **Not met**: the views are built and committed and have been exercised by hand on the development server, but this check has not been run against the requirement list and signed off |
 | AC-004-21 | AC-004-01 to -14 pass against recorded replies from a qualified platform, including a cluster and a multi-SPU platform | Q-REL-01 recorded fixtures | **Not met**: no recorded reply exists |
 | AC-004-22 | On a qualified platform, listing up to `MAX_UNFILTERED` sessions at the default interval keeps RE CPU and mgd within the Q-LOAD-02 pass criterion | Q-LOAD-02 | **Not met** |
 | AC-004-23 | A failed sources read is cached per web session (denied or unsupported 60 s, other failures 10 s); while it fails, `/api/logs` answers 200 with the state and repeats within 1.5 s get 429 | `LogSourcesFailureTests.test_denied_sources_are_read_once_per_ttl`, `.test_other_failures_are_retried_sooner` | Met (fixtures) |

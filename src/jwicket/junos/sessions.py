@@ -38,10 +38,11 @@ Json = Dict[str, Any]
 
 # Above this many matching sessions, J-Wicket refuses to pull rows and asks for a narrower filter.
 # The device sends every matching session from the SPUs to the routing engine for a list request,
-# so this protects the control plane; the count itself is cheap (filtered summary). Source: Juniper
-# support as quoted in the HPE community thread "info over logs" (https://community.networking.hpe.com/
-# discussion/info-over-logs), which cites KB28956; the KB itself was not retrieved. The threshold is
-# checked by qualification Q-LOAD-02.
+# so this protects the control plane; the count itself is cheap (filtered summary). Source for the
+# mechanism: a 2015 community-forum reply (https://community.networking.hpe.com/discussion/info-over-logs)
+# by a user with no Juniper support marking, quoting the title of KB28956; the KB itself was not read.
+# 5000 is J-Wicket's own choice, not a Junos number (Spec 004 section 7.4); Q-LOAD-02 decides whether
+# it stands.
 MAX_UNFILTERED = 5000
 DEFAULT_LIMIT = 500
 MAX_LIMIT = 2000

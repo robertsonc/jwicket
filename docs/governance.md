@@ -130,8 +130,8 @@ words (**proposed** vocabulary):
 | Superseded by *NNN* | Replaced | as the new spec says |
 
 Today: Spec 001 and Spec 004 are implemented on fixtures for their backends and browser engines;
-their UI views are built in the working tree, not yet committed, and not yet checked in a browser
-(AC-001-21, AC-004-20 not met), so their ledger rows stay `specified`. They are the first slices the
+their UI views are built and committed and have been exercised by hand on the development server,
+but not signed off (AC-001-21, AC-004-20 not met), so their ledger rows stay `specified`. They are the first slices the
 owner named. Spec 002 is design
 only. Spec 003, the first planned configuration wizard, is specified and preview-only. No spec
 records the owner's acceptance in its Status field yet, and none is qualified.
@@ -984,7 +984,7 @@ flowchart TB
 
 | Phase | What ships | Specs | Ledger priority | Ends at | State on 2026-11-24 |
 | --- | --- | --- | --- | --- | --- |
-| 1. Foundation | Scoped, read-only policy inventory; live sessions and logs with filtering and highlighting; sign-in through Junos; TLS; settings file; audit trail; reproducible bundle; lab procedure | [001](specs/001-policy-inventory.md), [004](specs/004-live-sessions-and-logs.md); a TLS and certificate-provisioning spec (not yet written; [ADR 0003](adr/0003-tls-off-loopback.md) asks for it) | `P0` | G1 | Backends and browser engines built on synthetic fixtures; UI v2 views built in the working tree, not yet committed, not yet checked in a browser; nothing run on a device |
+| 1. Foundation | Scoped, read-only policy inventory; live sessions and logs with filtering and highlighting; sign-in through Junos; TLS; settings file; audit trail; reproducible bundle; lab procedure | [001](specs/001-policy-inventory.md), [004](specs/004-live-sessions-and-logs.md); a TLS and certificate-provisioning spec (not yet written; [ADR 0003](adr/0003-tls-off-loopback.md) asks for it) | `P0` | G1 | Backends and browser engines built on synthetic fixtures; UI v2 views built and committed, exercised by hand, browser acceptance not signed off; nothing run on a device |
 | 2. See everything | The rest of the read-only parity rows the ledger lists: dashboard, interfaces, zones, NAT, VPN, routes, alarms and more, including the policy Hits column (Spec 001 open question 10) | One read spec per area, numbered when proposed | `P1` | G2 | Not started; the ledger lists the rows |
 | 3. Preview-only builder | The Firewall Policy Builder: a proposed change built from the committed configuration with group provenance, its effect, its ownership and reference conflicts, and an export. Nothing that changes the device is sent (a device preview into the operator's private copy is allowed only if the owner and the security reviewer decide D5 that way; otherwise the preview is local only) | [003](specs/003-firewall-policy-builder.md); [002](specs/002-change-protocol.md) section 12 | `P2`: the preview half of J-Web 24.4's rule add, edit, clone, move and delete. A guided builder goes beyond parity: J-Web 24.4 has no security-policy wizard ([catalog, key findings](catalog.md#key-findings)) | G3 | Specified; nothing built |
 | 4. Change safely | Spec 002's lifecycle: private preview, diff, confirmed commit, confirmation from the browser, rollback; the first change kinds | [002](specs/002-change-protocol.md); change-kind specs, starting from 003's | `P2` | G4 | Design only; the code has no write path |
@@ -1005,7 +1005,7 @@ Three deliverables, in order. Each is read-only. None asks anyone to change a pr
 
 | # | Deliverable | Done when | Needs | Moves |
 | --- | --- | --- | --- | --- |
-| 1 | **UI v2 views** for Specs 001 and 004: Policies, Objects, Sessions and Logs | AC-001-21 and AC-004-20 met: the UI requirements checked in a browser against the development server with the `branch` and `cluster-lsys` fixtures, as `admin` and `auditor`, with no console errors or CSP violations; `make test` green, including the static-asset safety tests | Views built in the working tree, not yet committed | The 38 Spec 001 and 004 rows held at `specified` move to `implemented` ([ledger summary, gap 4](parity/jweb-24.4.md#owner-decisions)) |
+| 1 | **UI v2 views** for Specs 001 and 004: Policies, Objects, Sessions and Logs | AC-001-21 and AC-004-20 met: the UI requirements checked in a browser against the development server with the `branch` and `cluster-lsys` fixtures, as `admin` and `auditor`, with no console errors or CSP violations; `make test` green, including the static-asset safety tests | Views built and committed, exercised by hand on the development server; AC-001-21 and AC-004-20 not signed off | The 38 Spec 001 and 004 rows held at `specified` move to `implemented` ([ledger summary, gap 4](parity/jweb-24.4.md#owner-decisions)) |
 | 2 | **First lab qualification run** on a disposable vSRX 24.4 through [deploy-lab.md](deploy-lab.md) | Evidence filed under `docs/evidence/` for Q-RT-01, Q-RT-02, Q-RT-03, Q-NET-03 and Q-AUTH-01; the first recorded replies in `tests/fixtures/recorded-vsrx-<build>/`; early Q-AUTH-03 observations for a read-only class | A named lab owner and a lab vSRX (D2); `set system services netconf ssh` on the lab box | First certified G1 results; the first test of ADR 0002 |
 | 3 | **TLS and the G1 security work** | A TLS and certificate-provisioning spec accepted; Q-TLS-01 run on the lab vSRX; the [known code gaps](architecture.md#15-known-gaps-in-the-current-code) fixed or accepted, so that Q-SEC-01 reviews a stable target | A named security reviewer (D1); Q-RT-01 showing `ssl` | Q-TLS-01 and Q-SEC-01 can start |
 

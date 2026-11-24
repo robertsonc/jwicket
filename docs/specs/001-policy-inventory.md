@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Backend implemented on synthetic fixtures. UI v2 views built in the working tree, not yet committed, not yet checked in a browser. Never run on a device. Nothing qualified.** |
+| Status | **Backend implemented on synthetic fixtures. UI v2 views built and committed, exercised by hand on the development server; browser acceptance (AC-001-21) not signed off. Never run on a device. Nothing qualified.** |
 | Parity priority | `P0` (first vertical slice) |
 | Gate | Part of G1 (foundation exit); its ledger rows reach `qualified` only at G2 |
 | Decides scope | Project owner. G1 sign-off: the named security reviewer |
@@ -24,7 +24,7 @@ true **on synthetic fixtures only**. No recorded device reply has been parsed ye
 | Read path, explicit states, read throttle, audit | Implemented | `test_api_units.py`, `test_http_server.py`, `test_live.py` (`SnapshotVisibilityTests`): pass |
 | JSON and CSV export | Implemented | `test_http_server.py` (`InventoryTests`, `CsvInjectionTests`), `test_api_units.py` (`CsvTests`): pass |
 | UI v1 (`static/app.js`, as committed at `276f9a6`) | Built: evaluation-order sections, provenance badges, detail panel, CLI templates, matrix | Superseded by v2, which replaces it in the working tree |
-| UI v2 Policies and Objects views | **Built in the working tree, not yet committed, not yet checked in a browser** (AC-001-21 not met) | The shared query engine for policies is unit-tested: `tests/js/query.test.mjs` passes |
+| UI v2 Policies and Objects views | **Built and committed; exercised by hand on the development server** (AC-001-21 not signed off) | The shared query engine for policies is unit-tested: `tests/js/query.test.mjs` passes |
 | On a device | **Not run.** The spike read the configuration as JSON without inheritance, as the daemon's account; this parser has never seen a real reply | [Spike report](../evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md), "What is not proven" |
 
 The fixtures in [`tests/fixtures/`](../../tests/fixtures/README.md) are written by hand. Their
@@ -597,8 +597,8 @@ per-operator throttle and the session cap (`max_sessions`, default 4) bound it.
 The UI is being rebuilt as UI v2. These are requirements, not a description of screens. Status
 is as of 2026-11-24: "v1" means the superseded `static/app.js` (as committed at `276f9a6`) did it; "engine" means the shared
 `static/js/query.js` does it and is unit-tested; "open" means not yet confirmed in v2. The v2 views
-are built in the working tree, not yet committed, and no requirement has been checked in a browser
-(AC-001-21).
+are built and committed and have been exercised by hand on the development server, but no requirement
+has been signed off against AC-001-21 yet.
 
 | ID | Requirement | Status |
 | --- | --- | --- |
@@ -680,7 +680,7 @@ criterion is met on a device. Test names are `Class.method` in the linked file.
 | AC-001-18 | Lost device session signs the operator out and closes the device session | `SessionLostTests.test_lost_device_session_signs_the_operator_out`, `.test_session_lost_mid_snapshot_closes_the_device_session` | Met (fixtures) |
 | AC-001-19 | Only allowlisted read-only RPCs can be sent | `AllowlistTests.test_allowlist_is_read_only`, `.test_check_rpc`, `UserSessionTests.test_disallowed_rpc_never_reaches_the_device`, `LocalSessionTests.test_disallowed_rpc_refused_before_pyez_is_touched` | Met (fixtures) |
 | AC-001-20 | Policies query: CIDR-aware resolved addresses, names, flags; no device filtering for policies | [`tests/js/query.test.mjs`](../../tests/js/query.test.mjs): "policies: names, CIDR-aware resolved addresses, ports, flags", "policies have no device filtering" | Met (unit) |
-| AC-001-21 | UI requirements UI-001-01 to UI-001-17 in the v2 shell, checked in a browser against the development server (`branch` and `cluster-lsys` fixtures, `admin` and `auditor`), no console errors or CSP violations | Browser check against the development server, by hand or driven by an external, development-only browser tool ([CONTRIBUTING, browser rules](../../CONTRIBUTING.md#browser)); static rules in [`test_static.py`](../../tests/test_static.py) | **Not met**: the v2 views are built in the working tree, not yet committed, and not yet checked in a browser. The static-asset tests are being updated with the v2 build |
+| AC-001-21 | UI requirements UI-001-01 to UI-001-17 in the v2 shell, checked in a browser against the development server (`branch` and `cluster-lsys` fixtures, `admin` and `auditor`), no console errors or CSP violations | Browser check against the development server, by hand or driven by an external, development-only browser tool ([CONTRIBUTING, browser rules](../../CONTRIBUTING.md#browser)); static rules in [`test_static.py`](../../tests/test_static.py) | **Not met**: the v2 views are built and committed and have been exercised by hand on the development server, but this check has not been run against the requirement list and signed off. The static-asset tests cover the v2 build |
 | AC-001-22 | AC-001-01 to -19 pass against recorded replies from a qualified platform | Q-REL-01 recorded fixtures (`tests/fixtures/recorded-<platform>-<release>/`) | **Not met**: no recorded reply exists |
 
 ## 11. Qualification needed
