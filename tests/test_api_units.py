@@ -283,7 +283,7 @@ class ResourceTests(unittest.TestCase):
         resources.reset_cache()
 
     def test_allowlisted_assets(self) -> None:
-        for name, ctype in (("index.html", "text/html"), ("app.js", "text/javascript"), ("app.css", "text/css"),
+        for name, ctype in (("index.html", "text/html"), ("js/main.js", "text/javascript"), ("css/app.css", "text/css"),
                             ("logo.svg", "image/svg+xml")):
             with self.subTest(name=name):
                 found = resources.asset(name)

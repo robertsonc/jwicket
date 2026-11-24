@@ -207,6 +207,89 @@ class ScriptTests(unittest.TestCase):
                     self.assertNotIn(api, code)
 
 
+IMPORT = re.compile(r"""(?:\bimport\s*\(\s*|\bimport\s[^'"`;]*?\bfrom\s*|\bimport\s*|\bexport\s[^'"`;]*?\bfrom\s*)['"]([^'"]+)['"]""")
+SERVABLE = re.compile(r"^[a-z0-9][a-z0-9_\-]*(/[a-z0-9][a-z0-9_\-]*)*\.(html|js|css|svg)\Z")
+
+
+def module_imports(name: str) -> List[str]:
+    """Static and dynamic import specifiers of one module, resolved to paths under static/."""
+    base = name.rsplit("/", 1)[0] if "/" in name else ""
+    out = []
+    for spec in IMPORT.findall(strip_js_comments(read(name))):
+        if spec.startswith("/static/"):
+            out.append(spec[len("/static/"):])
+            continue
+        parts = [p for p in base.split("/") if p]
+        for piece in spec.split("/"):
+            if piece in ("", "."):
+                continue
+            if piece == "..":
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(piece)
+        out.append("/".join(parts))
+    return out
+
+
+class AssetGraphTests(unittest.TestCase):
+    """index.html and the module graph reference only files that exist, and every file is used."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        parsed = IndexParser()
+        parsed.feed(read("index.html"))
+        parsed.close()
+        cls.refs = []
+        for tag, attrs in parsed.tags:
+            for name, value in attrs:
+                if name in ("src", "href") and value and value.startswith("/static/"):
+                    cls.refs.append(value[len("/static/"):])
+        cls.files = set(assets(".js")) | set(assets(".css")) | set(assets(".svg")) | set(assets(".html"))
+
+    def test_index_references_exist_and_are_servable(self) -> None:
+        self.assertIn("js/main.js", self.refs)
+        for ref in self.refs:
+            with self.subTest(ref=ref):
+                self.assertRegex(ref, SERVABLE)
+                self.assertTrue((STATIC_DIR / ref).is_file(), f"index.html references missing /static/{ref}")
+
+    def test_stylesheets_in_contract_order(self) -> None:
+        sheets = [r for r in self.refs if r.endswith(".css")]
+        self.assertEqual(sheets, ["css/app.css", "css/querybar.css", "css/sessions.css", "css/logs.css", "css/policies.css"])
+
+    def test_every_import_resolves(self) -> None:
+        for name in assets(".js"):
+            for target in module_imports(name):
+                with self.subTest(module=name, imports=target):
+                    self.assertRegex(target, SERVABLE)
+                    self.assertTrue((STATIC_DIR / target).is_file(), f"{name} imports missing {target}")
+
+    def test_no_unused_assets(self) -> None:
+        reached = {"index.html"}
+        todo = list(self.refs)
+        while todo:
+            name = todo.pop()
+            if name in reached:
+                continue
+            reached.add(name)
+            if name.endswith(".js") and (STATIC_DIR / name).is_file():
+                todo.extend(module_imports(name))
+        self.assertEqual(sorted(self.files - reached), [], "static files nothing loads")
+
+    def test_v1_files_are_gone(self) -> None:
+        for name in ("app.js", "app.css"):
+            with self.subTest(name=name):
+                self.assertFalse((STATIC_DIR / name).exists(), f"superseded v1 file static/{name} still present")
+
+    def test_every_file_is_servable(self) -> None:
+        for p in STATIC_DIR.rglob("*"):
+            if p.is_file():
+                rel = p.relative_to(STATIC_DIR).as_posix()
+                with self.subTest(file=rel):
+                    self.assertRegex(rel, SERVABLE, "the server would not serve this file")
+
+
 class StyleTests(unittest.TestCase):
     def test_no_external_urls_or_imports(self) -> None:
         names = assets(".css")

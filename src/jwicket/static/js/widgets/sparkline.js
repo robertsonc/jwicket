@@ -46,9 +46,13 @@ export class Sparkline {
       this.el.setAttribute('aria-label', `${this.label || 'trend'}: no data yet`);
       return;
     }
-    const lo = min === null ? Math.min(...pts) : min;
+    let lo = min === null ? Math.min(...pts) : min;
     let hi = max === null ? Math.max(...pts) : max;
-    if (hi === lo) hi = lo + 1;
+    if (hi === lo) {
+      // A flat series sits in the middle, not on the floor.
+      lo -= 1;
+      hi += 1;
+    }
     const pad = 3;
     const h = this.height;
     const n = pts.length;

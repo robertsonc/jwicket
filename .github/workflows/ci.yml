@@ -69,9 +69,24 @@ jobs:
           cd "$RUNNER_TEMP"
           python -I jwicket.py --bundle-self-test
 
+  js:
+    name: js (node --test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Query language and log parser tests (no packages)
+        # Node 22 does not take a directory for --test; the shell expands the glob.
+        run: node --test tests/js/*.test.mjs
+
   bundle:
     name: bundle (dist/jwicket.py)
-    needs: [lint, test]
+    needs: [lint, test, js]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:

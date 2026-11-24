@@ -16,10 +16,15 @@ const TIMEOUT_MS = 30000;
 const NETWORK_ERROR =
   'J-Wicket did not answer. Check that it is running on the device and, if you reach it through an SSH tunnel, that the tunnel is open.';
 
+// The server refuses a re-read of these endpoints within a short gap (HTTP 429). Pacing requests here
+// keeps normal use (views remounting, a refresh right after a poll) from ever hitting that limit.
+const MIN_GAP_MS = { '/api/inventory': 2100, '/api/sessions': 1600, '/api/logs': 1600 };
+
 let csrf = '';
 let unauthorizedHandler = null;
 let responseHook = null;
 const notBefore = new Map();
+const lastSent = new Map();
 
 export function setCsrf(token) {
   csrf = typeof token === 'string' ? token : '';
@@ -106,9 +111,17 @@ async function request(method, path, params, body, opts = {}) {
   const key = bucket(path, params);
 
   if (method === 'GET' && !opts.evenIfHidden) await whenVisible(signal);
-  const wait = (notBefore.get(key) || 0) - Date.now();
-  if (wait > 0) await sleep(wait, signal);
+  // Wait out a Retry-After, then the endpoint's minimum gap. Concurrent callers queue behind each other.
+  for (;;) {
+    const gap = MIN_GAP_MS[path] || 0;
+    const due = Math.max(notBefore.get(key) || 0, gap ? (lastSent.get(key) || 0) + gap : 0);
+    const wait = due - Date.now();
+    if (wait <= 0) break;
+    await sleep(wait, signal);
+    if (signal && signal.aborted) break;
+  }
   if (signal && signal.aborted) return { ok: false, status: 0, data: {}, retryAfter: 0, aborted: true };
+  if (MIN_GAP_MS[path]) lastSent.set(key, Date.now());
 
   const headers = { Accept: 'application/json' };
   const init = { method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' };
@@ -177,6 +190,7 @@ export function backoff(path, params) {
 export function reset() {
   csrf = '';
   notBefore.clear();
+  lastSent.clear();
 }
 
 export const messages = { NETWORK_ERROR };

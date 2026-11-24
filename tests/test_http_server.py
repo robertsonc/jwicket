@@ -92,7 +92,7 @@ class SecurityHeaderTests(HttpCase):
         cookie = self.signed_in()
         cases = [
             ("GET /", lambda: self.srv.get("/"), 200),
-            ("GET /static/app.js", lambda: self.srv.get("/static/app.js"), 200),
+            ("GET /static/js/main.js", lambda: self.srv.get("/static/js/main.js"), 200),
             ("GET /healthz", lambda: self.srv.get("/healthz"), 200),
             ("GET /api/session", lambda: self.srv.get("/api/session"), 200),
             ("GET /api/inventory", lambda: self.read("/api/inventory", cookie), 200),
@@ -160,9 +160,10 @@ class RoutingTests(HttpCase):
         index = self.srv.get("/")
         self.assertEqual(index.status, 200)
         self.assertEqual(index.headers["content-type"], "text/html; charset=utf-8")
-        self.assertIn(b"/static/app.js", index.body)
+        self.assertIn(b"/static/js/main.js", index.body)
+        self.assertIn(b"/static/css/app.css", index.body)
         self.assertEqual(self.srv.get("/static/index.html").body, index.body)
-        for name, ctype in (("app.js", "text/javascript"), ("app.css", "text/css"), ("logo.svg", "image/svg+xml")):
+        for name, ctype in (("js/main.js", "text/javascript"), ("css/app.css", "text/css"), ("logo.svg", "image/svg+xml")):
             with self.subTest(name=name):
                 reply = self.srv.get(f"/static/{name}")
                 self.assertEqual(reply.status, 200)

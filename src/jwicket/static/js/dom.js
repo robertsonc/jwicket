@@ -104,6 +104,14 @@ export function clear(el) {
   return el;
 }
 
+/** Replace el's children with the given ones; null, undefined and booleans are skipped, arrays flattened. */
+export function put(el, ...children) {
+  if (!el) return el;
+  el.replaceChildren();
+  appendChildren(el, children);
+  return el;
+}
+
 /** Text with the given character indices wrapped in <mark> (palette and search highlights). */
 export function marked(text, indices, cls) {
   const str = String(text);
@@ -473,6 +481,15 @@ export const STATE_HINTS = {
   offline: 'Check that J-Wicket is running and, through an SSH tunnel, that the tunnel is open.',
 };
 
+// The API's default operator-safe texts (src/jwicket/junos/errors.py); the state title already says them.
+const GENERIC_MESSAGES = new Set(
+  [
+    'Your Junos login class does not allow this.',
+    'This device does not support or has not enabled this.',
+    'The device could not complete the request.',
+  ].map((t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()),
+);
+
 const STATE_ICONS = {
   denied: 'lock',
   unsupported: 'ban',
@@ -492,6 +509,9 @@ const STATE_ICONS = {
 export function stateCard({ status = 'failed', message, title, hint, actions, compact = false, code = true } = {}) {
   const key = STATE_TITLES[status] ? status : 'failed';
   const hintText = hint === undefined ? STATE_HINTS[key] : hint;
+  const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  // Server messages often repeat the generic title ("Your Junos login class does not allow this.").
+  if (message && (norm(message) === norm(title || STATE_TITLES[key]) || (!title && GENERIC_MESSAGES.has(norm(message))))) message = null;
   return h(
     'div',
     { class: ['state', compact && 'compact'], dataset: { state: key }, role: key === 'failed' ? 'alert' : null },
