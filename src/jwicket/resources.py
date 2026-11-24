@@ -2,26 +2,31 @@
 
 tools/bundle.py embeds every file under ``jwicket/static`` into a generated module named
 ``jwicket._embedded``. When that module exists (on a device), assets come from it; otherwise
-(development, tests) they come from disk. Only names in the allowlist are ever served.
+(development, tests) they come from disk.
+
+What can be served is decided once, from the asset set itself: a request path must match a strict
+pattern *and* be a key in the manifest. There is no filesystem path built from request input.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-# name -> content type. Anything else is a 404, whatever exists on disk.
-STATIC_ASSETS: Dict[str, str] = {
-    "index.html": "text/html; charset=utf-8",
-    "app.js": "text/javascript; charset=utf-8",
-    "app.css": "text/css; charset=utf-8",
-    "logo.svg": "image/svg+xml",
+CONTENT_TYPES: Dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_\-]*(/[a-z0-9][a-z0-9_\-]*)*\.(html|js|css|svg)$")
 
-_cache: Dict[str, Tuple[bytes, str]] = {}
+_manifest: Optional[Dict[str, bytes]] = None
+_etags: Dict[str, str] = {}
 
 
 def _embedded() -> Optional[Dict[str, bytes]]:
@@ -33,14 +38,38 @@ def _embedded() -> Optional[Dict[str, bytes]]:
     return resources
 
 
-def asset(name: str) -> Optional[Tuple[bytes, str, str]]:
-    """Return (body, content_type, etag) for an allowlisted asset, or None."""
-    content_type = STATIC_ASSETS.get(name)
-    if content_type is None:
-        return None
-    if name not in _cache:
+def manifest() -> Dict[str, bytes]:
+    """Every servable asset, keyed by its path under static/ (for example ``js/logs.js``)."""
+    global _manifest
+    if _manifest is None:
         emb = _embedded()
-        body = emb[f"static/{name}"] if emb is not None else (STATIC_DIR / name).read_bytes()
-        _cache[name] = (body, hashlib.sha256(body).hexdigest()[:16])
-    body, etag = _cache[name]
-    return body, content_type, etag
+        if emb is not None:
+            found = {k[len("static/"):]: v for k, v in emb.items() if k.startswith("static/")}
+        else:
+            found = {
+                p.relative_to(STATIC_DIR).as_posix(): p.read_bytes()
+                for p in sorted(STATIC_DIR.rglob("*"))
+                if p.is_file() and not p.is_symlink()
+            }
+        _manifest = {k: v for k, v in found.items() if _NAME.match(k)}
+    return _manifest
+
+
+def asset(name: str) -> Optional[Tuple[bytes, str, str]]:
+    """Return (body, content_type, etag) for a servable asset, or None."""
+    if not _NAME.match(name):
+        return None
+    body = manifest().get(name)
+    if body is None:
+        return None
+    suffix = name[name.rfind("."):]
+    if name not in _etags:
+        _etags[name] = hashlib.sha256(body).hexdigest()[:16]
+    return body, CONTENT_TYPES[suffix], _etags[name]
+
+
+def reset_cache() -> None:
+    """Tests and the development server call this after assets change on disk."""
+    global _manifest
+    _manifest = None
+    _etags.clear()

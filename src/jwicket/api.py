@@ -70,6 +70,23 @@ def _panel_error(err: JunosError) -> Json:
     return {"status": err.kind, "message": err.public}
 
 
+def throttle_read(app: App, sess: WebSession, bucket: str, interval_s: float) -> Optional[Response]:
+    """One device read per ``interval_s`` per endpoint per signed-in operator."""
+    now = app.mono_clock()
+    last = sess.last_read.get(bucket)
+    if last is not None and now - last < interval_s:
+        wait = max(1, int(interval_s - (now - last) + 0.999))
+        return Response.json(429, {"error": "Reading too often.", "retry_after_s": wait}, [("Retry-After", str(wait))])
+    sess.last_read[bucket] = now
+    return None
+
+
+def session_lost(app: App, sess: WebSession, req: Request, err: SessionLost) -> Response:
+    app.sessions.drop(sess, "device session lost")
+    app.audit.record("session_lost", user=sess.user, source=req.client)
+    return Response.error(401, err.public, signed_out=True)
+
+
 # --- session endpoints ----------------------------------------------------------------------------
 
 
@@ -224,16 +241,13 @@ def _read_guarded(app: App, req: Request) -> Tuple[Optional[WebSession], Respons
     scope = req.query.get("scope", "root")
     if not _SCOPE.match(scope):
         return sess, Response.error(400, "bad scope"), None
-    now = app.mono_clock()
-    if now - sess.last_read < MIN_READ_INTERVAL_S:
-        return sess, Response.json(429, {"error": "Reading too often."}, [("Retry-After", "2")]), None
-    sess.last_read = now
+    limited = throttle_read(app, sess, "inventory", MIN_READ_INTERVAL_S)
+    if limited is not None:
+        return sess, limited, None
     try:
         status, payload = read_snapshot(app, sess, scope)
     except SessionLost as err:
-        app.sessions.drop(sess, "device session lost")
-        app.audit.record("session_lost", user=sess.user, source=req.client)
-        return None, Response.error(401, err.public, signed_out=True), None
+        return None, session_lost(app, sess, req, err), None
     if status != 200:
         return sess, Response.json(status, payload), None
     return sess, Response.json(200, payload), payload
@@ -312,15 +326,12 @@ def export(app: App, req: Request) -> Response:
 # --- static and health ----------------------------------------------------------------------------
 
 
-def static_route(name: str) -> Callable[[Request], Response]:
-    def handler(_req: Request) -> Response:
-        found = resources.asset(name)
-        if found is None:
-            return Response.error(404, "not found")
-        body, ctype, etag = found
-        return Response(200, body, ctype, [("ETag", f'"{etag}"')])
-
-    return handler
+def serve_asset(name: str) -> Response:
+    found = resources.asset(name)
+    if found is None:
+        return Response.error(404, "not found")
+    body, ctype, etag = found
+    return Response(200, body, ctype, [("ETag", f'"{etag}"')])
 
 
 def healthz(_req: Request) -> Response:
@@ -329,15 +340,17 @@ def healthz(_req: Request) -> Response:
 
 def build_router(app: App) -> Router:
     router = Router()
-    router.add("GET", "/", static_route("index.html"))
-    for name in resources.STATIC_ASSETS:
-        router.add("GET", f"/static/{name}", static_route(name))
+    router.add("GET", "/", lambda _r: serve_asset("index.html"))
+    router.add_prefix("GET", "/static/", lambda _r, rest: serve_asset(rest))
     router.add("GET", "/healthz", healthz)
     router.add("GET", "/api/session", lambda r: get_session(app, r))
     router.add("POST", "/api/login", lambda r: login(app, r))
     router.add("POST", "/api/logout", lambda r: logout(app, r))
     router.add("GET", "/api/inventory", lambda r: inventory(app, r))
     router.add("GET", "/api/export", lambda r: export(app, r))
+    from jwicket import live  # live imports helpers from this module, so import it late
+
+    live.register(router, app)
     return router
 
 

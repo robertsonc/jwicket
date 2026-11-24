@@ -20,7 +20,7 @@ import socket
 import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jwicket.web.http import BASE_HEADERS, HSTS, Request, Response, parse_query
 
@@ -30,19 +30,30 @@ Route = Callable[[Request], Response]
 
 
 class Router:
+    """Exact-path routes, plus prefix routes whose handler receives the remainder of the path."""
+
     def __init__(self) -> None:
         self._routes: Dict[Tuple[str, str], Route] = {}
+        self._prefixes: List[Tuple[str, str, Callable[[Request, str], Response]]] = []
 
     def add(self, method: str, path: str, handler: Route) -> None:
         self._routes[(method, path)] = handler
 
-    def allowed(self, path: str) -> list[str]:
-        return sorted(m for (m, p) in self._routes if p == path)
+    def add_prefix(self, method: str, prefix: str, handler: Callable[[Request, str], Response]) -> None:
+        self._prefixes.append((method, prefix, handler))
+
+    def allowed(self, path: str) -> List[str]:
+        methods = {m for (m, p) in self._routes if p == path}
+        methods |= {m for (m, pre, _h) in self._prefixes if path.startswith(pre)}
+        return sorted(methods)
 
     def dispatch(self, req: Request) -> Response:
         handler = self._routes.get((req.method, req.path))
         if handler is not None:
             return handler(req)
+        for method, prefix, prefix_handler in self._prefixes:
+            if method == req.method and req.path.startswith(prefix):
+                return prefix_handler(req, req.path[len(prefix):])
         methods = self.allowed(req.path)
         if methods:
             resp = Response.error(405, "method not allowed")

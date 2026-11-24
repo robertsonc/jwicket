@@ -39,6 +39,9 @@ ALLOWED_RPCS: FrozenSet[str] = frozenset(
     {
         "get-software-information",
         "get-chassis-cluster-status",
+        # Spec 004. Reply formats are confirmed per release by Q-REL-01.
+        "get-flow-session-information",  # show security flow session [filters] / summary
+        "get-log",  # show log <file>
     }
 )
 
@@ -57,6 +60,8 @@ INVENTORY_FILTER = (
     "<chassis><high-availability/></chassis>"
     "</configuration>"
 )
+# Where logs are: syslog files and the security log settings (Spec 004).
+LOGS_FILTER = "<configuration><system><syslog/></system><security><log/></security></configuration>"
 # Used when a device rejects the full filter (for example a release without tenants).
 INVENTORY_FILTER_MINIMAL = "<configuration><security/><applications/></configuration>"
 

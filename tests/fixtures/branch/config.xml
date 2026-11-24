@@ -2,6 +2,23 @@
      on Junos 24.4; not captured from a device. See tests/fixtures/README.md. -->
 <configuration xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos" junos:commit-seconds="1795500000" junos:commit-localtime="2026-11-23 04:00:00 UTC" junos:commit-user="admin">
   <system>
+    <syslog>
+      <file>
+        <name>messages</name>
+        <contents><name>any</name><notice/></contents>
+        <contents><name>authorization</name><info/></contents>
+      </file>
+      <file>
+        <name>interactive-commands</name>
+        <contents><name>interactive-commands</name><any/></contents>
+      </file>
+      <file>
+        <name>traffic-log</name>
+        <contents><name>any</name><any/></contents>
+        <match>RT_FLOW_SESSION</match>
+        <structured-data/>
+      </file>
+    </syslog>
     <services>
       <outbound-ssh>
         <client>
@@ -18,6 +35,9 @@
     </services>
   </system>
   <security>
+    <log>
+      <mode>event</mode>
+    </log>
     <address-book>
       <name>global</name>
       <address junos:group="corp-baseline">

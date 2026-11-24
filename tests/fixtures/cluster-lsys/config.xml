@@ -1,6 +1,16 @@
 <!-- SYNTHETIC. Root, one logical system and one tenant system; not captured from a device. -->
 <configuration xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
   <security>
+    <log>
+      <mode>stream</mode>
+      <format>sd-syslog</format>
+      <report/>
+      <stream>
+        <name>to-siem</name>
+        <format>sd-syslog</format>
+        <host><ipaddr>192.0.2.50</ipaddr><port>514</port></host>
+      </stream>
+    </log>
     <zones>
       <security-zone>
         <name>inside</name>

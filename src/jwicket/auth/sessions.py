@@ -15,7 +15,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jwicket.junos.session import DeviceSession
 
@@ -40,7 +40,10 @@ class WebSession:
     source: str
     created: float
     last_seen: float
-    last_read: float = 0.0
+    # Per-endpoint time of the last device read, for read-rate limits.
+    last_read: Dict[str, float] = field(default_factory=dict)
+    # Small per-session cache (for example discovered log files), keyed by name: (stored at, value).
+    cache: Dict[str, Tuple[float, Any]] = field(default_factory=dict, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
