@@ -105,6 +105,17 @@ class TransportRuleTests(unittest.TestCase):
             with self.subTest(entry=entry), self.assertRaises(ConfigError):
                 parse_settings(ini(server=f"allowed_hosts = {entry}"))
 
+    def test_routing_instance_defaults_to_unset_and_parses(self) -> None:
+        self.assertIsNone(parse_settings("").server.routing_instance)
+        self.assertIsNone(parse_settings(ini(server="routing_instance =")).server.routing_instance)
+        got = parse_settings(ini(server="routing_instance = mgmt_junos"))
+        self.assertEqual(got.server.routing_instance, "mgmt_junos")
+
+    def test_bad_routing_instance_refused(self) -> None:
+        for name in ("mgmt junos", "-lead", "a;b", "x" * 129, "../etc"):
+            with self.subTest(name=name), self.assertRaises(ConfigError):
+                parse_settings(ini(server=f"routing_instance = {name}"))
+
 
 class AuthRuleTests(unittest.TestCase):
     def test_netconf_host_must_be_loopback(self) -> None:

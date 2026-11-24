@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Dict, FrozenSet, Protocol
+from typing import TYPE_CHECKING, Any, Dict, FrozenSet
 
 from jwicket.junos.errors import (
     JunosError,
@@ -34,6 +34,13 @@ from jwicket.junos.errors import (
     classify,
 )
 from jwicket.junos.xmlutil import Element
+
+if TYPE_CHECKING:
+    from typing_extensions import Protocol
+else:
+    # typing.Protocol is 3.8+; Junos 25.2 and 26.2 ship Python 3.7 (Q-RT-01). At run time nothing
+    # checks the protocol, so a plain base class is enough.
+    Protocol = object
 
 LOG = logging.getLogger("jwicket.junos")
 

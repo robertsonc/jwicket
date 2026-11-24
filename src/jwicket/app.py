@@ -8,6 +8,7 @@ can weaken a rule in settings.py.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import logging
@@ -16,7 +17,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Iterator, List, Optional
 
 from jwicket import __version__
 from jwicket.api import App, build_router
@@ -92,6 +93,31 @@ def build_app(
     )
 
 
+@contextlib.contextmanager
+def routing_instance(name: Optional[str]) -> Iterator[None]:
+    """Create sockets in Junos routing instance ``name`` inside the block, then return to the default.
+
+    ``jcs.set_routing_instance`` is process-wide and applies to sockets created after it. Only the
+    listening socket belongs in that instance: the NETCONF sessions to 127.0.0.1:830 must stay in the
+    default instance, where they time out otherwise (recorded on Junos 25.2R1-S1.4, SRX4100). A socket
+    keeps the instance it was created in, so switching back afterwards leaves the listener where it is.
+    """
+    if name is None:
+        yield
+        return
+    try:
+        import jcs  # Junos on-box module; absent anywhere else
+    except ImportError as exc:
+        raise ConfigError(
+            f"[server] routing_instance = {name} needs the Junos jcs module, which this Python does not have"
+        ) from exc
+    jcs.set_routing_instance(name)
+    try:
+        yield
+    finally:
+        jcs.set_routing_instance("default")
+
+
 def serve(settings: Settings, app: App) -> int:
     srv = settings.server
     tls = None
@@ -102,17 +128,19 @@ def serve(settings: Settings, app: App) -> int:
         except (OSError, ValueError) as exc:
             raise ConfigError(f"cannot load TLS certificate {srv.tls_cert} / key {srv.tls_key}: {exc}") from exc
     try:
-        httpd = JWicketServer(
-            (srv.bind, srv.port),
-            build_router(app),
-            tls=tls,
-            max_connections=srv.max_connections,
-            socket_timeout_s=srv.socket_timeout_s,
-            max_body_bytes=srv.max_body_bytes,
-            allowed_hosts=srv.allowed_hosts,
-        )
+        with routing_instance(srv.routing_instance):
+            httpd = JWicketServer(
+                (srv.bind, srv.port),
+                build_router(app),
+                tls=tls,
+                max_connections=srv.max_connections,
+                socket_timeout_s=srv.socket_timeout_s,
+                max_body_bytes=srv.max_body_bytes,
+                allowed_hosts=srv.allowed_hosts,
+            )
     except OSError as exc:
-        raise ConfigError(f"cannot listen on {srv.bind}:{srv.port}: {exc.strerror or exc}") from exc
+        where = f" in routing instance {srv.routing_instance}" if srv.routing_instance else ""
+        raise ConfigError(f"cannot listen on {srv.bind}:{srv.port}{where}: {exc.strerror or exc}") from exc
 
     stop = threading.Event()
 
@@ -132,7 +160,10 @@ def serve(settings: Settings, app: App) -> int:
 
     if tls is None:
         LOG.warning("TLS is off; listening on loopback only (%s). Reach it through an SSH tunnel.", srv.bind)
-    LOG.info("listening on %s:%d tls=%s backend=%s", srv.bind, srv.port, tls is not None, app.backend.name)
+    LOG.info(
+        "listening on %s:%d tls=%s backend=%s routing_instance=%s",
+        srv.bind, srv.port, tls is not None, app.backend.name, srv.routing_instance or "default",
+    )
     app.audit.record("start", user=None, source="local", version=__version__, backend=app.backend.name)
     try:
         httpd.serve_forever(poll_interval=0.5)
