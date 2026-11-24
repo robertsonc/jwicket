@@ -3135,7 +3135,7 @@ class SessionDetail {
     const polls = k ? k.polls : 1;
     const peak = hist.length ? ` · peak ${fmt.rate(Math.max(...hist))}` : '';
     this.sparkNote.textContent = enough || state !== 'live'
-      ? `${fmt.plural(enough ? hist.length : polls, 'poll')} in this tab${peak}`
+      ? `${fmt.plural(polls, 'poll')} in this tab${peak}` // the same count as the header line; rates are one fewer
       : `collecting · ${fmt.plural(polls, 'poll')}${peak}`;
     tick(this.upEl, fmt.bytes((r.in || {}).bytes));
     tick(this.downEl, fmt.bytes((r.out || {}).bytes));
