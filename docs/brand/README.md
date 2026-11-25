@@ -47,7 +47,7 @@ checks that all of them, and every SVG file here, draw the same emblem in the co
 
 These come from the boards ("Approved direction", "Usage notes", "Clear space & minimum size"):
 
-- **No tagline.** Put nothing in the lockup apart from the emblem and the wordmark.
+- **No tagline.** Put nothing in the lockup apart from the emblem and the wordmark. The sign-in page has none either (owner decision, 2026-11-25).
 - **Use the emblem alone at small sizes.** If the lockup would be narrower than its minimum width,
   use the emblem. At favicon size, use the app icon.
 - **Clear space:** keep a clear area of **X** on every side, where X is the height of the wordmark's
@@ -137,7 +137,7 @@ In the standalone files, the wordmark is drawn as outlines so that it looks the 
   and 0.18. The files draw it as a bar 0.40 × 0.22 cap (35 × 19.7 units, x 365 to 400 and y 119.9 to
   139.6), centred on the x-height and placed between the J and the W where the boards put it, a
   little past halfway from the J's stem to the W (56% in the files, 54 to 59% on the boards).
-- **The J is redrawn.** On the boards the J drops about a quarter of its cap height below the
+- **The J is redrawn** (kept by the owner's decision of 2026-11-25 over plain Inter). On the boards the J drops about a quarter of its cap height below the
   baseline and ends in a short, square foot. No Inter J does this. The files keep Inter ExtraBold's J
   stem and replace the curved bowl with that foot. In Inter's units (2048 per em, cap height 1490):
   the stem is x 744 to 1092 from the cap line down, the foot runs from x 412 to the stem between
