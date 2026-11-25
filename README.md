@@ -310,7 +310,7 @@ Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with
   <img src="docs/images/readme/cluster-scope.png" width="900" alt="J-Wicket on a chassis-cluster fixture: device chip showing the redundancy-group role and a scope picker listing the root system, a logical system and a tenant system">
 </p>
 
-*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. Its synthetic two-node session table feeds the session panels (backup copies not counted); it has no system-health replies, so that tile says unsupported. Synthetic fixture data: the lab SRX is standalone.*
+*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. This capture predates the fixture's synthetic two-node session table and the system-health tile, so its session panels say unsupported; today the fixture feeds them (backup copies not counted). Synthetic fixture data: the lab SRX is standalone.*
 
 </details>
 
