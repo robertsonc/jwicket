@@ -1,0 +1,9 @@
+{
+  "description": "get-chassis-cluster-status raised: not an SRX (R-MODEL).",
+  "refusals": [
+    "R-MODEL"
+  ],
+  "rpc_errors": {
+    "chassis-cluster-status": "syntax error"
+  }
+}

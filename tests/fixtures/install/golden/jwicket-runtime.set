@@ -1,0 +1,4 @@
+set system extensions extension-service application file jwicket.py daemonize
+set system extensions extension-service application file jwicket.py respawn-on-normal-exit
+set system extensions extension-service application file jwicket.py username labadmin
+set system extensions extension-service application file jwicket.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f

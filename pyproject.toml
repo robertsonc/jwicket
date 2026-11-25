@@ -4,7 +4,7 @@
 # PyEZ that Junos ships on the device.
 [project]
 name = "jwicket"
-version = "0.1.0.dev0"
+version = "0.1.0.dev1"
 description = "On-box, read-first web UI for Juniper SRX firewalls (foundation stage, not for production)"
 requires-python = ">=3.7"
 dependencies = []
@@ -35,8 +35,11 @@ python_version = "3.8"
 mypy_path = "src"
 strict = true
 warn_unreachable = true
-files = ["src/jwicket", "tools"]
+# deploy/container/entrypoint.py is the M3 image's entry point (Spec 006 section 6.4).
+files = ["src/jwicket", "tools", "deploy/container/entrypoint.py"]
 
 [[tool.mypy.overrides]]
-module = ["jnpr.*", "lxml.*", "jcs"]
+# Libraries without type information, imported lazily: PyEZ and lxml (on the device and in the
+# installer), the Junos on-box jcs module, and the installer's own SSH and SCP clients (tools/jwicket_install).
+module = ["jnpr.*", "lxml.*", "jcs", "paramiko.*", "scp.*", "ncclient.*"]
 ignore_missing_imports = true

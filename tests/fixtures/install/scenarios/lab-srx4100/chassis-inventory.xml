@@ -1,0 +1,14 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1/junos">
+  <chassis-inventory>
+    <chassis>
+      <name>Chassis</name>
+      <serial-number>FIXTURE-SN-4100</serial-number>
+      <description>SRX4100</description>
+      <chassis-module>
+        <name>Routing Engine 0</name>
+        <description>RE-SRX4100</description>
+      </chassis-module>
+    </chassis>
+  </chassis-inventory>
+</rpc-reply>

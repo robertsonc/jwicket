@@ -1,0 +1,6 @@
+{
+  "description": "J-Web (https) on 9443, the --access tls default, and REST (http) on 8443, the --access tunnel default.",
+  "refusals": [
+    "R-PORT"
+  ]
+}

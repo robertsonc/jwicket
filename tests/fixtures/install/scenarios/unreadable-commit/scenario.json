@@ -1,0 +1,6 @@
+{
+  "description": "A commit-information reply that does not parse.",
+  "refusals": [
+    "R-PENDING"
+  ]
+}

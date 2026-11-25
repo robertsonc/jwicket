@@ -93,7 +93,7 @@ also a web server on the routing engine, and it has to earn trust through the se
 | Audience | What they need from J-Wicket | When they can use it |
 | --- | --- | --- |
 | Customers who manage an SRX on the box (the destination) | The J-Web 24.4 tasks, done safely, with the login class they already have | Not before G5: signed package, support statement, HA and upgrade qualified |
-| Systems engineers (SEs) and labs (first, while J-Wicket is unqualified) | Read-only look-ups and demos on lab devices | Now on synthetic fixtures (`make dev`); on a disposable lab vSRX only through [deploy-lab.md](deploy-lab.md) for qualification; real-lab use is a G2 exit criterion |
+| Systems engineers (SEs) and labs (first, while J-Wicket is unqualified) | Read-only look-ups and demos on lab devices | Now on synthetic fixtures (`make dev`); on a disposable lab vSRX, or lab hardware its owner approves, only through [deploy-lab.md](deploy-lab.md), or the lab-gated installers ([install.md](install.md), unverified on a device), for qualification; real-lab use is a G2 exit criterion |
 | Operators new to Junos (a rule that applies to every audience in this table) | To use each screen without knowing Junos: concepts explained where they appear, the matching Junos command alongside | A design rule from [ADR 0010](adr/0010-usable-without-knowing-junos.md) on; the explain-in-place layer is [Spec 005](specs/005-explain-junos-in-place.md) (Draft, not built) |
 | Operators with restricted login classes (auditors, read-only staff) | To see exactly what Junos lets them see, with denied reads shown as denied | A design rule from Spec 001 on; proven on a device by Q-AUTH-03 (G1) |
 | The named security reviewer and the qualification lab owner | Evidence they can check | G1 and G4 sign-off; certification of every `qualified` ledger row |
@@ -171,7 +171,7 @@ SEs choosing J-Wicket over J-Web for look-ups on real labs (the spike report's o
 | A user database or roles of J-Wicket's own | Junos already has users, login classes, RADIUS and TACACS+ ([ADR 0002](adr/0002-junos-delegated-sign-in.md)). |
 | A policy matcher that claims to be the device's answer | A confident wrong answer is the failure that matters ([ADR 0006](adr/0006-device-explains-policy-decisions.md)). A local evaluator may preview uncommitted rules in Spec 003, labelled as J-Wicket's model. |
 | Keeping device data in the browser, or working while the device is unreachable | [ADR 0007](adr/0007-offline-capable-meaning.md). |
-| A production installer, or asking anyone to open a listener, disable J-Web or change a production firewall, at this stage | Stage: foundation. Lab procedure only ([deploy-lab.md](deploy-lab.md)). |
+| A production installer, or asking anyone to open a listener, disable J-Web or change a production firewall, at this stage | Stage: foundation. Lab procedure only ([deploy-lab.md](deploy-lab.md)), or the lab-gated installers ([install.md](install.md), unverified on a device). |
 | Live configuration writes before G4 | Read before write. |
 | Junos-FIPS mode devices (proposed; owner approval pending) | J-Web itself is not supported there, and an unsigned app is the wrong fit. See [section 7](#junos-fips-mode). |
 | Serving the device's other web-management functions (firewall web authentication, Juniper Secure Connect) (proposed; owner approval pending) | Those depend on Junos's own `web-management` service (**verified**, J-Web 24.4 guide). J-Wicket replaces the management UI only. |
@@ -403,8 +403,14 @@ These bound the product. Each is marked verified, inferred or unknown.
   identical configuration, and Juniper recommends keeping configuration in step with configuration
   groups and `commit peers-synchronize`. **Verified** (Juniper MNHA page; the identical-configuration
   sentence is in its logical and tenant systems section). Each node commits on its own: **inferred**.
-- Junos script synchronization between routing engines covers commit, event, lib, op and SNMP
-  scripts. JET is not listed. **Verified** (Juniper script synchronization page).
+- Junos's automatic script synchronization between routing engines (the `synchronize` statement
+  under `[edit system scripts]`, used by `commit synchronize`) covers commit, event, lib, op and SNMP
+  scripts; JET is not listed. **Verified** (Juniper script synchronization page; `synchronize`
+  statement page). The manual command does list JET: "request system scripts synchronize (all |
+  commit | event | jet | lib | op | snmp)" (**verified**, CLI Reference), so a JET file can be copied
+  to the other routing engine by hand. Whether that reaches the other node of a chassis cluster is
+  **unknown** (Q-HA-01). Corrected 2026-11-24 for [Spec 006](specs/006-installation.md): this note
+  used to say only that JET is not listed.
 - What follows, **inferred**: J-Wicket's file must be placed and checked on each node by hand; each
   node runs its own J-Wicket; the UI must say which node it is on and that node's role; in a chassis
   cluster, changes belong on the RG0 primary; in MNHA, a change preview must say which node(s) it
@@ -468,23 +474,27 @@ Also pending an owner decision, raised by this charter:
 
 ## 10. Where the repository stands
 
-As of 2026-11-24. J-Wicket's own bundle has run on one device: the owner's lab SRX4100, Junos
-25.2R1-S1.4 ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). There it signed in a super-user operator over NETCONF and read
-the policy inventory, the session table and a syslog file. Nothing in this repository has run on
+As of 2026-11-25. J-Wicket's own bundle has run on one device: the owner's lab SRX4100, Junos
+25.2R1-S1.4, on 24 and 25 November 2026 ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). There it signed in operators of the
+`read-only`, `operator` and `super-user` classes over NETCONF and read the policy inventory, the
+session table and a syslog file. Nothing in this repository has run on
 a customer platform. The earlier spike daemon in
 [`docs/evidence/`](evidence/2026-11-23-vsrx-spike/README.md) ran on one vSRX. All fixtures are
-synthetic.
+synthetic except nine replies recorded on that SRX4100
+([`tests/fixtures/recorded-srx4100-25.2R1-S1.4/`](../tests/fixtures/recorded-srx4100-25.2R1-S1.4/SOURCE.md)).
 
 | Area | State | Evidence |
 | --- | --- | --- |
 | Spec 001, scoped read-only policy inventory | Backend built against synthetic fixtures: scope banner, zone-pair order, group provenance, denied reads, stamped JSON and CSV exports. The v2 Policies and Objects views are built and committed and have been exercised by hand on the development server; browser acceptance (AC-001-21) is not signed off | [`src/jwicket/junos/inventory.py`](../src/jwicket/junos/inventory.py), [`src/jwicket/api.py`](../src/jwicket/api.py), [`tests/test_inventory.py`](../tests/test_inventory.py) |
 | Spec 004, live sessions and logs (read-only) | Backend and browser engines built against synthetic fixtures: filtered session lists with the 5,000 cap, syslog file tailing with a cursor, on-box report and event-buffer readers; browser-side highlighting and filtering. The Sessions and Logs views are built and committed and have been exercised by hand on the development server; browser acceptance (AC-004-20) is not signed off | [`src/jwicket/live.py`](../src/jwicket/live.py), [`src/jwicket/junos/sessions.py`](../src/jwicket/junos/sessions.py), [`src/jwicket/junos/logs.py`](../src/jwicket/junos/logs.py), [`tests/test_live.py`](../tests/test_live.py) |
 | Sign-in | Per-operator NETCONF backend written. On a lab SRX4100 (25.2R1-S1.4) a super-user account signed in over NETCONF to loopback, and a wrong password was refused by Junos; the read-only-class half of Q-AUTH-01 has not run ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). Loopback-only lab-token backend runs as the daemon's account and says so. | [`src/jwicket/auth/backends.py`](../src/jwicket/auth/backends.py), [`src/jwicket/junos/session.py`](../src/jwicket/junos/session.py) |
-| Specs 002 and 003 | Documents only. There is no write path in the code. | [Spec 002](specs/002-change-protocol.md), [Spec 003](specs/003-firewall-policy-builder.md) |
+| Specs 002 and 003 | Documents only. There is no write path in the daemon. | [Spec 002](specs/002-change-protocol.md), [Spec 003](specs/003-firewall-policy-builder.md) |
 | Bundle | CI builds `dist/jwicket.py` twice and fails if the builds differ, then runs the bundle's self-test isolated from the source tree. Started by Junos as a daemonized JET application on a lab SRX4100; self-test digest matched the build (Q-RT-02 partial). | [`tools/bundle.py`](../tools/bundle.py), [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 | Tests | Unit and HTTP integration tests, all against synthetic fixtures. CI runs them on Python 3.7, 3.9, 3.11 and 3.13, and the Node tests (`tests/js/`) on Node 22, for every pull request and every push to `main`. Run `make test` and the Node command in [CONTRIBUTING.md](../CONTRIBUTING.md#set-up-and-run) rather than rely on a count here. | [`tests/`](../tests/), [`tests/fixtures/README.md`](../tests/fixtures/README.md) |
 | Development server | Real server and UI on loopback, fed from fixtures, with a "fixture data" banner on every page | `make dev`, [`src/jwicket/devserver.py`](../src/jwicket/devserver.py) |
-| Lab procedure | Written for a disposable vSRX. Run once, on 24 November 2026, on the owner's lab SRX4100 (hardware, Junos 25.2R1-S1.4), with deviations recorded: TLS on fxp0 through `mgmt_junos` instead of the SSH tunnel, which 25.2 refused | [deploy-lab.md](deploy-lab.md), [evidence](evidence/2026-11-24-srx4100-lab/README.md) |
+| Lab procedure | Written for a disposable vSRX. Run on 24 and 25 November 2026 on the owner's lab SRX4100 (hardware, Junos 25.2R1-S1.4), with deviations recorded: TLS on fxp0 through `mgmt_junos` instead of the SSH tunnel, which 25.2 refused. Spec 006 proposes changes to it (a pending-commit check, confirms with a comment, the explicit tunnel bind, the removal rules), waiting for the lab owner (D2) | [deploy-lab.md](deploy-lab.md), [evidence](evidence/2026-11-24-srx4100-lab/README.md) |
+| Installation, Spec 006 (lab only) | Installers built together with their Draft spec (owner decision, [ADR 0011](adr/0011-owner-decisions-lab-gated-install.md)), against fake device sessions: the workstation installer, Ansible playbooks, a container image you build locally from a pinned Dockerfile (never yet built with Docker; CI's container job builds it and never pushes it), an on-box op script, CLI paste units and a containerlab topology. Lab-gated until G1; every other design choice a proposal ([ADR 0012](adr/0012-installer-design.md)), except the three defaults the owner accepted on 2026-11-25 ([ADR 0011](adr/0011-owner-decisions-lab-gated-install.md), decision 4): TLS on the management address, root's one-time directory step, and lab hardware only with `--lab-hardware` and a typed `lab only`; never run on a device (Q-INST-06). Revised from the SRX4100 run: TLS on the management address by default, the state directory made once by root, no SSH-channel checks, Python 3.7 on the box, and lab hardware only with a typed `lab only` | [Spec 006](specs/006-installation.md), [install.md](install.md), [`tools/jwicket_install/`](../tools/jwicket_install/), [`deploy/`](../deploy/) |
+| Releases | A tag-triggered workflow for lab pre-releases with SHA-256 and attestations. No tag and no pre-release yet: the first, `v0.1.0.dev1`, waits for the owner's go | [`release.yml`](../.github/workflows/release.yml), [release records](releases/README.md) |
 | Qualification | On one lab SRX4100 (25.2R1-S1.4): Q-RT-01 passed; Q-RT-02, Q-AUTH-01, Q-TLS-01 and the fxp0 part of Q-NET-01 partial. The policy inventory, session table and `messages` log were read from the device as the signed-in operator. No recorded device replies exist (Q-REL-01). Nothing qualified; G1 not reached. | [governance.md](governance.md) |
 | Parity ledger | Release 24.4 rows. No row is `implemented` or `qualified` yet: 38 Spec 001 and 004 rows pass their backend criteria on fixtures and are held at `specified` until their browser checks pass | [parity/README.md](parity/README.md), [summary](parity/jweb-24.4.md) |
 
@@ -513,7 +523,11 @@ path on `networkingdocs.hpe.com`.
 - Python scripts overview (Python 3 for JET from 20.2R1; Python 2.7 removed in 21.1R1):
   <https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-python-scripts-overview.html>
 - Script synchronization between routing engines:
-  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-script-synchronizing-routing-engines-overview.html>
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-script-synchronizing-routing-engines-overview.html>;
+  `request system scripts synchronize`:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-scripts-synchronize-command.html>;
+  `synchronize (Scripts)` statement:
+  <https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/synchronize-edit-system-scripts.html>
 - Chassis cluster redundancy groups:
   <https://networkingdocs.hpe.com/documentation/us/en/software/junos/chassis-cluster-security-devices/topics/topic-map/security-chassis-cluster-redundancy-groups.html>
 - Multinode High Availability:

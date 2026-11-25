@@ -1,0 +1,10 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The directory root made (R4), still empty. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <directory-list>
+    <directory>
+      <directory-name>/var/db/jwicket</directory-name>
+      <total-files>0</total-files>
+    </directory>
+  </directory-list>
+</rpc-reply>

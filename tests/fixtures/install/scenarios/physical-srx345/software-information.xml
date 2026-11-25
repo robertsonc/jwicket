@@ -1,0 +1,9 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <software-information>
+    <host-name>lab-vsrx-1</host-name>
+    <product-model>srx345</product-model>
+    <product-name>srx345</product-name>
+    <junos-version>24.4R2-S3.5</junos-version>
+  </software-information>
+</rpc-reply>

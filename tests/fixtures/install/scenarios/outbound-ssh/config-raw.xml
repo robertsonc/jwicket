@@ -1,0 +1,39 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The select-only configuration read of spec 8.3. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <configuration>
+    <system>
+      <services>
+        <netconf>
+          <ssh/>
+        </netconf>
+        <outbound-ssh>
+          <client>
+            <name>sd-cloud</name>
+            <secret>$9$FIXTURE-PLACEHOLDER-NOT-A-SECRET</secret>
+            <device-id>FIXTURE-DEVICE-ID</device-id>
+            <services>netconf</services>
+          </client>
+        </outbound-ssh>
+      </services>
+      <login>
+        <user>
+          <name>admin</name>
+          <authentication>
+            <encrypted-password>$6$FIXTURE-PLACEHOLDER-HASH</encrypted-password>
+          </authentication>
+        </user>
+      </login>
+      <extensions>
+        <extension-service>
+          <application>
+            <file>
+              <name>other_app.py</name>
+              <source>https://fixture-user:fixture-pass@mirror.example.net/other_app.py</source>
+            </file>
+          </application>
+        </extension-service>
+      </extensions>
+    </system>
+  </configuration>
+</rpc-reply>

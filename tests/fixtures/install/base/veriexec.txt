@@ -1,0 +1,1 @@
+security.mac.veriexec.state: loaded active enforce

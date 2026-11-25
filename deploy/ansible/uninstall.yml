@@ -1,0 +1,349 @@
+---
+# J-Wicket M2: remove J-Wicket from lab SRXs, one host at a time (Spec 006 sections 6.3, 6.15, 9.5).
+#
+# LAB ONLY. This installer has not yet run on any device. Every device step is unverified until lab
+# test Q-INST-06 is certified.
+#
+# Like install.yml, the play talks to no device. For each host it runs jwicket-install on this
+# controller: two read-only dry runs (what will be deleted, what stays and why, the removal warnings,
+# then the same as JSON parsed with from_json), and only with -e jwicket_apply=true the lab gate (and,
+# with jwicket_lab_hardware=true, the typed 'lab only') and
+# "jwicket-install uninstall --apply --method ansible --gate-from-stdin --json" with the typed answers on
+# standard input, one per line.
+# jwicket-install fetches the evidence (logs, audit records, result files, the receipt) into
+# jwicket_evidence_dir before it removes anything, removes only what Junos's commit history and this
+# workstation's record show it added, and keeps shared statements something else relies on. It leaves
+# /var/db/jwicket itself: root made it, and root removes it (the output says how).
+#
+# Not offered here, because each needs a second typed confirmation or a terminal: removing the shared
+# NETCONF statement (--remove-shared). Use jwicket-install directly (M1) for that.
+#
+# Run from deploy/ansible (so ansible.cfg applies):
+#   dry run:   ansible-playbook -i inventory.ini uninstall.yml
+#   uninstall: ansible-playbook -i inventory.ini uninstall.yml -e jwicket_apply=true
+
+- name: J-Wicket uninstall (LAB ONLY, one host at a time)
+  hosts: jwicket_lab
+  connection: local
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  debugger: never
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    ansible_no_target_syslog: true
+
+  tasks:
+    - name: Refuse gate and internal variables that were set outside this play
+      # Extra variables (-e) always win over registered and task variables (INV-05, INV-12).
+      ansible.builtin.assert:
+        that:
+          - jwicket_gate_typed is not defined
+          - jwicket_lab_typed is not defined
+          - jwicket_device_hostname is not defined
+          - jwicket_dry_text is not defined
+          - jwicket_dry_json is not defined
+          - jwicket_plan is not defined
+          - jwicket_applied is not defined
+          - jwicket_argv is not defined
+          - jwicket_exit_codes is not defined
+          - jwicket_executable_stat is not defined
+        fail_msg: >-
+          A gate variable (jwicket_gate_typed, jwicket_lab_typed, jwicket_device_hostname) or a
+          variable this play sets for itself (jwicket_dry_text, jwicket_dry_json, jwicket_plan,
+          jwicket_applied, jwicket_argv, jwicket_exit_codes, jwicket_executable_stat) was given from
+          outside: as an extra variable (-e), in the inventory, or in a variable file. Remove it. The
+          lab gate takes the host name and the 'lab only' attestation only from what you type at its
+          prompts, and jwicket-install compares the name with the one the device reports.
+        quiet: true
+
+    - name: Check the inputs before anything runs
+      ansible.builtin.assert:
+        that:
+          - ansible_connection == 'local'
+          - jwicket_user is defined
+          - jwicket_user is string
+          - jwicket_user == jwicket_user | trim
+          - jwicket_user is match('^[A-Za-z][A-Za-z0-9._-]{0,31}$')
+          - jwicket_user != 'root'
+          - ansible_host | default(inventory_hostname) is string
+          - ansible_host | default(inventory_hostname) == ansible_host | default(inventory_hostname) | trim
+          - ansible_host | default(inventory_hostname) is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
+          - jwicket_ssh_port is not defined or jwicket_ssh_port | string is match('^[1-9][0-9]{0,4}$')
+          - jwicket_ssh_port is not defined or jwicket_ssh_port | int <= 65535
+          - jwicket_lab_hardware | default(false) | string | lower in ['true', 'false', 'yes', 'no']
+          # jwicket-install uninstall takes no bootstrap (it has no --bootstrap-nonce).
+          - jwicket_bootstrap_nonce is not defined
+          - jwicket_overrides | default([]) is sequence
+          - jwicket_overrides | default([]) is not string
+          - jwicket_overrides | default([]) is not mapping
+          - jwicket_overrides | default([]) | difference(['--ack-managed', '--ack-commit-scripts']) | length == 0
+          - jwicket_install_executable is not defined or jwicket_install_executable is string
+          - jwicket_install_executable is not defined or jwicket_install_executable == jwicket_install_executable | trim
+          - jwicket_install_executable is not defined or jwicket_install_executable is match('^/[-A-Za-z0-9 ._/+@~]*$')
+          - jwicket_evidence_dir is not defined or jwicket_evidence_dir is string
+          - jwicket_evidence_dir is not defined or jwicket_evidence_dir == jwicket_evidence_dir | trim
+          - jwicket_evidence_dir is not defined or jwicket_evidence_dir is match('^/[-A-Za-z0-9 ._/+@~]*$')
+          - jwicket_apply | default(false) | string | lower in ['true', 'false', 'yes', 'no']
+          - not (ansible_check_mode and jwicket_apply | default(false) | bool)
+        fail_msg: >-
+          An input is missing or not in the expected form. Needed: jwicket_user (the device account:
+          letters, digits, '.', '_', '-', not root), ansible_host or the inventory name (a host name or
+          IPv4 address). Optional: jwicket_ssh_port (1 to 65535), jwicket_lab_hardware (true or false),
+          jwicket_overrides (a list holding --ack-managed or --ack-commit-scripts),
+          jwicket_install_executable and jwicket_evidence_dir (absolute paths), jwicket_apply (true or
+          false, and not with --check). Uninstall takes no jwicket_bootstrap_nonce. Nothing was run.
+        quiet: true
+
+    - name: Check that jwicket-install is installed on this controller
+      ansible.builtin.stat:
+        path: "{{ jwicket_argv.executable }}"
+      vars: &jwicket_vars
+        # The executor's argument list, built only from the inputs checked above; never a shell line.
+        jwicket_argv:
+          executable: "{{ jwicket_install_executable | default(ansible_playbook_python | dirname ~ '/jwicket-install') }}"
+          target: >-
+            {{ ['--host', ansible_host | default(inventory_hostname), '--user', jwicket_user]
+            + (['--port', jwicket_ssh_port | string] if jwicket_ssh_port is defined else []) }}
+          # --method ansible: recorded in the journal, and the only method that may take --gate-from-stdin.
+          options: >-
+            {{ ['--method', 'ansible']
+            + (['--lab-hardware'] if jwicket_lab_hardware | default(false) | bool else [])
+            + (jwicket_overrides | default([]) | list) }}
+          # jwicket-install writes evidence-<fingerprint>-<time>/ into its working directory (9.5).
+          workdir: "{{ jwicket_evidence_dir | default(lookup('ansible.builtin.env', 'HOME') ~ '/.local/state/jwicket-install/evidence') }}"
+        # jwicket-install's exit codes (Spec 006 section 9.7).
+        jwicket_exit_codes:
+          0: done, dry run printed, or nothing to change
+          1: refused, the device could not be read, or NETCONF does not answer
+          2: bad arguments or inputs
+          3: >-
+            lab gate not passed (the typed name did not match the device's host name, or 'lab only' was
+            not typed after --lab-hardware), or no answer
+          4: the device refused a step before that stage's commit (lock, load, commit or file)
+          5: a check failed after commit confirmed; Junos rolled that stage back
+          6: the device's change differed from the plan; nothing was committed in that stage
+          7: transfer, integrity or provenance failure (download, SHA-256, owner or mode, no independent source)
+          8: >-
+            uninstall incomplete: the configuration is removed, but a J-Wicket process still runs, so
+            the files were kept. Stop it as jwicket-install's output says (deploy-lab step 9), then run
+            this playbook again to remove the files
+      register: jwicket_executable_stat
+
+    - name: Stop when jwicket-install is missing
+      ansible.builtin.fail:
+        msg: >-
+          jwicket-install was not found, or is not executable, at {{ jwicket_argv.executable }}. Install
+          the installer wheel into the virtual environment that runs ansible-playbook (README.md, set-up
+          step 3), or set jwicket_install_executable to its absolute path. Nothing was run.
+      vars: *jwicket_vars
+      when: not (jwicket_executable_stat.stat.exists and jwicket_executable_stat.stat.executable)
+
+    - name: Dry run, what would be removed and what stays, as jwicket-install prints it (reads only)
+      ansible.builtin.command:
+        argv: "{{ [jwicket_argv.executable, 'uninstall'] + jwicket_argv.target + jwicket_argv.options }}"
+      vars: *jwicket_vars
+      register: jwicket_dry_text
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      timeout: 900
+
+    - name: Show the plan (no host name is shown before the gate)
+      ansible.builtin.debug:
+        msg: "{{ jwicket_dry_text.stdout }}"
+
+    - name: Show jwicket-install's diagnostics
+      ansible.builtin.debug:
+        msg: "{{ jwicket_dry_text.stderr }}"
+      when: jwicket_dry_text.stderr | default('') | length > 0
+
+    - name: Stop this host when the dry run did not succeed
+      ansible.builtin.fail:
+        msg: >-
+          jwicket-install exited {{ jwicket_dry_text.rc }}: {{ jwicket_exit_codes[jwicket_dry_text.rc] | default('unknown exit code') }}.
+          Nothing was written to the device. Read the output above: it says what failed and what to do.
+          If it says NETCONF does not answer: jwicket-install uninstall reads the device over NETCONF and
+          takes no bootstrap, so this play cannot remove anything from {{ inventory_hostname }} until
+          NETCONF answers there again.
+      vars: *jwicket_vars
+      when: jwicket_dry_text.rc != 0
+
+    - name: Dry run again for the machine-readable plan (reads only)
+      ansible.builtin.command:
+        argv: "{{ [jwicket_argv.executable, 'uninstall'] + jwicket_argv.target + jwicket_argv.options + ['--json'] }}"
+      vars: *jwicket_vars
+      register: jwicket_dry_json
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      timeout: 900
+
+    - name: Stop this host when the JSON dry run did not succeed
+      ansible.builtin.fail:
+        msg: >-
+          jwicket-install --json exited {{ jwicket_dry_json.rc }}: {{ jwicket_exit_codes[jwicket_dry_json.rc] | default('unknown exit code') }}.
+          Nothing was written to the device. Its diagnostics: {{ jwicket_dry_json.stderr | default('') }}
+      vars: *jwicket_vars
+      when: jwicket_dry_json.rc != 0
+
+    - name: Check the plan document (parsed only from jwicket-install's own output)
+      # jwicket-install uninstall --json: {"command": "uninstall", "exit": ..., "uninstall": {"stages":
+      # [{"name", "lines"}], "files": [<path>], "kept": [<key>], "refusals": [<code>], "blocked": ...,
+      # "production_signs": [<text>], ...}}
+      # (cli.cmd_uninstall; tests/test_ansible_contract.py runs it against the fake device).
+      ansible.builtin.assert:
+        that:
+          - jwicket_plan is mapping
+          - jwicket_plan.command | default(none) == 'uninstall'
+          - jwicket_plan.uninstall | default(none) is mapping
+          - jwicket_plan.uninstall.blocked | default(true) is false
+          - jwicket_plan.uninstall.stages | default(none) is sequence
+          - jwicket_plan.uninstall.files | default(none) is sequence
+        fail_msg: >-
+          jwicket-install's JSON uninstall plan is not the document this playbook expects (another
+          installer version), or it is blocked. Nothing was written to the device.
+        quiet: true
+      vars:
+        jwicket_plan: "{{ jwicket_dry_json.stdout | from_json }}"
+
+    - name: Plan summary (from the JSON plan; the texts are in the plan shown above)
+      ansible.builtin.debug:
+        msg: |-
+          nothing to remove: {{ jwicket_plan.uninstall.stages | length == 0 and jwicket_plan.uninstall.files | length == 0 }}
+          lab hardware (not a vSRX; 'lab only' is asked after the host name): {{ jwicket_plan.uninstall.lab_hardware | default(false) }}
+          {% for sign in jwicket_plan.uninstall.production_signs | default([]) %}
+          production sign: {{ sign }}
+          {% endfor %}
+          {% for stage in jwicket_plan.uninstall.stages %}
+          stage {{ stage.name }}:
+          {% for line in stage.lines %}
+            {{ line }}
+          {% endfor %}
+          {% endfor %}
+          {% for path in jwicket_plan.uninstall.files %}
+          file {{ path }}
+          {% endfor %}
+          {% for key in jwicket_plan.uninstall.kept | default([]) %}
+          kept: {{ key }}
+          {% endfor %}
+      vars:
+        jwicket_plan: "{{ jwicket_dry_json.stdout | from_json }}"
+
+    - name: Dry run finished (add -e jwicket_apply=true to uninstall)
+      ansible.builtin.debug:
+        msg: >-
+          Dry run only: nothing was removed. To uninstall, run this playbook again with
+          -e jwicket_apply=true and type the device's host name at the lab gate.
+      when: not (jwicket_apply | default(false) | bool)
+
+    - name: Nothing to remove on this host
+      # The executor's own rule (UninstallPlan.no_change): no stage and no file to remove.
+      ansible.builtin.debug:
+        msg: J-Wicket is not installed on this host (nothing this installer added was found).
+      when:
+        - jwicket_apply | default(false) | bool
+        - (jwicket_dry_json.stdout | from_json).uninstall.stages | length == 0
+        - (jwicket_dry_json.stdout | from_json).uninstall.files | length == 0
+
+    - name: Lab gate, then uninstall
+      when:
+        - jwicket_apply | default(false) | bool
+        - >-
+          (jwicket_dry_json.stdout | from_json).uninstall.stages | length > 0
+          or (jwicket_dry_json.stdout | from_json).uninstall.files | length > 0
+      block:
+        - name: "Lab gate: type the device's host name (nothing has been removed yet)"
+          # LAB_GATE_PROMPT of tools/jwicket_install/plan.py; Ansible adds the final colon. The prompt
+          # shows no host name, and the answer is registered only here.
+          ansible.builtin.pause:
+            prompt: >-
+              This installer is for lab devices only. J-Wicket has not passed gate G1. Type the host
+              name of the lab device you intend to change (the name set with 'set system host-name').
+              Typing it confirms that this device is a disposable lab device you are allowed to change;
+              it does not prove it. Press Enter to stop
+          register: jwicket_gate_typed
+          no_log: true
+
+        - name: Stop when the gate got no answer (Enter pressed, or no terminal)
+          # Without a terminal, ansible.builtin.pause does not wait and returns an empty answer
+          # (ansible-core 2.20.0, plugins/action/pause.py); an empty answer never passes.
+          ansible.builtin.assert:
+            that:
+              - jwicket_gate_typed.user_input is defined
+              - jwicket_gate_typed.user_input is string
+              - jwicket_gate_typed.user_input | trim | length > 0
+            fail_msg: >-
+              The lab gate got no answer, so nothing was removed. Run ansible-playbook from a terminal
+              and type the device's host name at the prompt.
+            quiet: true
+
+        - name: "Lab hardware: type 'lab only' (nothing has been removed yet)"
+          # LAB_HARDWARE_PROMPT of tools/jwicket_install/plan.py; Ansible adds the final colon. Asked
+          # only with jwicket_lab_hardware; the production signs were shown above, before both prompts.
+          # jwicket-install compares the host name first and this answer only on a match (Spec 006 8.2).
+          ansible.builtin.pause:
+            prompt: >-
+              Type 'lab only' to state that this device carries only lab traffic: no production traffic,
+              user or service depends on it, and its owner approved this run ('show chassis hardware' and
+              'show configuration system services outbound-ssh' help you check). Your statement is recorded
+              in the install record; it does not prove anything. Press Enter to stop
+          register: jwicket_lab_typed
+          no_log: true
+          when: jwicket_lab_hardware | default(false) | bool
+
+        - name: Stop when 'lab only' got no answer (Enter pressed, or no terminal)
+          ansible.builtin.assert:
+            that:
+              - jwicket_lab_typed.user_input is defined
+              - jwicket_lab_typed.user_input is string
+              - jwicket_lab_typed.user_input | trim | length > 0
+            fail_msg: >-
+              The lab-hardware attestation got no answer, so nothing was removed. Run ansible-playbook from
+              a terminal and type 'lab only' at the prompt, or leave out jwicket_lab_hardware.
+            quiet: true
+          when: jwicket_lab_hardware | default(false) | bool
+
+        - name: Create the evidence directory on this controller (mode 0700)
+          ansible.builtin.file:
+            path: "{{ jwicket_argv.workdir }}"
+            state: directory
+            mode: "0700"
+          vars: *jwicket_vars
+
+        - name: Uninstall through jwicket-install, gated on the device's own host name
+          ansible.builtin.command:
+            argv: >-
+              {{ [jwicket_argv.executable, 'uninstall', '--apply'] + jwicket_argv.target
+              + jwicket_argv.options + ['--gate-from-stdin', '--json'] }}
+            # One answer per line: the host name, then 'lab only' with jwicket_lab_hardware. Double-quoted,
+            # so YAML makes the newline: Ansible keeps a backslash inside a template as it is.
+            stdin: "{{ jwicket_gate_typed.user_input ~ (('\n' ~ jwicket_lab_typed.user_input) if jwicket_lab_hardware | default(false) | bool else '') }}"
+            chdir: "{{ jwicket_argv.workdir }}"
+          vars: *jwicket_vars
+          register: jwicket_applied
+          # The arguments include the typed answers; the next tasks show the executor's output, which
+          # never carries a credential (INV-08).
+          no_log: true
+          changed_when: jwicket_applied.rc in [0, 8]
+          failed_when: false
+          timeout: 3600
+
+        - name: Show the result (jwicket-install's JSON document)
+          ansible.builtin.debug:
+            msg: "{{ jwicket_applied.stdout | from_json if jwicket_applied.stdout | trim is match('[{]') else jwicket_applied.stdout }}"
+
+        - name: Show jwicket-install's diagnostics
+          ansible.builtin.debug:
+            msg: "{{ jwicket_applied.stderr }}"
+          when: jwicket_applied.stderr | default('') | length > 0
+
+        - name: Stop when the uninstall did not finish
+          ansible.builtin.fail:
+            msg: >-
+              jwicket-install exited {{ jwicket_applied.rc }}: {{ jwicket_exit_codes[jwicket_applied.rc] | default('unknown exit code') }}.
+              Evidence, if fetched, is under {{ jwicket_argv.workdir }}. Remaining hosts are not changed.
+          vars: *jwicket_vars
+          when: jwicket_applied.rc != 0

@@ -1,0 +1,6 @@
+set system scripts language python3
+set system extensions extension-service application file jwicket_selftest.py username labadmin
+set system extensions extension-service application file jwicket_selftest.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+set system extensions extension-service application file jwicket_probe.py username labadmin
+set system extensions extension-service application file jwicket_probe.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+set system services netconf ssh

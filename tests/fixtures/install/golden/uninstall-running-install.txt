@@ -1,0 +1,178 @@
+This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
+Removing 'language python3' ('delete system scripts language') stops every unsigned Python script on this device from running, not only J-Wicket.
+Removing netconf ssh ('delete system services netconf ssh') stops new NETCONF sessions to this device and may end every open one (unverified, lab test Q-INST-05), including tools that started using it after J-Wicket was installed.
+Unit 1 (device-operational): pending commits
+Status: verified command
+```
+show system commit | no-more
+```
+STOP if, in 'show system commit', the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01).
+
+Stage uninstall: 4 configuration line(s), one 'commit confirmed 5', confirmed only after the checks.
+Unit 2A (device-configuration): stage uninstall: open configuration mode
+Status: 'run' verified ([run-cmd]); '| no-more' inferred
+```
+configure exclusive
+run show system commit | no-more
+```
+STOP if the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01): type 'exit' and wait until it is settled. Otherwise paste the next unit.
+
+Unit 2B (device-configuration): stage uninstall: the configuration change
+Status: statements: see each line's status in Spec 006 section 7.3
+```
+delete system scripts language
+delete system extensions extension-service application file jwicket_selftest.py
+delete system extensions extension-service application file jwicket_probe.py
+delete system extensions extension-service application file jwicket.py
+show | compare | no-more
+```
+STOP unless 'show | compare' shows exactly these statements and nothing else. Junos prints each change under the deepest level that already exists, and a new level as a braced block; the grouping below is rendered from the configuration the installer read, a select-only read, so a level it cannot see may make Junos print a deeper header for the same statements (illustrative; real samples are recorded by lab test Q-INST-01):
+    [edit system]
+    -    scripts {
+    -        language python3;
+    -    }
+    -    extensions {
+    -        extension-service {
+    -            application {
+    -                file jwicket_selftest.py {
+    -                    checksum {
+    -                        sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+    -                    }
+    -                    username labadmin;
+    -                }
+    -                file jwicket_probe.py {
+    -                    checksum {
+    -                        sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+    -                    }
+    -                    username labadmin;
+    -                }
+    -                file jwicket.py {
+    -                    checksum {
+    -                        sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+    -                    }
+    -                    daemonize;
+    -                    respawn-on-normal-exit;
+    -                    username labadmin;
+    -                }
+    -            }
+    -        }
+    -    }
+If it shows anything else, type 'rollback 0' and 'exit'.
+
+Unit 2C (device-configuration): stage uninstall: commit confirmed
+Status: 'commit confirmed <minutes> comment' inferred to combine (documented: commit confirmed comment)
+```
+commit confirmed 5 comment "jwicket uninstall lab-install"
+```
+Deadline: 5 minutes from now. Unless the confirming unit below is pasted before then, Junos rolls this stage back by itself.
+
+Unit 2D (device-configuration): stage uninstall: checks
+Status: checks unverified on a device (Q-INST-06)
+```
+show | compare rollback 1 | no-more
+run show system commit | no-more
+```
+Compare with what each check expects:
+C12: The removed statements are absent from the committed configuration.
+    expect the removed statements to be gone
+C10: Before confirming: the committed statements of the touched subtrees equal the plan, and the committed delta ('show | compare rollback 1') changes nothing outside them.
+    expect 'show | compare rollback 1' to show only the change of unit B
+C11: Before confirming: 'show system commit' shows this stage's commit as the newest, by the daemon account, with this stage's comment, and no 'commit at' or prepared commit.
+    expect the newest commit by labadmin with the comment: jwicket uninstall lab-install
+Leave at least one minute before the deadline. Only if all of that matches, paste the next unit.
+Otherwise type 'exit' (answer 'yes' if asked to exit with uncommitted changes) and let Junos roll the stage back at the deadline.
+
+Only if every check above matched:
+Unit 2E (device-configuration): stage uninstall: confirm
+Status: confirming with 'commit comment' (force-commit-log safe, verified)
+```
+commit comment "jwicket uninstall confirmed"
+exit
+```
+
+Stage netconf-removal: 1 configuration line(s), one 'commit confirmed 5', confirmed only after the checks.
+Unit 3A (device-configuration): stage netconf-removal: open configuration mode
+Status: 'run' verified ([run-cmd]); '| no-more' inferred
+```
+configure exclusive
+run show system commit | no-more
+```
+STOP if the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01): type 'exit' and wait until it is settled. Otherwise paste the next unit.
+
+Unit 3B (device-configuration): stage netconf-removal: the configuration change
+Status: statements: see each line's status in Spec 006 section 7.3
+```
+delete system services netconf ssh
+show | compare | no-more
+```
+STOP unless 'show | compare' shows exactly these statements and nothing else. Junos prints each change under the deepest level that already exists, and a new level as a braced block; the grouping below is rendered from the configuration the installer read, a select-only read, so a level it cannot see may make Junos print a deeper header for the same statements (illustrative; real samples are recorded by lab test Q-INST-01):
+    [edit system services]
+    -    netconf {
+    -        ssh;
+    -    }
+If it shows anything else, type 'rollback 0' and 'exit'.
+
+Unit 3C (device-configuration): stage netconf-removal: commit confirmed
+Status: 'commit confirmed <minutes> comment' inferred to combine (documented: commit confirmed comment)
+```
+commit confirmed 5 comment "jwicket uninstall netconf lab-install"
+```
+Deadline: 5 minutes from now. Unless the confirming unit below is pasted before then, Junos rolls this stage back by itself.
+
+Unit 3D (device-configuration): stage netconf-removal: checks
+Status: checks unverified on a device (Q-INST-06)
+```
+run show configuration system services netconf | no-more
+show | compare rollback 1 | no-more
+run show system commit | no-more
+```
+Compare with what each check expects:
+C12: The removed statements are absent from the committed configuration.
+    expect the removed statements to be gone
+C10: Before confirming: the committed statements of the touched subtrees equal the plan, and the committed delta ('show | compare rollback 1') changes nothing outside them.
+    expect 'show | compare rollback 1' to show only the change of unit B
+C11: Before confirming: 'show system commit' shows this stage's commit as the newest, by the daemon account, with this stage's comment, and no 'commit at' or prepared commit.
+    expect the newest commit by labadmin with the comment: jwicket uninstall netconf lab-install
+Leave at least one minute before the deadline. Only if all of that matches, paste the next unit.
+Otherwise type 'exit' (answer 'yes' if asked to exit with uncommitted changes) and let Junos roll the stage back at the deadline.
+
+Only if every check above matched:
+Unit 3E (device-configuration): stage netconf-removal: confirm
+Status: confirming with 'commit comment' (force-commit-log safe, verified)
+```
+commit comment "jwicket uninstall netconf confirmed"
+exit
+```
+
+Unit 4 (device-operational): check that no J-Wicket process runs
+Status: command verified ([show-ext]); deleting a stanza stopping the app unknown (Q-INST-03)
+```
+show extension-service status jwicket.py | no-more
+```
+STOP unless no J-Wicket process is listed. If one still runs, stop here: the files stay, and deploy-lab step 9 shows how to stop it by hand.
+
+Unit 5 (device-operational): delete J-Wicket's files
+Status: 'file delete' verified (F10); every name is one of J-Wicket's fixed names
+```
+file delete /var/db/jwicket/audit.jsonl
+file delete /var/db/jwicket/install-receipt.json
+file delete /var/db/jwicket/jwicket.ini
+file delete /var/db/jwicket/jwicket.log
+file delete /var/db/jwicket/probe-result.json
+file delete /var/db/jwicket/selftest-result.json
+file delete /var/db/jwicket/tls.crt
+file delete /var/db/jwicket/tls.key
+file delete /var/db/scripts/jet/jwicket.py
+file delete /var/db/scripts/jet/jwicket_probe.py
+file delete /var/db/scripts/jet/jwicket_selftest.py
+```
+
+The uninstaller leaves /var/db/jwicket itself: its account cannot remove an entry of /var/db, as it could not create one (inferred from the verified refusal). Once 'file list /var/db/jwicket detail' shows nothing of J-Wicket's, in a shell on the lab device as root: 'rmdir /var/db/jwicket' (it refuses a directory that is not empty; unverified).
+In a shell on the lab device as root:
+Unit 6 (device-shell): the empty state directory, as root
+Status: outside Juniper support; unverified (its counterpart, the root step that made it, verified on SRX4100 25.2R1-S1.4)
+```
+rmdir /var/db/jwicket
+```
+
+Not removed by this tool: lab accounts or login classes created by hand ('system login'), 'system services ssh allow-tcp-forwarding' or 'tcp-forwarding', whichever you added (deploy-lab step 7), and the device's rollback history ('show system rollback'), which still holds the old J-Wicket statements.

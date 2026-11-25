@@ -1,0 +1,13 @@
+{
+  "description": "A manual install from deploy-lab.md: the stanzas without checksums, files in place, no receipt, no installer comments in the history.",
+  "inverse_note": "adopted stanzas are recorded as J-Wicket's (8.11) and go; language and netconf were there before and stay",
+  "inverse_removed_prefixes": [
+    "system extensions extension-service application file jwicket"
+  ],
+  "needs": [
+    "--adopt"
+  ],
+  "refusals": [
+    "R-FOREIGN"
+  ]
+}

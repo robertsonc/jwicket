@@ -1,8 +1,9 @@
 # Security policy
 
 J-Wicket is at the **foundation stage**. It is not installable on a production SRX, no version is
-supported, and nothing in this repository has run on a customer platform. If you find a
-vulnerability, report it **privately to the project owner**. Do not open a public issue.
+supported, and nothing in this repository has run on a customer platform. Lab pre-releases, when
+the owner publishes one, are lab-only and unsupported. If you find a vulnerability, report it
+**privately to the project owner**. Do not open a public issue.
 
 The full threat model, trust boundaries and the reasoning behind each control are in
 [docs/architecture.md](docs/architecture.md#14-threat-model).
@@ -16,7 +17,8 @@ The full threat model, trust boundaries and the reasoning behind each control ar
 - Otherwise, contact the project owner (Corey Robertson) through a private channel you already
   have. Ask for a private place to send details before you send them.
 - Include, where you can:
-  - the commit, or the bundle's `payload_sha256` from `python3 -I dist/jwicket.py --bundle-self-test`;
+  - the commit or pre-release tag, or the bundle's `payload_sha256` from
+    `python3 -I dist/jwicket.py --bundle-self-test`;
   - the file, route or setting involved;
   - steps to reproduce, preferably against the development server (`make dev`) and its synthetic
     fixtures;
@@ -35,17 +37,23 @@ not here. If a J-Wicket finding depends on a Junos behaviour, say so in the repo
 
 | Version | Supported |
 | --- | --- |
-| `0.1.0.dev0` (the default branch) | **No.** Foundation stage: development and lab qualification only |
+| `0.1.0.dev1` (the default branch) | **No.** Foundation stage: development and lab qualification only |
+| Lab pre-releases `vX.Y.Z.devN` (none published yet; the first, `v0.1.0.dev1`, waits for the owner's go) | **No.** Lab only and unsupported: for qualification runs on a disposable lab vSRX, or lab hardware attested with `--lab-hardware` and a typed `lab only`, never a production firewall. A fix lands in a later pre-release, not in a published one, which is immutable |
 
-No release has been made. Fixes land on the default branch. Support and signed-package positions
-are decided at gates G4 and G5 ([governance.md](docs/governance.md)). Until then, the only
-documented way to run J-Wicket on a device is the lab procedure in
-[docs/deploy-lab.md](docs/deploy-lab.md): a disposable vSRX, a loopback bind, and an SSH tunnel.
+No release or pre-release has been made. Fixes land on the default branch. Support and
+signed-package positions are decided at gates G4 and G5 ([governance.md](docs/governance.md)).
+Until then J-Wicket runs only on lab devices: by the lab procedure in
+[docs/deploy-lab.md](docs/deploy-lab.md) (a disposable vSRX or owner-approved lab hardware; a loopback bind behind
+an SSH tunnel where the release allows forwarding, or TLS on fxp0 as on the lab SRX4100),
+or by the lab-gated installers of [docs/install.md](docs/install.md), which have not run on any
+device and whose design is [Spec 006](docs/specs/006-installation.md).
 
 ## Security properties and their tests
 
 Every test below runs in CI on Python 3.7, 3.9, 3.11 and 3.13 (`make test` locally), **against synthetic
-fixtures**. A passing test shows what the code does; it proves nothing about a device. The device
+fixtures**, except `PinnedHttpsTests`, which needs the pinned `cryptography` (50.0.2 needs Python 3.9.2
+or later) and is skipped where it is not installed: it runs in the `install-autospec` job, on Python
+3.12 with the hash-pinned `requirements-install.txt`. A passing test shows what the code does; it proves nothing about a device. The device
 tests that will are named in the last column and defined in [governance.md](docs/governance.md).
 
 | Property | Code | Tests | Proven on a device by |
@@ -69,30 +77,69 @@ tests that will are named in the last column and defined in [governance.md](docs
 | Exports cannot inject spreadsheet formulas. | [`api.py`](src/jwicket/api.py) | `CsvInjectionTests` ([`test_http_server.py`](tests/test_http_server.py)); `test_formula_prefixes_are_neutralised` | Q-SEC-01 |
 | The build is what was reviewed. `dist/jwicket.py` is deterministic and carries a payload SHA-256; its importer serves only embedded modules; development modules are not shipped. Before any other import it removes its own directory (and the directory a symbolic link to it points at, `''` and `.`) from `sys.path`, using built-in modules only, so a `json.py` or `hashlib.py` placed beside it cannot run inside the daemon. The self-test fails, and the daemon refuses to start (exit 2), if any loaded module's file is in that directory. | [`tools/bundle.py`](tools/bundle.py) | `BundleIsolationTests` ([`test_bundle.py`](tests/test_bundle.py)); CI `bundle` job: rebuild and compare (`--check`), isolated `--bundle-self-test` ([`ci.yml`](.github/workflows/ci.yml)) | Q-RT-02, Q-RT-03 |
 
+### Installer properties and their tests
+
+The installers ([Spec 006](docs/specs/006-installation.md), code in
+[`tools/jwicket_install/`](tools/jwicket_install/) and [`deploy/`](deploy/)) write configuration and
+files on a lab device, so they carry their own invariants (INV-01 to INV-12, Spec 006 section 5.1).
+Their tests run against fake device sessions and synthetic replies. With `JWICKET_REQUIRE_PYEZ=1`
+(CI job `install-autospec`) the fakes are built from the real PyEZ, `paramiko` and `scp` signatures;
+without those packages those tests skip. None of it proves what a device does: every device step is
+unverified until Q-INST-06, which is proposed, like Q-INST-01 to Q-INST-05 ([governance, section
+4.12](docs/governance.md#412-proposed-additions)).
+
+| Property | Code | Tests | Proven on a device by |
+| --- | --- | --- | --- |
+| Nothing is written before the gate. A dry run sends reads only; the typed host name is compared exactly with the one the device reports and is never printed before the prompt; an empty answer, no terminal or a missing host name never passes (INV-01, INV-05). | [`plan.py`](tools/jwicket_install/plan.py), [`workstation.py`](tools/jwicket_install/workstation.py) | `GateTests` ([`test_install_plan.py`](tests/test_install_plan.py)); `DryRunTests`, `GateTests` ([`test_install_workstation.py`](tests/test_install_workstation.py)) | Q-INST-06 |
+| No path sends `commit check`, `<check/>` or `<validate>`: a `commit check` or `<check/>` confirms a pending confirmed commit (**verified**), and that one sent by another user or session confirms someone else's is **inferred** (Q-INST-03); the pending state is re-read on the locked session before every commit and confirm; only the installer's own bootstrap may be pending, matched by user, comment, nonce and exact delta (INV-02, INV-03). | [`workstation.py`](tools/jwicket_install/workstation.py), [`transport.py`](tools/jwicket_install/transport.py), [`plan.py`](tools/jwicket_install/plan.py) | `ForeignPendingTests`, `ConfirmGuardTests` ([`test_install_adversarial.py`](tests/test_install_adversarial.py)); `BootstrapTests` ([`test_install_plan.py`](tests/test_install_plan.py), [`test_install_workstation.py`](tests/test_install_workstation.py)); `test_no_commit_check_or_validate_is_ever_sent`; `StaticTests` ([`test_install_cli.py`](tests/test_install_cli.py)) | Q-INST-01, Q-INST-03 |
+| Every write is a confirmed commit, compared with the plan before it commits and before it is confirmed, and confirmed only when every health check passes at least 60 s before the deadline; a failure is never confirmed and a revert stage removes what the run added (INV-04). | [`workstation.py`](tools/jwicket_install/workstation.py), [`health.py`](tools/jwicket_install/health.py) | `ApplyOrderTests`, `ConfirmTests`, `RevertTests` ([`test_install_workstation.py`](tests/test_install_workstation.py)); `HealthTests` ([`test_install_adversarial.py`](tests/test_install_adversarial.py)) | Q-INST-03, Q-INST-06 |
+| Configured files are never written in place, renamed over or deleted outside the copy right before their checksum commit; shared statements are removed only when Junos's commit history and the workstation record agree this installer added them and nothing else relies on them (INV-06, INV-11). | [`plan.py`](tools/jwicket_install/plan.py) | `ConfiguredPathTests`, `OwnershipTests`, `InverseTests` ([`test_install_plan.py`](tests/test_install_plan.py)); `UpgradeTests`, `UninstallTests` ([`test_install_workstation.py`](tests/test_install_workstation.py)) | Q-INST-06 |
+| A bundle or op script is used for `--apply` only with one provenance source independent of the release page; downloads are by tag, capped at 16 MB, `https` only, with at most 3 redirects to listed hosts (INV-07). | [`provenance.py`](tools/jwicket_install/provenance.py) | `FetchTests`, `SchemeTests`, `ReleaseTests`, `SourceTests` ([`test_install_provenance.py`](tests/test_install_provenance.py)) | Q-INST-06 |
+| No password option: SSH agent, key or a `getpass` prompt. No credential in argv, logs, receipts, the journal or the plan JSON; no device secret read, and a planted secret never survives parsing (INV-08). With `--access tls` the private key is made in memory, sent by SCP with mode 0600, never written to the workstation's disk, logged, printed or read back; only the certificate's SHA-256 fingerprint is printed and recorded. | [`cli.py`](tools/jwicket_install/cli.py), [`state.py`](tools/jwicket_install/state.py), [`transport.py`](tools/jwicket_install/transport.py), [`workstation.py`](tools/jwicket_install/workstation.py) | `CredentialTests` ([`test_install_cli.py`](tests/test_install_cli.py)); `SecretTests` ([`test_install_state.py`](tests/test_install_state.py)); `TlsAccessTests` ([`test_install_workstation.py`](tests/test_install_workstation.py)); `PinnedHttpsTests` ([`test_install_adversarial.py`](tests/test_install_adversarial.py)) | Q-SEC-01, Q-INST-06 |
+| Every SSH connection checks the host key against one verified entry; an unknown key stops the run; two ports with different keys refuse before any write (INV-09). | [`hostkeys.py`](tools/jwicket_install/hostkeys.py), [`transport.py`](tools/jwicket_install/transport.py) | [`test_install_hostkeys.py`](tests/test_install_hostkeys.py) | Q-INST-05, Q-INST-06 |
+| One listener, never off loopback without TLS (INV-10): with `--access tls` (the default) the rendered settings bind the one address the operator names, with TLS and a Host allowlist of that address and port, in `mgmt_junos` when `system management-instance` is set, and a wildcard, loopback, multicast, link-local, reserved or IPv6 address is refused (R-BIND); the installer does not check that the address is the management address (it defaults to `--host`, and the posture warning says so); with `--access tunnel` they bind `127.0.0.1`, and the tunnel binds the workstation end to `127.0.0.1`. The extension-service `routing-instance` statement is never rendered. Health check C8 trusts only a certificate this installer made and recorded for this device (this run's, or the kept pair the workstation record names; its SHA-256 pinned, no CA store), and no check opens an SSH forwarding channel. Device text never becomes a template, path, command or configuration line; hostile input is refused before rendering (INV-12). | [`plan.py`](tools/jwicket_install/plan.py), [`render.py`](tools/jwicket_install/render.py), [`transport.py`](tools/jwicket_install/transport.py) | `SettingsTests`, `AccessTests`, `ValidationTests`, `RefusalTests` ([`test_install_plan.py`](tests/test_install_plan.py)); `TunnelTests`, `TlsUnitTests`, `JsonTokenTests` ([`test_install_render.py`](tests/test_install_render.py)); `PinnedHttpsTests` ([`test_install_adversarial.py`](tests/test_install_adversarial.py)); [`test_ansible_contract.py`](tests/test_ansible_contract.py) | Q-SEC-01, Q-TLS-01 |
+| No `shell=True`, `eval`, `exec` or `os.system`; no PyEZ helper that runs the shell; the one shell use is the fixed veriexec read; installer code never in the daemon or the bundle. | [`tools/jwicket_install/`](tools/jwicket_install/) | `StaticTests`, including `test_installer_code_is_not_in_the_daemon` ([`test_install_cli.py`](tests/test_install_cli.py)); ruff `S` | Q-SEC-01 |
+| No installer creates, changes or removes the state directory: root makes it once (a super-user-class account cannot, verified on the lab SRX4100). It is trusted only if the daemon's rule accepts it (a directory, not a link, owned by the daemon's account, mode 0700); otherwise R-STATEDIR refuses before any write and prints root's step, and it is listed again after the gate. No installer logs in as root or asks for the root password. | [`plan.py`](tools/jwicket_install/plan.py), [`workstation.py`](tools/jwicket_install/workstation.py), [`op_template.py`](tools/jwicket_install/op_template.py) | `StateDirectoryTests` ([`test_install_plan.py`](tests/test_install_plan.py)); `StateDirTests` ([`test_install_workstation.py`](tests/test_install_workstation.py)); `DirectoryTests` ([`test_install_op.py`](tests/test_install_op.py)) | Q-INST-01 |
+| The container image runs as a non-root user from a base pinned by digest, with dependencies installed by hash; it refuses `--apply` without a `/state` mount. | [`deploy/container/`](deploy/container/) | [`test_container_contract.py`](tests/test_container_contract.py) | CI image build |
+| Releases come only from a commit on `main` with three equal versions and a `vX.Y.Z.devN` tag; every action is pinned by commit SHA; only the `publish` job may write releases (`contents: write`), and a release that fails `gh release verify` is deleted. That only the owner can push such a tag, and that `main` needs review, are repository settings outside the tree (proposed, [ADR 0012](docs/adr/0012-installer-design.md)). | [`release.yml`](.github/workflows/release.yml), [`tools/release_check.py`](tools/release_check.py) | `ReleaseWorkflowTests`, `CiWorkflowTests` ([`test_workflows.py`](tests/test_workflows.py)); [`test_release_check.py`](tests/test_release_check.py); CI `actionlint` | The first pre-release (D14) |
+| Daemon changes for the installers (D2, D3): result files only into a trusted `/var/db/jwicket` (the running uid's, not group- or other-writable, not a link), opened with `O_NOFOLLOW`, mode 0600, never into a FIFO; a missing settings file still refuses the start. | [`tools/bundle.py`](tools/bundle.py), [`app.py`](src/jwicket/app.py), [`api.py`](src/jwicket/api.py) | `ResultFileTests`, `UntrustedDirectoryTests`, `FailClosedTests` ([`test_result_files.py`](tests/test_result_files.py)); [`test_api_build.py`](tests/test_api_build.py); `BundleFeatureTests` ([`test_bundle.py`](tests/test_bundle.py)) | Q-SEC-01, Q-INST-06 |
+
 ## Known gaps
 
 These are known and open. A report that adds an exploit path or a device result is welcome; a
 report that only restates one is not needed.
 
 1. **TLS on a device is lightly tested.** On one lab SRX4100 the on-box `ssl` module served TLS
-   1.2 and 1.3 with a self-signed certificate made on the box ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)). Refusal of
-   TLS 1.0 and 1.1 was not tested, and how a trusted certificate gets onto a device is undecided
-   (Q-TLS-01). `Secure` cookies and HSTS apply only under TLS. Without TLS the only access path is
+   1.2 and 1.3 with a self-signed certificate made on the box and refused TLS 1.0 and 1.1; the
+   cookie was `__Host-` prefixed and `Secure`, HSTS was sent, and a key at mode 0644 refused the
+   start ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)). How a trusted certificate
+   gets onto a device is undecided, and compression and handshake time were not checked (Q-TLS-01,
+   met except a provisioning path). `Secure` cookies and HSTS apply only under TLS. Without TLS the only access path is
    a loopback bind reached through an SSH tunnel, and on Junos 25.2 the SSH service refused to
-   forward (Q-NET-03).
-2. **Per-operator NETCONF sign-in is only partly proven.** On the lab SRX4100 a super-user account
-   signed in over NETCONF to loopback, and Junos refused a wrong password. Still open: whether the
-   on-box PyEZ refuses a wrong password even when the daemon account holds an SSH key that user
-   accepts (Q-AUTH-01); whether RADIUS and TACACS+ users get their mapped class (Q-AUTH-02); what
-   least-privilege classes see and whether Junos omits or refuses hidden configuration (Q-AUTH-03);
+   forward (Q-NET-03). So the installers default to `--access tls` (the owner's decision of
+   2026-11-25, [ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)): a new HTTPS listener
+   on the management address, with a self-signed certificate the operator checks by its SHA-256
+   fingerprint. That opens J-Wicket's sign-in page to anything that reaches that address; the
+   installer's certificate and its upload have not run on a device (Q-INST-06).
+2. **Per-operator NETCONF sign-in is only partly proven.** On the lab SRX4100 accounts of the
+   `read-only`, `operator` and `super-user` classes signed in over NETCONF to loopback, the device
+   attributed every RPC to the signed-in user, sign-out closed the device session, and Junos refused
+   a wrong password. Still open: whether the on-box PyEZ refuses a wrong password even when the
+   daemon account holds an SSH key that user accepts (Q-AUTH-01); whether RADIUS and TACACS+ users
+   get their mapped class (Q-AUTH-02); what other least-privilege classes see (`read-only` and
+   `operator` were denied the configuration) and whether Junos omits or refuses hidden configuration
+   (Q-AUTH-03);
    and how Junos lockout interacts with J-Wicket's sign-in limits (Q-AUTH-04). The fallback options
    are in [docs/architecture.md](docs/architecture.md#13-if-per-operator-sign-in-fails-q-auth-01).
 3. **No penetration test.** No external test (Q-SEC-02, required before live writes at G4) and no
    internal review against the J-Web advisory classes yet (Q-SEC-01, required at G1).
-4. **One device run, no recorded replies.** J-Wicket's reads worked on one lab SRX4100, but no
-   reply has been recorded as a fixture: the tests still parse synthetic replies, and the error
-   texts used to tell `denied` from `failed` are unverified (Q-REL-01). The device's error text now
-   reaches the diagnostic log (INFO), so lab runs can record it.
+4. **Replies recorded on one platform and one release only.** J-Wicket's reads worked on one lab
+   SRX4100, and nine of its replies were recorded there as fixtures, which the parsers' tests read
+   (three mismatches with the synthetic fixtures were found and fixed). Every other platform and
+   release is unrecorded, the other tests parse synthetic replies, and the error texts used to tell
+   `denied` from `failed` are recorded nowhere: a configuration denial was seen once on the device
+   and shown as denied (Q-AUTH-03), not stored (Q-REL-01). The device's error text reaches the
+   diagnostic log (INFO), so lab runs can record it.
 5. **The password passes through process memory.** J-Wicket keeps no copy, but PyEZ's `Device`
    object holds it for the life of the operator's device session, and Python cannot guarantee it is
    wiped. Multi-factor prompts are not supported.
@@ -100,11 +147,14 @@ report that only restates one is not needed.
    allowed only on a loopback bind and says so on every screen. The spike's token crossed the
    internet in clear text and is treated as burned.
 7. **Unsigned code on the routing engine.** `set system scripts language python3` is a change to the
-   device's security posture. There is no signed package. The bundle's SHA-256 is checked by hand;
-   the Junos `checksum` option for JET files is not used yet. Files beside the bundle cannot replace
-   modules inside it (the `sys.path` scrub above), but whether Junos starts the bundle with its own
-   directory on `sys.path` at all is unknown (Q-RT-03), and anyone who can write
-   `/var/db/scripts/jet/` can also replace the bundle.
+   device's security posture. There is no signed package. The lab procedure checks the bundle's
+   SHA-256 by hand. The installers check it on the device and pin it with `checksum sha-256` on each
+   J-Wicket JET stanza; that statement is in the SRX schema at 23.2R1, but whether Junos enforces it
+   at start and respawn is unknown (Q-INST-02), so nothing may rely on the pin yet. On the lab
+   SRX4100 Junos put `/var/db/scripts/jet` first on a JET app's `sys.path` (Q-RT-03), so a `.py`
+   file planted there is importable; files beside the bundle still cannot replace modules inside it
+   (the `sys.path` scrub above), and anyone who can write `/var/db/scripts/jet/` can also replace
+   the bundle.
 8. **Code-level gaps** found while documenting, listed in
    [docs/architecture.md](docs/architecture.md#15-known-gaps-in-the-current-code): authentication is
    checked per handler, not centrally; there is no Host allowlist unless one is set, which leaves
@@ -129,9 +179,28 @@ report that only restates one is not needed.
    days.
    Failed sign-ins that reached Junos are still written one per attempt, bounded by the sign-in
    limits and by how fast Junos refuses a password (unmeasured).
-10. **`GET /api/session` is unauthenticated** and returns the J-Wicket version and sign-in backend.
-    To a client presenting the cookie of a session that ended, it (and every 401) also says why and
-    when that session ended; nothing else about it.
+10. **`GET /api/session` is unauthenticated** and returns the J-Wicket version and sign-in backend,
+    and, from a bundle, `build`: the first 16 hex characters of its payload digest, so an installer
+    can tell which build is listening (Spec 006 change D3). The digest names public code. To a
+    client presenting the cookie of a session that ended, it (and every 401) also says why and when
+    that session ended; nothing else about it. With the installers' default `--access tls` (the
+    owner's decision of 2026-11-25, ADR 0011) it is reachable by anything that reaches the
+    management address, not only through a tunnel, and check C8 reads it there.
+11. **The installers are new surface, and the gate is an attestation.** Typing the host name proves
+    intent, not that the box is a lab device: the model check and the production signs cannot detect
+    a production cloud vSRX. With `--lab-hardware` a physical SRX passes the model check once the
+    operator types `lab only` after the production signs; that statement is recorded and proves
+    nothing either. Neither answer proves a person typed it: `--gate-from-stdin` is accepted with
+    `--method ansible`, which is a label the caller sets, not a check, so any script (or `docker run
+    -i` of the M3 image) can pipe both the host name and `lab only`. Only the Ansible play's own
+    `pause` asks a person at a terminal. For its window (10 minutes by default, up to 30 with
+    `--bootstrap-minutes`) the NETCONF or op-script bootstrap is active before the gate, and another
+    administrator's commit in that window would confirm it (inferred from Juniper's `commit`
+    reference, Q-INST-03). The daemon
+    runs as the installing super-user-class account, so a compromise of J-Wicket is a compromise of
+    the device (a G1 least-privilege gap, governance D16). The R-PENDING exception for the
+    installer's own bootstrap, the op script's trust chain, the parsing of device replies and the
+    result files (D2) are for Q-SEC-01. None of it has run on a device.
 
 ## Threat summary
 

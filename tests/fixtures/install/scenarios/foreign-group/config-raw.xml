@@ -1,0 +1,22 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The select-only configuration read of spec 8.3. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <configuration>
+    <system>
+      <services>
+        <netconf>
+          <ssh/>
+        </netconf>
+      </services>
+    </system>
+    <groups>
+      <name>jwicket</name>
+      <system>
+        <scripts>
+          <language>python3</language>
+        </scripts>
+      </system>
+    </groups>
+    <apply-groups>jwicket</apply-groups>
+  </configuration>
+</rpc-reply>

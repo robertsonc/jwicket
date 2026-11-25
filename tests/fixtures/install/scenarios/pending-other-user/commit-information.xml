@@ -1,0 +1,27 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- get-commit-information (rpc in junos-es 23.2R1 YANG, verified). The literal commit-confirmed text and whether a comment lands in comment or log are unknown (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <commit-information>
+    <commit-history>
+      <sequence-number>0</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-24 20:40:00 UTC</date-time>
+      <user>otheradmin</user>
+      <client>cli</client>
+      <comment>maintenance window</comment>
+      <commit-confirmed>commit confirmed, rollback in 7mins</commit-confirmed>
+    </commit-history>
+    <commit-history>
+      <sequence-number>1</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-20 09:12:00 UTC</date-time>
+      <user>admin</user>
+      <client>cli</client>
+    </commit-history>
+    <commit-history>
+      <sequence-number>2</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-19 16:40:00 UTC</date-time>
+      <user>admin</user>
+      <client>cli</client>
+      <comment>initial lab build</comment>
+    </commit-history>
+  </commit-information>
+</rpc-reply>

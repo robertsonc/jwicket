@@ -1,0 +1,11 @@
+# Inputs for requirements-ansible.txt (Spec 006 section 6.3): ansible-core for the M2 playbooks and
+# the workstation installer's runtime dependencies, so one virtual environment runs ansible-playbook
+# and jwicket-install. The installer wheel itself is installed afterwards with pip --no-deps.
+# Regenerate with the command in requirements-ansible.txt's header (README.md, "Updating the pins").
+# cryptography is pinned here too, not only through paramiko: with --access tls the installer makes the
+# device's certificate with it (Spec 006 section 7.5), and it must equal requirements-install.txt's pin
+# for Linux.
+ansible-core==2.20.0
+junos-eznc==2.8.3
+scp==0.16.2
+cryptography==50.0.2

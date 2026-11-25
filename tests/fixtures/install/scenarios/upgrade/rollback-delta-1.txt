@@ -1,0 +1,7 @@
+[edit system extensions extension-service application]
++    file jwicket.py {
++        daemonize;
++        respawn-on-normal-exit;
++        username labadmin;
++        checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
++    }

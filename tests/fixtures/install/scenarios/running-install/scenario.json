@@ -1,0 +1,10 @@
+{
+  "description": "A complete install by this installer: history with its comments and deltas, both receipts, checksums matching the bundle.",
+  "inverse_note": "already installed: its history and record show this installer added all of it",
+  "inverse_removed_prefixes": [
+    "system extensions extension-service application file jwicket",
+    "system scripts language",
+    "system services netconf ssh"
+  ],
+  "refusals": []
+}

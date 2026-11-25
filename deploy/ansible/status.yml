@@ -1,0 +1,124 @@
+---
+# J-Wicket M2: read the J-Wicket status of lab SRXs, one host at a time (Spec 006 sections 6.3, 9.6).
+#
+# LAB ONLY. This installer has not yet run on any device. Every device step is unverified until lab
+# test Q-INST-06 is certified.
+#
+# Read-only: "jwicket-install status --json" sends only reads (files, checksums, stanzas, the process,
+# the last log lines, the receipts and whether they agree with Junos's commit history), and for an
+# install made with --access tls, check C8's HTTPS read from this controller, pinned to the certificate
+# the receipt records (Spec 006 section 7.6). No gate, no write, no commit. The JSON document is parsed
+# only with from_json from the registered output.
+#
+# Run from deploy/ansible (so ansible.cfg applies):
+#   ansible-playbook -i inventory.ini status.yml
+
+- name: J-Wicket status (LAB ONLY, read-only, one host at a time)
+  hosts: jwicket_lab
+  connection: local
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  debugger: never
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    ansible_no_target_syslog: true
+
+  tasks:
+    - name: Refuse gate and internal variables that were set outside this play
+      # Extra variables (-e) always win over registered and task variables (INV-05, INV-12).
+      ansible.builtin.assert:
+        that:
+          - jwicket_gate_typed is not defined
+          - jwicket_lab_typed is not defined
+          - jwicket_device_hostname is not defined
+          - jwicket_status is not defined
+          - jwicket_argv is not defined
+          - jwicket_exit_codes is not defined
+          - jwicket_executable_stat is not defined
+        fail_msg: >-
+          A gate variable (jwicket_gate_typed, jwicket_lab_typed, jwicket_device_hostname) or a
+          variable this play sets for itself (jwicket_status, jwicket_argv, jwicket_exit_codes,
+          jwicket_executable_stat) was given from outside: as an extra variable (-e), in the inventory,
+          or in a variable file. Remove it.
+        quiet: true
+
+    - name: Check the inputs before anything runs
+      ansible.builtin.assert:
+        that:
+          - ansible_connection == 'local'
+          - jwicket_user is defined
+          - jwicket_user is string
+          - jwicket_user == jwicket_user | trim
+          - jwicket_user is match('^[A-Za-z][A-Za-z0-9._-]{0,31}$')
+          - jwicket_user != 'root'
+          - ansible_host | default(inventory_hostname) is string
+          - ansible_host | default(inventory_hostname) == ansible_host | default(inventory_hostname) | trim
+          - ansible_host | default(inventory_hostname) is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$')
+          - jwicket_ssh_port is not defined or jwicket_ssh_port | string is match('^[1-9][0-9]{0,4}$')
+          - jwicket_ssh_port is not defined or jwicket_ssh_port | int <= 65535
+          - jwicket_install_executable is not defined or jwicket_install_executable is string
+          - jwicket_install_executable is not defined or jwicket_install_executable == jwicket_install_executable | trim
+          - jwicket_install_executable is not defined or jwicket_install_executable is match('^/[-A-Za-z0-9 ._/+@~]*$')
+        fail_msg: >-
+          An input is missing or not in the expected form. Needed: jwicket_user (the device account:
+          letters, digits, '.', '_', '-', not root), ansible_host or the inventory name (a host name or
+          address). Optional: jwicket_ssh_port (1 to 65535), jwicket_install_executable (an absolute
+          path). Nothing was run.
+        quiet: true
+
+    - name: Check that jwicket-install is installed on this controller
+      ansible.builtin.stat:
+        path: "{{ jwicket_argv.executable }}"
+      vars: &jwicket_vars
+        # The executor's argument list, built only from the inputs checked above; never a shell line.
+        jwicket_argv:
+          executable: "{{ jwicket_install_executable | default(ansible_playbook_python | dirname ~ '/jwicket-install') }}"
+          target: >-
+            {{ ['--host', ansible_host | default(inventory_hostname), '--user', jwicket_user]
+            + (['--port', jwicket_ssh_port | string] if jwicket_ssh_port is defined else []) }}
+        # jwicket-install's exit codes (Spec 006 section 9.7) that a read-only run can return.
+        jwicket_exit_codes:
+          0: status read
+          1: the device could not be read, or NETCONF is off
+          2: bad arguments or inputs
+          7: transfer, integrity or provenance failure (download, SHA-256, owner or mode, no independent source)
+      register: jwicket_executable_stat
+
+    - name: Stop when jwicket-install is missing
+      ansible.builtin.fail:
+        msg: >-
+          jwicket-install was not found, or is not executable, at {{ jwicket_argv.executable }}. Install
+          the installer wheel into the virtual environment that runs ansible-playbook (README.md, set-up
+          step 3), or set jwicket_install_executable to its absolute path. Nothing was run.
+      vars: *jwicket_vars
+      when: not (jwicket_executable_stat.stat.exists and jwicket_executable_stat.stat.executable)
+
+    - name: Read the status (reads only; nothing is written)
+      ansible.builtin.command:
+        argv: "{{ [jwicket_argv.executable, 'status'] + jwicket_argv.target + ['--json'] }}"
+      vars: *jwicket_vars
+      register: jwicket_status
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      timeout: 900
+
+    - name: Show the status (jwicket-install's JSON document)
+      ansible.builtin.debug:
+        msg: "{{ jwicket_status.stdout | from_json if jwicket_status.stdout | trim is match('[{]') else jwicket_status.stdout }}"
+
+    - name: Show jwicket-install's diagnostics
+      ansible.builtin.debug:
+        msg: "{{ jwicket_status.stderr }}"
+      when: jwicket_status.stderr | default('') | length > 0
+
+    - name: Stop when the status could not be read
+      ansible.builtin.fail:
+        msg: >-
+          jwicket-install exited {{ jwicket_status.rc }}: {{ jwicket_exit_codes[jwicket_status.rc] | default('unknown exit code') }}.
+          Nothing was written to the device. Run this playbook again with --limit to read the other hosts.
+      vars: *jwicket_vars
+      when: jwicket_status.rc != 0

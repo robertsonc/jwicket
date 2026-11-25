@@ -1,0 +1,10 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- Model and release as the lab run recorded them (docs/evidence/2026-11-24-srx4100-lab); the host name is a placeholder. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1/junos">
+  <software-information>
+    <host-name>lab-srx-1</host-name>
+    <product-model>srx4100</product-model>
+    <product-name>srx4100</product-name>
+    <junos-version>25.2R1-S1.4</junos-version>
+  </software-information>
+</rpc-reply>

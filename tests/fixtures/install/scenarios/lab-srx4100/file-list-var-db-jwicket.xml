@@ -1,0 +1,55 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- What the lab run left in /var/db/jwicket (evidence README): settings, the on-box TLS pair, the log and audit trail. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1/junos">
+  <directory-list>
+    <directory>
+      <directory-name>/var/db/jwicket</directory-name>
+      <file-information>
+        <file-name>jwicket.ini</file-name>
+        <file-permissions format="-rw-------">600</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>labadmin</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>512</file-size>
+        <file-date junos:format="Nov 20 09:12">1795000000</file-date>
+      </file-information>
+      <file-information>
+        <file-name>jwicket.log</file-name>
+        <file-permissions format="-rw-------">600</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>labadmin</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>2048</file-size>
+        <file-date junos:format="Nov 20 09:12">1795000000</file-date>
+      </file-information>
+      <file-information>
+        <file-name>audit.jsonl</file-name>
+        <file-permissions format="-rw-------">600</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>labadmin</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>1024</file-size>
+        <file-date junos:format="Nov 20 09:12">1795000000</file-date>
+      </file-information>
+      <file-information>
+        <file-name>tls.crt</file-name>
+        <file-permissions format="-rw-r--r--">644</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>labadmin</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>1123</file-size>
+        <file-date junos:format="Nov 24 18:00">1795399000</file-date>
+      </file-information>
+      <file-information>
+        <file-name>tls.key</file-name>
+        <file-permissions format="-rw-------">600</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>labadmin</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>1704</file-size>
+        <file-date junos:format="Nov 24 18:00">1795399000</file-date>
+      </file-information>
+      <total-files>5</total-files>
+    </directory>
+  </directory-list>
+</rpc-reply>

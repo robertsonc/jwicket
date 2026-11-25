@@ -1,0 +1,10 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <checksum-information>
+    <file-checksum>
+      <computation-method>SHA256</computation-method>
+      <input-file>/var/db/jwicket/jwicket.ini</input-file>
+      <checksum>8971fabcc10e8b5373b5f7f2ea6472bccbb2ccaf3af9070a745e0fc4d78384e2</checksum>
+    </file-checksum>
+  </checksum-information>
+</rpc-reply>

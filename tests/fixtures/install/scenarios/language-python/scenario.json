@@ -1,0 +1,6 @@
+{
+  "description": "language python (not python3).",
+  "refusals": [
+    "R-LANG"
+  ]
+}

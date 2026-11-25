@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator, List, Optional
 
 from jwicket import __version__
-from jwicket.api import App, build_router, prune_reuse, record_session_end
+from jwicket.api import App, build_router, bundle_payload_sha256, prune_reuse, record_session_end
 from jwicket.auth.backends import AuthBackend, LabTokenBackend, NetconfBackend
 from jwicket.auth.sessions import SessionStore
 from jwicket.auth.throttle import LoginThrottle
@@ -164,11 +164,17 @@ def serve(settings: Settings, app: App) -> int:
 
     if tls is None:
         LOG.warning("TLS is off; listening on loopback only (%s). Reach it through an SSH tunnel.", srv.bind)
+    # The build is in the start line and record so an installer can tell this process from an earlier
+    # one (installation spec, bundle change D3); payload is the payload digest, "none" from src/. The
+    # installer's check C4 (tools/jwicket_install/plan.py start_line) matches this text exactly.
+    payload = bundle_payload_sha256()
     LOG.info(
-        "listening on %s:%d tls=%s backend=%s routing_instance=%s",
+        "listening on %s:%d tls=%s backend=%s routing_instance=%s version=%s payload=%s",
         srv.bind, srv.port, tls is not None, app.backend.name, srv.routing_instance or "default",
+        __version__, payload[:16] if payload else "none",
     )
-    app.audit.record("start", user=None, source="local", version=__version__, backend=app.backend.name)
+    app.audit.record("start", user=None, source="local", version=__version__, backend=app.backend.name,
+                     payload_sha256=payload)
     try:
         httpd.serve_forever(poll_interval=0.5)
     finally:

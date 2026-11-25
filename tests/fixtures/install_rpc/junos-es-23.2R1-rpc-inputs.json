@@ -1,0 +1,423 @@
+{
+ "description": "Input leaves (and enumeration values) of every RPC in INSTALL_RPCS that the junos-es 23.2R1 YANG defines, extracted from the files named in README.md. A leaf whose type is an enumeration lists its values: Junos sends the chosen value as an empty element (PyEZ FS.ls sends file-list 'detail' so, verified; for the others inferred).",
+ "junos": "23.2R1.14",
+ "modules": {
+  "junos-es-rpc-chassis": {
+   "file_sha256": "81694a0cfeeea486dd5410647db31c3e435b1db274ad022d68d9d5b1891a6f3b",
+   "junos": "Junos: 23.2R1.14",
+   "revision": "2023-01-01",
+   "url": "https://raw.githubusercontent.com/Juniper/yang/master/23.2/23.2R1/junos-es/rpc/junos-es-rpc-chassis@2023-01-01.yang"
+  },
+  "junos-es-rpc-extension-service": {
+   "file_sha256": "3fd04fac45313ab8ea6c7b8e520b2da9d414c316b3f8ed77e63720812d46a846",
+   "junos": "Junos: 23.2R1.14",
+   "revision": "2023-01-01",
+   "url": "https://raw.githubusercontent.com/Juniper/yang/master/23.2/23.2R1/junos-es/rpc/junos-es-rpc-extension-service@2023-01-01.yang"
+  },
+  "junos-es-rpc-file": {
+   "file_sha256": "a75f6bc4301f12f4d9d3290fd98c4a04432a6e3fee889a41f4abd544804aef1f",
+   "junos": "Junos: 23.2R1.14",
+   "revision": "2023-01-01",
+   "url": "https://raw.githubusercontent.com/Juniper/yang/master/23.2/23.2R1/junos-es/rpc/junos-es-rpc-file@2023-01-01.yang"
+  },
+  "junos-es-rpc-request": {
+   "file_sha256": "c6466573817042200d6ef03b7b8485216422577b9f97a04f9a1c3e94aee794cd",
+   "junos": "Junos: 23.2R1.14",
+   "revision": "2023-01-01",
+   "url": "https://raw.githubusercontent.com/Juniper/yang/master/23.2/23.2R1/junos-es/rpc/junos-es-rpc-request@2023-01-01.yang"
+  },
+  "junos-es-rpc-security": {
+   "file_sha256": "a88e8d012fd0b53a8b47760dbede14ac611c904ca4f88e8dcf431fd3580ecd29",
+   "junos": "Junos: 23.2R1.14",
+   "revision": "2023-01-01",
+   "url": "https://raw.githubusercontent.com/Juniper/yang/master/23.2/23.2R1/junos-es/rpc/junos-es-rpc-security@2023-01-01.yang"
+  },
+  "junos-es-rpc-system": {
+   "file_sha256": "f40190129f9ddd4269479ee9149c668c3d70ccabbebbd883c9628d22dc722721",
+   "junos": "Junos: 23.2R1.14",
+   "revision": "2023-01-01",
+   "url": "https://raw.githubusercontent.com/Juniper/yang/master/23.2/23.2R1/junos-es/rpc/junos-es-rpc-system@2023-01-01.yang"
+  }
+ },
+ "rpcs": {
+  "delete-directory": {
+   "leaves": {
+    "directory": [],
+    "recurse": []
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "extension-service-start": {
+   "leaves": {
+    "application-name": [],
+    "invoke-debugger": [
+     "cli"
+    ]
+   },
+   "module": "junos-es-rpc-request"
+  },
+  "extension-service-stop": {
+   "leaves": {
+    "application-name": []
+   },
+   "module": "junos-es-rpc-request"
+  },
+  "file-change-permission": {
+   "leaves": {
+    "filename": [],
+    "permission": []
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "file-delete": {
+   "leaves": {
+    "path": [],
+    "purge": []
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "file-list": {
+   "leaves": {
+    "path": [],
+    "style": [
+     "detail",
+     "recursive"
+    ]
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "file-show": {
+   "leaves": {
+    "encoding": [
+     "base64",
+     "raw"
+    ],
+    "filename": []
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "get-chassis-cluster-status": {
+   "leaves": {
+    "redundancy-group": []
+   },
+   "module": "junos-es-rpc-chassis"
+  },
+  "get-chassis-inventory": {
+   "leaves": {
+    "all-chassis": [],
+    "all-gnfs": [],
+    "all-lcc": [],
+    "all-members": [],
+    "all-servers": [],
+    "all-system": [],
+    "all-vnfs": [],
+    "bsys": [],
+    "gnf": [],
+    "lcc": [],
+    "local": [],
+    "logical-system": [],
+    "member": [],
+    "no-forwarding": [],
+    "node": [],
+    "re0": [],
+    "re1": [],
+    "routing-engine": [
+     "local",
+     "other",
+     "master",
+     "backup",
+     "both"
+    ],
+    "scc": [],
+    "server": [],
+    "sfc": [],
+    "tenant": [],
+    "verbosity": [
+     "detail",
+     "extensive",
+     "models",
+     "clei-models"
+    ],
+    "vnf": []
+   },
+   "module": "junos-es-rpc-chassis"
+  },
+  "get-commit-information": {
+   "leaves": {
+    "include-configuration-revision": []
+   },
+   "module": "junos-es-rpc-system"
+  },
+  "get-flow-session-information": {
+   "leaves": {
+    "add-on": [
+     "idp",
+     "ssl",
+     "tunnel",
+     "nat",
+     "services-offload",
+     "resource-manager",
+     "application-firewall",
+     "application-traffic-control",
+     "security-intelligence",
+     "advanced-anti-malware",
+     "anti-virus",
+     "content-filtering",
+     "web-filtering"
+    ],
+    "all-chassis": [],
+    "all-gnfs": [],
+    "all-lcc": [],
+    "all-logical-systems-tenants": [],
+    "all-members": [],
+    "all-servers": [],
+    "all-system": [],
+    "all-vnfs": [],
+    "application": [
+     "dns",
+     "ftp",
+     "ignore",
+     "mgcp-ca",
+     "mgcp-ua",
+     "ms-rpc",
+     "pptp",
+     "sun-rpc",
+     "q931",
+     "ras",
+     "realaudio",
+     "rsh",
+     "rtsp",
+     "sccp",
+     "sip",
+     "sqlnet-v2",
+     "talk",
+     "tftp",
+     "http",
+     "https",
+     "smtp",
+     "imap",
+     "ssh",
+     "telnet"
+    ],
+    "application-firewall-rule-set": [],
+    "application-traffic-control-rule-set": [],
+    "bsys": [],
+    "bytes-less-than": [],
+    "bytes-more-than": [],
+    "conn-tag": [],
+    "count": [],
+    "curr-less-than": [],
+    "curr-more-than": [],
+    "destination-port": [],
+    "destination-prefix": [],
+    "destination-service": [],
+    "duration-less-than": [],
+    "duration-more-than": [],
+    "dynamic-application": [],
+    "dynamic-application-group": [],
+    "enc": [
+     "encrypted"
+    ],
+    "family": [
+     "inet",
+     "inet6"
+    ],
+    "flag-old": [
+     "old"
+    ],
+    "geneve-vni": [],
+    "gnf": [],
+    "ha-link": [],
+    "interface": [],
+    "lcc": [],
+    "level": [
+     "summary",
+     "brief",
+     "extensive",
+     "pretty",
+     "plugins"
+    ],
+    "local": [],
+    "logical-system": [],
+    "member": [],
+    "no-forwarding": [],
+    "node": [],
+    "packets-less-than": [],
+    "packets-more-than": [],
+    "plugin-name": [
+     "junos-idp",
+     "junos-idp-stream",
+     "junos-appid-packet",
+     "junos-appid-stream",
+     "junos-appqos",
+     "junos-appfw",
+     "junos-appfw-stream",
+     "junos-secintel",
+     "junos-secintel-stream",
+     "junos-aamw",
+     "junos-aamw-stream",
+     "junos-alg",
+     "junos-gprs",
+     "junos-utm-uf-pkt",
+     "junos-utm-uf-stream",
+     "junos-utm",
+     "junos-utm-udp",
+     "junos-icap-redirect",
+     "junos-uac",
+     "junos-rtm",
+     "junos-captive-portal",
+     "junos-tcp-svr-emul",
+     "junos-tcp-clt-emul",
+     "junos-hcm",
+     "junos-hcm-pkt",
+     "junos-slb-main",
+     "junos-slb-strm",
+     "junos-slb-xlate",
+     "junos-screen-adapter",
+     "junos-fwauth-adapter",
+     "junos-fwauth-stream-adapter",
+     "junos-syn-term",
+     "junos-syn-init",
+     "junos-test",
+     "junos-ssl-term",
+     "junos-ssl-init",
+     "junos-ssl-proxy",
+     "jsf-ssl-test",
+     "junos-jwx-policy",
+     "junos-jwx-cifs",
+     "junos-jwx-zlib",
+     "junos-cpcd",
+     "junos-rpm",
+     "junos-subsc",
+     "junos-mobile-subsc",
+     "junos-pcef",
+     "junos-tcp-utils",
+     "junos-userfw",
+     "junos-jcpp",
+     "junos-rtcom-stream",
+     "junos-rtcom",
+     "junos-log",
+     "junos-jdpi",
+     "junos-dpi-stream",
+     "junos-lrf",
+     "junos-ipsec",
+     "junos-apbr-main",
+     "junos-url-filter",
+     "junos-remote-access-gw",
+     "junos-dynapp",
+     "junos-dynapp-stream",
+     "junos-telemetry",
+     "junos-appqoe",
+     "junos-appqoe-stream",
+     "junos-amr",
+     "junos-cos",
+     "junos-tcplog",
+     "junos-stateful-ha",
+     "junos-web-proxy",
+     "junos-web-proxy-pkt",
+     "junos-web-proxy-sentinel",
+     "junos-emsdp-main",
+     "junos-health-check",
+     "junos-ha-peer-infra",
+     "junos-softwire-head",
+     "junos-softwire-tail",
+     "junos-csrx",
+     "junos-srx-inline-ka-rt",
+     "junos-utm-cf-stream",
+     "junos-utm-cf-pkt"
+    ],
+    "plugin-status": [
+     "interested",
+     "ignore"
+    ],
+    "policy-id": [],
+    "protocol": [],
+    "re0": [],
+    "re1": [],
+    "root-logical-system": [],
+    "routing-engine": [
+     "local",
+     "other",
+     "master",
+     "backup",
+     "both"
+    ],
+    "scc": [],
+    "server": [],
+    "session-state": [
+     "warm",
+     "backup"
+    ],
+    "sfc": [],
+    "source-port": [],
+    "source-prefix": [],
+    "source-tenant": [],
+    "start-identifier": [],
+    "tenant": [],
+    "timeout-less-than": [],
+    "timeout-more-than": [],
+    "tunnel-inspection-type": [
+     "vxlan",
+     "gre",
+     "ipip",
+     "geneve"
+    ],
+    "url-category": [],
+    "vnf": [],
+    "vrf-group": [],
+    "vxlan-vni": [],
+    "zone": []
+   },
+   "module": "junos-es-rpc-security"
+  },
+  "get-rollback-information": {
+   "leaves": {
+    "compare": [],
+    "configuration-revision": [],
+    "format": [
+     "text",
+     "xml",
+     "json"
+    ],
+    "rollback": []
+   },
+   "module": "junos-es-rpc-system"
+  },
+  "get-sha256-checksum-information": {
+   "leaves": {
+    "path": []
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "jet-application-status": {
+   "leaves": {
+    "application-name": []
+   },
+   "module": "junos-es-rpc-extension-service"
+  },
+  "make-directory": {
+   "leaves": {
+    "directory": [],
+    "with-path": []
+   },
+   "module": "junos-es-rpc-file"
+  },
+  "request-script-refresh-from": {
+   "leaves": {
+    "cert-file": [],
+    "file": [],
+    "routing-instance": [],
+    "sync": [],
+    "type": [
+     "commit",
+     "op",
+     "event",
+     "snmp",
+     "extension-service"
+    ],
+    "url": []
+   },
+   "module": "junos-es-rpc-request"
+  }
+ }
+}

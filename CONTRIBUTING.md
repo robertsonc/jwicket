@@ -2,7 +2,8 @@
 
 J-Wicket is at the **foundation stage**: it is not installable on a production SRX, and nothing in
 this repository has run on a customer platform. Contributions arrive as pull requests. A feature
-starts as a spec, not as code. Nothing in the code may change a device before gate G4.
+starts as a spec, not as code. Nothing in the daemon may change a device before gate G4; the lab
+installers are lab-procedure tooling, not part of it ([below](#what-is-welcome-now)).
 
 Read these first: the [README](README.md), the [charter](docs/charter.md) (what is proven and what
 is not), [governance](docs/governance.md) (who decides, the gates, the qualification tests) and
@@ -13,6 +14,7 @@ On this page:
 - [What is welcome now](#what-is-welcome-now)
 - [Propose a feature](#propose-a-feature)
 - [Set up and run](#set-up-and-run)
+- [Release a lab pre-release](#release-a-lab-pre-release)
 - [Coding rules](#coding-rules)
 - [Security rules](#security-rules)
 - [Add a qualification result](#add-a-qualification-result)
@@ -29,6 +31,19 @@ On this page:
 | Fixes for the [known code gaps](docs/architecture.md#15-known-gaps-in-the-current-code) | J-Wicket's own users, roles or password store ([ADR 0002](docs/adr/0002-junos-delegated-sign-in.md)) |
 | Corrections to any claim about Junos or J-Web, with a source | "Sample" or placeholder data in a panel ([ADR 0004](docs/adr/0004-no-sample-data.md)) |
 | Parity ledger corrections | Device data cached in the browser ([ADR 0007](docs/adr/0007-offline-capable-meaning.md)); managing more than one device |
+
+The lab installers are not a product write path. They are lab-procedure tooling that the owner
+asked for on 2026-11-24 ([ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)): they live
+in [`tools/jwicket_install/`](tools/jwicket_install/) and [`deploy/`](deploy/), never ship in the
+bundle, and change only the statements and files [Spec 006](docs/specs/006-installation.md) lists,
+under its invariants (section 5.1). The daemon stays read-only and keeps the standard library plus
+PyEZ; the installer's own dependencies (PyEZ, `paramiko`, `scp`, and `cryptography` for the TLS
+certificate) run on the workstation only, pinned by hash in
+[`requirements-install.txt`](requirements-install.txt). Everything the on-box op script embeds
+(`plan.py`, `state.py`, `render.py`, `op_template.py`) runs on the SRX's Python 3.7, and every module
+under `tools/jwicket_install/` imports there; the unit tests check that. A change to the installers
+follows Spec 006: no Junos statement, path, mode or warning text outside `plan.py`, a test for every
+behaviour, and the security reviewer for anything that touches an invariant.
 
 Found a vulnerability? Do not open an issue or a pull request. Follow [SECURITY.md](SECURITY.md).
 
@@ -80,7 +95,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt   # ruff and mypy, pinned exactly
 
 make test                                      # unit and HTTP integration tests (unittest)
-make lint RUFF=.venv/bin/ruff                  # ruff check src tests tools
+make lint RUFF=.venv/bin/ruff                  # ruff check src tests tools deploy
 make typecheck MYPY=.venv/bin/mypy             # mypy --strict, Python 3.8 target (oldest mypy accepts)
 node --test tests/js/*.test.mjs                # query language and log parser (no packages)
 make bundle                                    # build dist/jwicket.py, then self-test it isolated
@@ -92,6 +107,50 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same checks
 request: ruff and mypy; the tests and an isolated bundle self-test on Python 3.7, 3.9, 3.11 and 3.13;
 the Node tests; and a bundle job that builds twice, fails if the builds differ, and publishes the
 bundle with its SHA-256. The JS tests have no Makefile target; run the `node` command above.
+
+### Installer, Ansible, container and workflow checks
+
+`make test` already runs the installer's tests against fakes, without PyEZ, `paramiko` or `scp`
+(the tests that need them skip). The other CI jobs, locally, each in its own virtual environment
+outside the checkout (none of these contacts a device; CI uses Python 3.12):
+
+```
+# the installer and its hash-pinned dependencies in ~/.local/share/jwicket-install
+make install-tool
+
+# install-autospec: fakes built from the real PyEZ, paramiko and scp signatures
+JWICKET_REQUIRE_PYEZ=1 PYTHONPATH=src ~/.local/share/jwicket-install/bin/python -m unittest discover -s tests
+
+# install-test: the YAML contract tests (workflows, Ansible, containerlab) fail instead of skipping
+make install-test PYTHON=<a Python with PyYAML>
+
+# ansible: --syntax-check of every playbook, then the Ansible contract test
+python3.12 -m venv ~/.local/share/jwicket-ansible
+~/.local/share/jwicket-ansible/bin/pip install --require-hashes -r deploy/ansible/requirements-ansible.txt
+make ansible-check ANSIBLE_PLAYBOOK="$HOME/.local/share/jwicket-ansible/bin/ansible-playbook" \
+  PYTHON="$HOME/.local/share/jwicket-ansible/bin/python"
+
+# actionlint: the version and SHA-256 the CI job pins (ci.yml, job actionlint)
+make actionlint ACTIONLINT=<path to actionlint 1.7.12>
+
+# container: the build context from this checkout, then a local image (never pushed)
+make container-context LOCAL=1 && docker build --tag jwicket-install:dev deploy/container
+
+# reproduce: the four release assets of HEAD, built with each interpreter, must be byte-identical
+make reproduce PYTHONS="python3.12 python3.7 python3.9 python3.13"
+
+# this checkout's bundle on a lab device you may change: a dry run unless APPLY=1
+make lab-install HOST=<lab device> USER=<device account>
+# with more installer options: LISTEN=, ACCESS=, DAEMON_PORT=, SSH_PORT=, LAB_HARDWARE=1, INSTALL_ARGS=
+make lab-install HOST=<lab device> USER=<device account> LISTEN=<listen address> INSTALL_ARGS='--ack-managed'
+```
+
+CI runs the autospec, YAML, Ansible and actionlint checks as the `install-autospec`,
+`install-test`, `ansible` and `actionlint` jobs, builds the image in the `container` job, and runs
+`make reproduce`'s comparison as the `reproduce` job (name the interpreters you have in `PYTHONS`).
+`make lab-install` is the only target here that contacts a device; it is a dry run unless
+`APPLY=1`, and even then it writes nothing until you type the lab device's host name
+([docs/install.md](docs/install.md)).
 
 ### The development server
 
@@ -107,6 +166,51 @@ non-empty password: `admin` and `auditor` in `branch` (the auditor's class is de
 configuration read, to show how a denied read looks), `admin` and `lsys-a-admin` in
 `cluster-lsys`. It is a demonstration harness, not an authentication test. Never point it at a
 network.
+
+## Release a lab pre-release
+
+Pre-releases are lab-only and unsupported (owner decision,
+[ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)); the process is
+[Spec 006, section 11](docs/specs/006-installation.md#11-release-workflow). None has been published:
+the first, `v0.1.0.dev1`, waits for the owner's go.
+
+1. **Bump the three versions together** in one reviewed pull request to `main`:
+   `src/jwicket/__init__.py`, `pyproject.toml` and `tools/jwicket_install/__init__.py`, in PEP 440
+   form `X.Y.Z.devN` ([`tests/test_version.py`](tests/test_version.py) requires them equal).
+2. **Before the tag**, the owner checks that the repository settings of Spec 006 section 11.2 are on
+   (immutable releases; a tag ruleset letting only the owner create `v*` tags; branch protection with
+   review on `main`; environment `lab-prerelease`; variable `JWICKET_IMMUTABLE_RELEASES=true`;
+   governance D14), and runs the workflow's `verify` checks on the merged commit:
+   `JWICKET_IMMUTABLE_RELEASES=true make release-check TAG=vX.Y.Z.devN`.
+3. **The owner tags** that commit on `main` as `vX.Y.Z.devN` (exactly `v` plus the version) and
+   pushes the tag. Nobody else creates a `v*` tag.
+4. **What [`release.yml`](.github/workflows/release.yml) does:** `verify` (tag pattern, the three
+   versions, the commit on `main`, the immutable-releases variable); `test` on Python 3.7 (the SRX's,
+   on ubuntu-22.04), 3.9 and 3.13; `build` on 3.12 (`dist/jwicket.py` twice and compared, the
+   isolated self-test, the op script, the installer wheel, `requirements-install.txt`, `SHA256SUMS`
+   and the release notes); `rebuild` on 3.7, 3.9 and 3.13, which must give the same `SHA256SUMS`; `attest`; and `publish`, which creates a draft
+   pre-release in the `lab-prerelease` environment, publishes it, runs `gh release verify` and
+   `verify-asset`, and deletes the release (the tag stays) if that fails. A `workflow_dispatch` run
+   is a dry run and never publishes.
+5. **The release record.** After publication, run
+   `make release-record TAG=vX.Y.Z.devN REPO=<owner>/<repo>`: it downloads the assets, verifies
+   them, and writes `docs/releases/<tag>.sha256sums`, byte-identical to `SHA256SUMS`. Open a pull
+   request with it; once the owner's review merges it to `main`, it is the provenance source the
+   installers and the op script's operators read (P-C). In a private repository without attestations
+   the release stays a draft until the owner signs `SHA256SUMS` (`VERIFY=signature`;
+   [docs/releases/README.md](docs/releases/README.md)).
+6. **Reproduce a release** from the tagged commit with the commands in its release notes (P-D):
+
+   ```
+   git checkout <commit>
+   python3 tools/bundle.py --out dist/jwicket.py --source-ref <commit>
+   PYTHONPATH=tools python3 -m jwicket_install.build_op --bundle dist/jwicket.py --tag <tag> --repo <owner>/<repo> --out dist/jwicket-install-op.py
+   python3 tools/build_wheel.py --out dist --source-date-epoch "$(git log -1 --format=%ct <commit>)"
+   cp requirements-install.txt dist/
+   cd dist && sha256sum jwicket.py jwicket-install-op.py jwicket_install-<version>-py3-none-any.whl requirements-install.txt
+   ```
+
+   The four values must equal the release's `SHA256SUMS`.
 
 ## Coding rules
 
@@ -270,8 +374,10 @@ ADR first.
   ([`settings.py`](src/jwicket/settings.py)), headers and cookies ([`web/`](src/jwicket/web/)),
   sign-in and sessions ([`auth/`](src/jwicket/auth/)), audit fields
   ([`logs.py`](src/jwicket/logs.py)), static asset serving
-  ([`resources.py`](src/jwicket/resources.py)), the bundler
-  ([`tools/bundle.py`](tools/bundle.py)), or that add a route or a parameter.
+  ([`resources.py`](src/jwicket/resources.py)), the bundler ([`tools/bundle.py`](tools/bundle.py)),
+  the installers ([`tools/jwicket_install/`](tools/jwicket_install/), [`deploy/`](deploy/)) or the
+  release workflow ([`release.yml`](.github/workflows/release.yml)), or that add a route or a
+  parameter.
 - **Test only** against the development server, your own disposable lab equipment, or devices you
   are authorized to test. Never a production firewall.
 

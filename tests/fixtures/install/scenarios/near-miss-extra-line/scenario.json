@@ -1,0 +1,10 @@
+{
+  "bootstrap": {
+    "method": "workstation",
+    "nonce": "k3v9qt"
+  },
+  "description": "The own bootstrap's comment and user, but its delta has an extra statement.",
+  "refusals": [
+    "R-PENDING"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "description": "A chassis cluster.",
+  "refusals": [
+    "R-CLUSTER"
+  ]
+}

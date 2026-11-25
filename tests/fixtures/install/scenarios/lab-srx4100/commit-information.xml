@@ -1,0 +1,25 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- Commits of the lab run, confirmed, with deploy-lab's comments (not installer comments), and the central manager's. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1/junos">
+  <commit-information>
+    <commit-history>
+      <sequence-number>0</sequence-number>
+      <date-time junos:seconds="1795400000">2026-11-24 18:20:00 CST</date-time>
+      <user>labadmin</user>
+      <client>cli</client>
+      <comment>jwicket lab: daemon confirmed</comment>
+    </commit-history>
+    <commit-history>
+      <sequence-number>1</sequence-number>
+      <date-time junos:seconds="1795399000">2026-11-24 18:05:00 CST</date-time>
+      <user>labadmin</user>
+      <client>cli</client>
+    </commit-history>
+    <commit-history>
+      <sequence-number>2</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-20 09:12:00 CST</date-time>
+      <user>sd-cloud</user>
+      <client>netconf</client>
+    </commit-history>
+  </commit-information>
+</rpc-reply>

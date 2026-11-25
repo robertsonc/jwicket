@@ -1,0 +1,93 @@
+{
+  "backend": "netconf",
+  "blast_radius": "J-Wicket will run with the rights of labadmin, a super-user-class account that can commit configuration ('username labadmin' under 'system extensions extension-service application file jwicket.py'). A compromise of J-Wicket is a compromise of this device.",
+  "bootstrap": {
+    "added": [
+      "S8"
+    ],
+    "confirmed_by_installer": true,
+    "method": "netconf",
+    "nonce": "k3v9qt"
+  },
+  "bundle": {
+    "features": [
+      "build-line",
+      "result-files"
+    ],
+    "file_sha256": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+    "payload_sha256": "2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+    "source_ref": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "version": "0.1.0.dev1"
+  },
+  "commits": [
+    {
+      "comment": "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install",
+      "confirmed": true,
+      "stage": "diagnostics"
+    },
+    {
+      "comment": "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install",
+      "confirmed": true,
+      "stage": "runtime"
+    }
+  ],
+  "device": {
+    "host_key_sha256": [
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ],
+    "host_name": "lab-vsrx-1",
+    "junos_version": "24.4R2-S3.5",
+    "model": "vsrx",
+    "serial": "FIXTURE-SN-0001"
+  },
+  "files_created": [
+    "/var/db/jwicket/jwicket.ini",
+    "/var/db/jwicket/tls.crt",
+    "/var/db/jwicket/tls.key",
+    "/var/db/scripts/jet/jwicket.py",
+    "/var/db/scripts/jet/jwicket_probe.py",
+    "/var/db/scripts/jet/jwicket_selftest.py"
+  ],
+  "installer": "jwicket-install 0.1.0.dev1",
+  "lab_hardware_attested": false,
+  "layout": "direct",
+  "listener": {
+    "access": "tls",
+    "listen_address": "192.0.2.10",
+    "port": 9443,
+    "routing_instance": null,
+    "tls_cert_file_sha256": "6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a",
+    "tls_cert_not_after": "2099-01-01T00:00:00Z",
+    "tls_cert_sha256": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+  },
+  "method": "workstation",
+  "not_evidence": false,
+  "overrides": [],
+  "provenance": {
+    "detail": [
+      "v0.1.0.dev1"
+    ],
+    "evidence": true,
+    "kind": "release-record"
+  },
+  "schema": 3,
+  "state_dir_created": false,
+  "statements_added": [
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S10",
+    "S11",
+    "S12",
+    "S13"
+  ],
+  "statements_present_before": [],
+  "time": "2026-11-24T21:00:00Z",
+  "user": "labadmin",
+  "veriexec": {
+    "source": "shell read",
+    "state": "loaded active enforce"
+  }
+}

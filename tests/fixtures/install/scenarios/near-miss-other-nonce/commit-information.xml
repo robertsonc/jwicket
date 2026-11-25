@@ -1,0 +1,14 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- get-commit-information (rpc in junos-es 23.2R1 YANG, verified). The literal commit-confirmed text and whether a comment lands in comment or log are unknown (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <commit-information>
+    <commit-history>
+      <sequence-number>0</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-24 20:48:00 UTC</date-time>
+      <user>labadmin</user>
+      <client>cli</client>
+      <comment>jwicket-bootstrap netconf zz9z9z</comment>
+      <commit-confirmed>commit confirmed, rollback in 9mins</commit-confirmed>
+    </commit-history>
+  </commit-information>
+</rpc-reply>

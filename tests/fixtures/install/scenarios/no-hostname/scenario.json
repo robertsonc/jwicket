@@ -1,0 +1,6 @@
+{
+  "description": "A factory-default box with no host name.",
+  "refusals": [
+    "R-NOHOST"
+  ]
+}

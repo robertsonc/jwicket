@@ -1,0 +1,21 @@
+---
+# J-Wicket M2: upgrade lab SRXs to another pre-release, one host at a time (Spec 006 sections 6.3,
+# 6.15 and 9.4).
+#
+# LAB ONLY. This installer has not yet run on any device. Every device step is unverified until lab
+# test Q-INST-06 is certified.
+#
+# An upgrade is "jwicket-install install --apply --release <new tag>" (section 9.4), so this playbook
+# runs install.yml's play unchanged: the same input checks (the access and lab-hardware variables
+# among them), read-only dry runs, plan, lab gate and gated apply. The one addition: it stops a host
+# whose plan is not an upgrade (no earlier build that this installer recorded), so a typo in the
+# inventory cannot turn into a first install.
+#
+# Run from deploy/ansible (so ansible.cfg applies):
+#   dry run: ansible-playbook -i inventory.ini upgrade.yml -e jwicket_release=<new tag>
+#   upgrade: ansible-playbook -i inventory.ini upgrade.yml -e jwicket_release=<new tag> -e jwicket_apply=true
+
+- name: J-Wicket upgrade (LAB ONLY, one host at a time; the install play with the upgrade check)
+  ansible.builtin.import_playbook: install.yml
+  vars:
+    jwicket_upgrade_only: true

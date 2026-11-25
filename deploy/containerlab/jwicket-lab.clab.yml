@@ -1,0 +1,24 @@
+# A disposable lab vSRX for J-Wicket (Spec 006 section 6.9, method M8). LAB ONLY.
+#
+# One juniper_vsrx node and nothing else. No startup-config, exec or binds: the node boots with
+# vrnetlab's own base configuration, and J-Wicket goes on it only through an installer (M1, M2, M3),
+# so the lab gate, the plan's diff and commit confirmed are never bypassed by a configuration loaded
+# at boot. See README.md for the image build, the lab-only default credentials and the
+# management-instance caveat. Nothing here has been deployed: there is no containerlab in the
+# environment this was written in.
+#
+#   make lab-up VSRX_IMAGE=vrnetlab/juniper_vsrx:24.4R2-S3.5
+#   make lab-down
+#
+# JWICKET_VSRX_IMAGE names the vrnetlab image you built from a vSRX qcow2; containerlab expands the
+# variable in the image line, with the default after := when it is unset or empty, as bash does.
+# image-pull-policy Never: the image exists only on this host, so containerlab must never fetch an
+# image of that name from a registry.
+name: jwicket
+
+topology:
+  nodes:
+    lab-vsrx1:
+      kind: juniper_vsrx
+      image: ${JWICKET_VSRX_IMAGE:=vrnetlab/juniper_vsrx:24.4R2-S3.5}
+      image-pull-policy: Never

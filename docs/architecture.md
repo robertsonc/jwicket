@@ -7,15 +7,18 @@ what is still unproven.
 J-Wicket is one Python process on the SRX routing engine. It serves a browser UI and a read-only
 JSON API, and it reads the device through a NETCONF session that each operator opens **as
 themselves**, so Junos (not J-Wicket) decides who they are and what they may see. Nothing in the
-code can change the device. The whole program ships as one generated file that Junos starts and
+daemon's code can change the device; the lab installers ([section 1](#1-components)) are separate
+tools that never ship in it. The whole program ships as one generated file that Junos starts and
 restarts.
 
-**J-Wicket has run on one lab device.** On 24 November 2026 its bundle ran on the owner's lab
-SRX4100 (Junos 25.2R1-S1.4, Python 3.7.10). It served TLS on fxp0 through `mgmt_junos`, signed in a
-super-user operator over NETCONF to loopback, and read the policy inventory, the session table and
-the `messages` log ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). The spike ran a different, single-file daemon on one
-vSRX (Junos 24.4R2-S3.5). Least-privilege sign-in, other platforms and releases, and recorded reply
-formats remain unproven until the qualification tests named below pass. Test IDs (`Q-...`) and gates (`G0`-`G5`) are defined in
+**J-Wicket has run on one lab device.** On 24 and 25 November 2026 its bundle ran on the owner's lab
+SRX4100 (Junos 25.2R1-S1.4, Python 3.7.10). It served TLS on fxp0 through `mgmt_junos`, signed in
+operators of the `read-only`, `operator` and `super-user` classes over NETCONF to loopback, and read
+the policy inventory, the session table and the `messages` log; nine of its replies were recorded
+there as fixtures (Q-REL-01, partial) ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). The spike ran a different, single-file daemon on one
+vSRX (Junos 24.4R2-S3.5). Least privilege, other platforms and releases, and the reply formats of
+every other release remain unproven until the qualification tests named below pass and are
+certified. Test IDs (`Q-...`) and gates (`G0`-`G5`) are defined in
 [governance.md](governance.md).
 
 Labels used on this page:
@@ -94,17 +97,36 @@ operator's reads; with `lab-token` it applies to all of them.
 | --- | --- | --- | --- |
 | Listener | [`web/server.py`](../src/jwicket/web/server.py), [`web/http.py`](../src/jwicket/web/http.py) | Bounded threaded HTTP(S) server: connection cap, socket timeouts, TLS handshake in the worker thread, body caps, Host allowlist, strict response headers on every response | Implemented |
 | Routes and handlers | [`api.py`](../src/jwicket/api.py), [`live.py`](../src/jwicket/live.py) | Session status, sign-in, sign-out, policy inventory, export, flow sessions, log sources and lines, system health. Read-only. | Implemented |
-| Sign-in backends | [`auth/backends.py`](../src/jwicket/auth/backends.py) | `netconf`: hand the operator's user name and password to Junos. `lab-token`: one shared token, reads as the daemon account, loopback only. | `netconf` never run on a device (Q-AUTH-01) |
+| Sign-in backends | [`auth/backends.py`](../src/jwicket/auth/backends.py) | `netconf`: hand the operator's user name and password to Junos. `lab-token`: one shared token, reads as the daemon account, loopback only. | `netconf` run on the lab SRX4100 with `read-only`, `operator` and `super-user` accounts; the daemon-account SSH-key case not run (Q-AUTH-01) |
 | Web sessions | [`auth/sessions.py`](../src/jwicket/auth/sessions.py) | Random cookie token (only its SHA-256 is kept) under a cookie name with a random per-start suffix, CSRF token, idle and absolute timeouts (idle counted from the last foreground request), a cap on concurrent sessions, two sessions per Junos user by default (`max_sessions_per_user`; a third sign-in by the same user closes that user's oldest); each web session owns one device session. A bounded list of tombstones, each holding only why and when a session ended, so a later request with that cookie can be told why ([section 3.4](#34-session-end)) | Implemented |
 | Sign-in limits | [`auth/throttle.py`](../src/jwicket/auth/throttle.py) | Failed sign-ins per minute per (source address, user name) and per source address; sign-ins checked by the backend at once. Only sign-ins that reached Junos and failed count. | Implemented |
 | Device sessions | [`junos/session.py`](../src/jwicket/junos/session.py) | The only code that talks to Junos. RPC allowlist, fixed configuration filters, committed database, one RPC at a time per operator (a request waits at most 5 s for it, then gets 429) | Implemented |
-| Read adapters | [`junos/inventory.py`](../src/jwicket/junos/inventory.py), [`junos/facts.py`](../src/jwicket/junos/facts.py), [`junos/sessions.py`](../src/jwicket/junos/sessions.py), [`junos/logs.py`](../src/jwicket/junos/logs.py) | Turn replies into JSON-ready data. Match XML by local name. Never return raw XML. | Parsers written against documentation and synthetic fixtures (Q-REL-01) |
+| Read adapters | [`junos/inventory.py`](../src/jwicket/junos/inventory.py), [`junos/facts.py`](../src/jwicket/junos/facts.py), [`junos/sessions.py`](../src/jwicket/junos/sessions.py), [`junos/logs.py`](../src/jwicket/junos/logs.py) | Turn replies into JSON-ready data. Match XML by local name. Never return raw XML. | Parsers written against documentation and synthetic fixtures, then run on nine replies recorded on the lab SRX4100, which found and fixed three mismatches (Q-REL-01, partial) |
 | Error kinds | [`junos/errors.py`](../src/jwicket/junos/errors.py) | A closed set of failure kinds (`denied`, `unsupported`, `failed`, `rejected`, `unavailable`, `session-lost`) with operator-safe messages | Implemented; error texts unverified (Q-REL-01) |
 | Audit trail and diagnostic log | [`logs.py`](../src/jwicket/logs.py) | Audit trail: one JSON object per line, who, from where, what, when; credential fields dropped; refusals of clients without a session aggregated; failed sign-ins recorded under a keyed hash of the name. Diagnostic log: control characters escaped in every message. | Implemented |
 | Settings | [`settings.py`](../src/jwicket/settings.py), [`app.py`](../src/jwicket/app.py) | One INI file at a fixed path, validated completely before anything listens; unsafe values refuse the start | Implemented |
 | Static assets | [`resources.py`](../src/jwicket/resources.py), [`static/`](../src/jwicket/static/) | Served from an in-memory manifest keyed by strict names; no filesystem path built from a request | Implemented |
-| Bundle | [`tools/bundle.py`](../tools/bundle.py) | Generates `dist/jwicket.py`: every shipped module and asset in one deterministic file, which removes its own directory from `sys.path` before any other import | Built and self-tested in CI; never started by Junos (Q-RT-02) |
+| Bundle | [`tools/bundle.py`](../tools/bundle.py) | Generates `dist/jwicket.py`: every shipped module and asset in one deterministic file, which removes its own directory from `sys.path` before any other import | Built and self-tested in CI; started by Junos on one lab SRX4100 (Q-RT-02 met except idle memory) |
 | Development server | [`devserver.py`](../src/jwicket/devserver.py), [`fixtures.py`](../src/jwicket/fixtures.py) | The real server and UI fed from synthetic fixtures, loopback only, "fixture data" banner. Excluded from the bundle. | Development only |
+
+**Install tooling, outside the J-Wicket process.** [Spec 006](specs/006-installation.md) adds the
+components below. None of their code ships in `dist/jwicket.py` or runs in the J-Wicket process, and
+`ALLOWED_RPCS` is unchanged: the daemon stays read-only (a test,
+`test_installer_code_is_not_in_the_daemon`, checks it). They write configuration and files on a lab
+device as the operator's own account, under Spec 006's invariants, and only on a lab device
+(lab-gated until G1, [ADR 0011](adr/0011-owner-decisions-lab-gated-install.md); the design is a
+proposal, [ADR 0012](adr/0012-installer-design.md), except the three defaults the owner accepted on
+2026-11-25: TLS access by default, root's one-time directory step, and lab hardware only with
+`--lab-hardware` and a typed `lab only`). Of this tooling only the op script reaches
+the device: a separate file with its own SHA-256 that the operator runs from the CLI.
+
+| Component | Code | Job | State |
+| --- | --- | --- | --- |
+| Shared plan | [`plan.py`](../tools/jwicket_install/plan.py), [`state.py`](../tools/jwicket_install/state.py), [`render.py`](../tools/jwicket_install/render.py) | Every statement, file, mode, check and warning of an install, upgrade or uninstall, computed from the device's facts and prior state; standard library, no I/O | Built and tested on synthetic fixtures |
+| Workstation installer (M1; the executor of M2 and M3) | [`tools/jwicket_install/`](../tools/jwicket_install/) (`cli.py`, `workstation.py`, `transport.py`, `hostkeys.py`, `health.py`, `provenance.py`, `receipt.py`, `tunnel.py`) | PyEZ over NETCONF on the SSH port, its own SSH client for copies and the veriexec read; host keys checked on every connection; provenance before any write. By default (`--access tls`) it makes the daemon's self-signed certificate in memory and checks the new build with an HTTPS read pinned to it; no check opens an SSH forwarding channel | Built against fakes; never run on a device (Q-INST-06) |
+| On-box op script (M4, M4U) | [`op_template.py`](../tools/jwicket_install/op_template.py), [`build_op.py`](../tools/jwicket_install/build_op.py) | One generated op script that embeds the shared plan and the bundle's hash and runs the same stages through on-box PyEZ, on the box's Python 3.7 | Built against fakes; never run on a device |
+| Deployment wrappers | [`deploy/`](../deploy/) | Ansible playbooks and a container image that run the workstation installer; a containerlab topology for a disposable vSRX | Checked in CI; never run against a device |
+| Release tooling | [`release.yml`](../.github/workflows/release.yml), [`release_check.py`](../tools/release_check.py), [`release_record.py`](../tools/release_record.py), [`build_wheel.py`](../tools/build_wheel.py) | Lab pre-releases from a tag: reproducible assets, `SHA256SUMS`, attestations, and a release record on `main` | Never run; no tag exists |
 
 ## 2. Trust boundaries
 
@@ -150,10 +172,10 @@ flowchart TB
 
 | Boundary | What crosses it | Enforced by the device (Junos) | Enforced by J-Wicket | Proven? |
 | --- | --- | --- | --- | --- |
-| **B1** Workstation to listener | HTTP requests and responses: the password once at sign-in, the session cookie, the CSRF token, device data | Lab path: sshd authenticates the tunnel user and decides whether TCP forwarding is allowed. A non-loopback bind would also need the zone's host-inbound services (spike: `webapi-ssl` admitted TCP 8443) or fxp0 reachability, and firewall filters. | Default bind `127.0.0.1`. Any other bind address needs a certificate and key; there is no plaintext switch ([ADR 0003](adr/0003-tls-off-loopback.md)). TLS 1.2 minimum, compression off, HSTS when TLS is on. Optional Host allowlist (HTTP 421 otherwise). | Tunnel: unverified (Q-NET-03). TLS on the device: unverified (Q-TLS-01). Host-inbound by port: one observation on one release (spike T4). |
+| **B1** Workstation to listener | HTTP requests and responses: the password once at sign-in, the session cookie, the CSRF token, device data | Lab path: sshd authenticates the tunnel user and decides whether TCP forwarding is allowed. A non-loopback bind would also need the zone's host-inbound services (spike: `webapi-ssl` admitted TCP 8443) or fxp0 reachability, and firewall filters. | Default bind `127.0.0.1`. Any other bind address needs a certificate and key; there is no plaintext switch ([ADR 0003](adr/0003-tls-off-loopback.md)). TLS 1.2 minimum, compression off, HSTS when TLS is on. Optional Host allowlist (HTTP 421 otherwise). | Tunnel: refused on the lab SRX4100 (Q-NET-03 fails there). TLS on the device: served on that SRX4100's fxp0, TLS 1.0 and 1.1 refused (Q-TLS-01, met except a provisioning path). Host-inbound by port: one observation on one release (spike T4). |
 | **B2** Other origins in the same browser | Nothing should: cross-site requests, framing, injected script | Nothing | Content-Security-Policy `default-src 'none'`, scripts and styles from `'self'` only, Trusted Types required, `frame-ancestors 'none'`. Cookie `HttpOnly`, `SameSite=Strict`, `Secure` under TLS, named with a random suffix chosen at each start; cookies are not isolated by port, so other services on the same host can receive it ([gap 8](#15-known-gaps-in-the-current-code)). `Origin` must equal the page origin on both POST routes; sign-out also needs the `X-CSRF-Token` header. No CORS headers. `nosniff`, `no-referrer`, `Cache-Control: no-store`. | Implemented |
 | **B3** Unauthenticated to signed-in | Request line and headers (at most 16 KiB together), query (at most 20 fields), body (at most 8 KiB, `Content-Length` required) | Nothing | Without a session a client can fetch only `/`, `/static/*`, `/healthz` and `GET /api/session`, and can call `POST /api/login` and `POST /api/logout`. Every other route refuses to read without a session (401, with a `reason` that says why when J-Wicket knows; [section 3.4](#34-session-end)). One checks a parameter first: `GET /api/export?format=xml` without a session is 400, not 401, with no device read either way. Connection cap (8); the TLS handshake and the whole request must arrive within the socket timeout (10 s); one request per connection; route and method allowlist; scope pattern, filter and log-parameter validation; read-rate floors; sign-in limits. | Implemented |
-| **B4** J-Wicket to mgd, as the operator | User name and password once per sign-in. Allowlisted RPCs with validated parameters. Replies: the configuration subtrees J-Wicket parses (for the inventory, `[edit security]` `policies`, `zones` and `address-book`, plus `applications`, per scope; never all of `[edit security]`, which holds IKE pre-shared keys) and operational data. | Authentication (local password, RADIUS, TACACS+, in the configured authentication order). The operator's login class on every RPC and configuration hierarchy, including logical-system and tenant confinement. NETCONF `connection-limit` and `rate-limit`. Login retry options. Each RPC logged as `UI_NETCONF_CMD`. | NETCONF host must be a loopback address and the port below 1024 (settings refuse anything else). Password only: PyEZ is told not to offer the daemon account's SSH keys and not to read its `~/.ssh/config`. RPC allowlist; RPC names are constants, or come from a fixed list (`REPORT_TYPES`) selected by a checked parameter, and every name is checked against the allowlist; configuration filters are constants. Committed database only. One RPC in flight per operator. At most 4 signed-in operators (`max_sessions`), two sessions per Junos user by default. RPC timeout 30 s. No password stored by J-Wicket. | Unproven (Q-AUTH-01, Q-AUTH-02, Q-AUTH-03) |
+| **B4** J-Wicket to mgd, as the operator | User name and password once per sign-in. Allowlisted RPCs with validated parameters. Replies: the configuration subtrees J-Wicket parses (for the inventory, `[edit security]` `policies`, `zones` and `address-book`, plus `applications`, per scope; never all of `[edit security]`, which holds IKE pre-shared keys) and operational data. | Authentication (local password, RADIUS, TACACS+, in the configured authentication order). The operator's login class on every RPC and configuration hierarchy, including logical-system and tenant confinement. NETCONF `connection-limit` and `rate-limit`. Login retry options. Each RPC logged as `UI_NETCONF_CMD`. | NETCONF host must be a loopback address and the port below 1024 (settings refuse anything else). Password only: PyEZ is told not to offer the daemon account's SSH keys and not to read its `~/.ssh/config`. RPC allowlist; RPC names are constants, or come from a fixed list (`REPORT_TYPES`) selected by a checked parameter, and every name is checked against the allowlist; configuration filters are constants. Committed database only. One RPC in flight per operator. At most 4 signed-in operators (`max_sessions`), two sessions per Junos user by default. RPC timeout 30 s. No password stored by J-Wicket. | Q-AUTH-01 met except the SSH-key case on one lab SRX4100; Q-AUTH-02 not run; Q-AUTH-03 early observations |
 | **B5** J-Wicket to mgd, as the daemon account (`lab-token` only) | Allowlisted RPCs and replies | Only the extension-service `username` account's login class. There is no per-operator identity. | Allowed only with a loopback bind. Token of at least 32 ASCII characters, from a mode-0600 file, compared in constant time. Every screen names the backend and the account. In the audit trail the `start` and `login` records name the backend; every record of a signed-in action names the account (`user`). | The PyEZ local path is verified by the spike (T5, as `jcluser`, class `j-super-user`). J-Wicket's use of it has not run on a device. |
 | **B6** Routing engine to data plane | Session-table entries sent from the SPUs to the routing engine for a session list | Nothing limits the size of a list request; the CLI has no count option (verified) | Device-side filters are pushed into the RPC. A (filtered) summary is read first; rows are listed only when the match count is known to be at most 5,000 (`MAX_UNFILTERED`), or, for a filtered request with no count, when the active count is. At most 2,000 sessions per reply are kept after parsing; on a chassis cluster reply that counts sessions, not rows, so both nodes' copies of each kept session stay (the per-node reply layout is **inferred**, Q-REL-01). | Cost unmeasured (Q-LOAD-02). The guard used to fail open ([gap 1](#15-known-gaps-in-the-current-code), closed). |
 | **B7** Junos supervision to the process | The bundle file, the `username` identity, start and restart | Veriexec blocks unsigned binaries; only Python under `system scripts language python3` runs. Script owner must be root or a super-user-class user, owner-only write (verified for commit, event, op and SNMP scripts; inferred for JET). `jlaunchd`/`cscript` start the app at commit and respawn it. | The bundle is deterministic with a published SHA-256; its importer serves only embedded modules. No arguments under Junos; settings from one fixed file. | Supervision verified by the spike for the spike daemon (T1, T6). J-Wicket's bundle: Q-RT-02, Q-RT-03. |
@@ -558,6 +580,7 @@ flowchart TB
 | The configuration is synchronized between the nodes over the control link on each commit, whichever node it is entered on ("All commands are applied to both nodes regardless of from which device the command is configured"). The node0-to-node1 wording on the same page belongs to the cluster-creation steps only. | Verified | [cc-ap] |
 | Per-node groups (`node0`, `node1`) applied with `apply-groups "${node}"` give each node its own host name and fxp0 address | Verified | [cc-ap] |
 | Script synchronization covers commit, event, lib, op and SNMP scripts between routing engines; JET is not listed, and chassis cluster nodes are not mentioned | Verified | [script-sync] |
+| The manual `request system scripts synchronize` command does list `jet` ("(all \| commit \| event \| jet \| lib \| op \| snmp)"); whether it reaches the other node of a chassis cluster is not stated | Verified (command); reach to the peer unknown (Q-HA-01) | [sync-cmd] |
 | `jsd` (JET gRPC APIs) runs only on the primary routing engine | Verified; J-Wicket does not use `jsd` | [jet-guide] |
 | In a session list, a session appears on both nodes, `Active` on one and `Backup` on the other; the backup copy shows zero packets and bytes | Verified (doc samples) | [sfs-node] |
 | On-box reporting logs are stored on the node processing the traffic and are not synchronized to the peer | Verified | [syslog-sec] |
@@ -774,7 +797,9 @@ flowchart LR
 
 **Why one file.** Veriexec blocks unsigned binaries; the only on-box runtime open to unsigned code
 is Python 3 under `set system scripts language python3` (**verified**, [jet-guide]). Whether an
-unsigned script in `/var/db/scripts/jet/` may import sibling `.py` files is **unknown** (Q-RT-03).
+unsigned script in `/var/db/scripts/jet/` may import sibling `.py` files was **unknown** until the
+lab SRX4100 showed it can (`/var/db/scripts/jet` is first on `sys.path`, Q-RT-03, one release); that
+makes the single file optional, not wrong, and it stays.
 Juniper documents a packaged form with extra module files (`srcs`), which J-Wicket does not use yet
 ([jet-guide]). See [ADR 0001](adr/0001-on-box-pure-python-single-file.md).
 
@@ -795,8 +820,9 @@ Juniper documents a packaged form with extra module files (`srcs`), which J-Wick
   therefore no longer starts with `from __future__ import annotations`. The self-test reports
   `path_removed` and `foreign_modules` and fails if any loaded module's file is in that directory;
   the daemon then refuses to start with exit 2 and `jwicket: refusing to start: code was loaded from
-  this file's directory: ...` on standard error. Whether Junos starts the app with that directory on
-  `sys.path` at all is part of Q-RT-03.
+  this file's directory: ...` on standard error. On the lab SRX4100 Junos started a JET app with
+  `/var/db/scripts/jet` first on `sys.path` (Q-RT-03), so this scrub is what keeps a planted file
+  there out.
 - Copies named `jwicket_selftest.py` and `jwicket_probe.py` run the self-test and the interpreter
   probe (Q-RT-01) instead of the daemon, because Junos cannot pass `--flag` arguments (spike
   finding F1, [charter section 5](charter.md#5-spike-evidence)). Both ran on the lab SRX4100
@@ -807,33 +833,54 @@ Juniper documents a packaged form with extra module files (`srcs`), which J-Wick
   `jcs.set_routing_instance()` around creating the listener and then restores `"default"`, because
   the call is process-wide and NETCONF to `127.0.0.1:830` times out inside `mgmt_junos` (measured
   on 25.2R1-S1.4). The extension-service `routing-instance` statement did not have this effect.
+- **Result files** (Spec 006 change D2). The two copies also write their JSON, exactly what they
+  print, to `/var/db/jwicket/selftest-result.json` and `probe-result.json`, so an installer can read
+  it with `file show` instead of the shell. Only when that directory is trusted: checked with
+  `lstat` (a directory, not a link, owned by the running uid, not group- or other-writable), then
+  opened `O_DIRECTORY | O_NOFOLLOW` and compared by `fstat`; the file is opened relative to it with
+  `O_NOFOLLOW | O_NONBLOCK`, must be a regular file, mode 0600. Best effort: the exit status is
+  unchanged, an absent directory creates nothing, and a stale file is never deleted by the bundle.
+  The bundle runtime writes them, so `python -m jwicket --probe` from `src/` does not.
+- **Build line** (Spec 006 change D3). The header carries `features: result-files,build-line`; the
+  daemon's start line ends ` version=<v> payload=<first 16 hex of payload_sha256>` (`payload=none`
+  from `src/`), the audit `start` record carries `payload_sha256`, and `GET /api/session` returns
+  `build` (`null` from `src/`). The installers' health checks use these to prove the new build is
+  the one listening. Neither change relaxes a rule of `settings.py`. Neither D2 nor D3 was in the
+  build that ran on the lab SRX4100, so neither has run on a device.
 
 **Supervision** (**verified** by the spike for the spike daemon, and by [jet-file]):
 `daemonize` starts the app at commit; `respawn-on-normal-exit` restarts it after a clean exit as
 well as a crash; committing a change to the app's statements restarts it; an app that keeps exiting
 is marked "thrashing, not restarted"; a daemonized app cannot be started by hand. Without
 `username` the app runs as `nobody`. The `file (JET)` statement also has a `checksum` option, which
-J-Wicket's procedure does not use yet.
+the lab procedure does not use; the installers pin it (`checksum sha-256`, in the SRX schema at
+23.2R1), and whether Junos enforces it at start and respawn is **unknown** (Q-INST-02).
 
 **The process.** One Python process. Threads: the accept loop, one worker per connection (at most
 8), and the session reaper. Each signed-in operator holds one NETCONF session (at most 4). SIGTERM
 and SIGINT shut down cleanly and close every device session. The spike daemon's idle footprint was
-about 22 MB resident on vSRX; J-Wicket's is unmeasured (Q-HW-01, Q-LOAD-01).
+about 22 MB resident on vSRX. J-Wicket's on the lab SRX4100: 54 MB resident with one signed-in
+operator, 33 MB idle 11 s after a start (Q-RT-02); its footprint under load is unmeasured (Q-HW-01,
+Q-LOAD-01).
 
 **Files on the device:**
 
 | Path | Owner and mode | Holds |
 | --- | --- | --- |
 | `/var/db/scripts/jet/jwicket.py` | a super-user-class account, `0644` | The bundle |
-| `/var/db/jwicket/` | the daemon account, `0700` | Settings and logs |
+| `/var/db/jwicket/` | the daemon account, `0700` | Settings and logs. Made once by root and given to that account: a super-user-class account cannot create it (verified on the lab SRX4100), and no installer creates or removes it |
 | `/var/db/jwicket/jwicket.ini` | the daemon account or root, not group- or world-writable (`0600` in the lab procedure) | Settings (fixed path, `DEFAULT_CONFIG_PATH`) |
 | `/var/db/jwicket/jwicket.log`, `audit.jsonl` | the daemon account, created `0600` | Diagnostic log and audit trail, only when `[log] file` and `[log] audit_file` name them (the lab procedure does); rotated at 1 MB with 3 backups by default. With `audit_file` unset the audit trail goes to the diagnostic log, and with `file` unset that goes only to standard error. |
 | `/var/db/jwicket/startup-refused.txt` | the daemon account, `0600` | Why the last start was refused |
+| `/var/db/jwicket/selftest-result.json`, `probe-result.json` | the daemon account, `0600` | The last self-test and probe output, when the directory is trusted (D2 above) |
+| `/var/db/jwicket/install-receipt.json` | the daemon account (the installing account), `0600` | The installers' advisory device receipt; the daemon's account can write it, so it never decides ownership ([Spec 006](specs/006-installation.md), INV-11) |
+| `/var/db/jwicket/tls.key`, `tls.crt` | the daemon account, `0600` and `0644` | The listener's key and self-signed certificate, when `tls_cert` and `tls_key` name them (the lab procedure's TLS variant, and the installers' default `--access tls`) |
 
-**Unknown until tested:** whether the bundle runs as a daemon with no arguments and its idle
-footprint (Q-RT-02), sibling imports (Q-RT-03), survival across reboot (Q-RT-04) and Junos upgrade
-(Q-RT-05), and placement on both cluster nodes (Q-HA-01). The lab procedure is
-[deploy-lab.md](deploy-lab.md); it is for disposable lab vSRX only.
+**Unknown until tested:** the bundle's idle footprint after ten minutes (Q-RT-02), survival across
+reboot (Q-RT-04) and Junos upgrade (Q-RT-05), placement on both cluster nodes (Q-HA-01), and every device step of the installers
+(Q-INST-06). The lab procedure is [deploy-lab.md](deploy-lab.md), and the lab-gated installers are in
+[install.md](install.md); both are for lab devices only: a disposable vSRX, or lab hardware its
+owner approves.
 
 ## 11. Offline-capable
 
@@ -966,8 +1013,9 @@ connection, so the 2026 certificate validation advisory for Security Director Cl
 - What the report `expression` language does with unusual input is unknown; the allowed characters
   exclude quotes and semicolons.
 - `GET /api/session` tells an unauthenticated client the J-Wicket version and sign-in backend,
-  and, to a client presenting the cookie of a session that ended, why and when it ended (the 401s
-  say the same). Nothing else about that session.
+  and, from a bundle, `build`, the first 16 hex characters of its payload digest (Spec 006 change
+  D3; the digest names public code), and, to a client presenting the cookie of a session that
+  ended, why and when it ended (the 401s say the same). Nothing else about that session.
 - An operator whom Junos accepted but the session cap refused learns how many sessions are open and
   when one must end, without names or sources (owner decision OD-13's default).
 - A web session's last read per endpoint (the inventory snapshot, a sessions reply, a log file's
@@ -1075,6 +1123,7 @@ Spike packet: [`docs/evidence/2026-11-23-vsrx-spike/`](evidence/2026-11-23-vsrx-
 [py-overview]: https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-python-scripts-overview.html
 [py-req]: https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-python-scripts-requirements-for-executing.html
 [script-sync]: https://networkingdocs.hpe.com/documentation/us/en/software/junos/automation-scripting/topics/concept/junos-script-automation-script-synchronizing-routing-engines-overview.html
+[sync-cmd]: https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-scripts-synchronize-command.html
 [pyez-device]: https://pyez.readthedocs.io/en/latest/_modules/jnpr/junos/device.html
 [ncclient-manager]: https://raw.githubusercontent.com/ncclient/ncclient/master/ncclient/manager.py
 [pyez-guide]: https://networkingdocs.hpe.com/documentation/en_US/junos-pyez/information-products/pathway-pages/junos-pyez-developer-guide.pdf
