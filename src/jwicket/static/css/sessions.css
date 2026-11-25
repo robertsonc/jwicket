@@ -828,7 +828,16 @@
 .sx-m.m-meta { grid-area: meta; font-size: 11.5px; line-height: 16px; color: var(--muted); display: flex; align-items: center; min-width: 0; }
 .sx-m.m-size { grid-area: size; text-align: right; color: var(--faint); font-size: 11px; }
 .sx-m .sep { color: var(--faint); white-space: pre; }
-.sx-m.m-meta .sx-nat { flex: 0 1 auto; min-width: 0; }
+/* Every item on the meta line clips with an ellipsis instead of spilling over its neighbour (seen on
+   a lab SRX4100: "SNAT" drawn over "junos:ICMP"); the policy name gives up space first. */
+.sx-m.m-meta > :not(.sep) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sx-m.m-meta > .sx-proto,
+.sx-m.m-meta > .sep { flex: none; }
+.sx-m.m-meta > .sx-pol { flex-shrink: 2; min-width: 4.5em; }
+.sx-m.m-meta > .sx-app { flex-shrink: 1; min-width: 3.5em; }
+/* On the card the NAT badge alone says it: the translated address is in the drawer (and the title). */
+.sx-m.m-meta .sx-nat { display: inline-flex; align-items: center; flex: none; }
+.sx-m.m-meta .sx-nat > :not(.sx-natb) { display: none; }
 
 /* ---- explicit states in place of the grid ----------------------------------------------------- */
 

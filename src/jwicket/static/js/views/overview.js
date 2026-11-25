@@ -1036,8 +1036,11 @@ class Overview {
     });
     this.sessBig.hidden = small || frac === null;
     if (!this.sessBig.hidden) setTicking(this.sessBig, fmt.num(active));
+    const validNote = summary.status === 'ok' && Number.isFinite(summary.valid) && Number.isFinite(summary.invalidated) && summary.invalidated > 0
+      ? ` \u00b7 ${fmt.num(summary.valid)} valid, ${fmt.num(summary.invalidated)} invalidated`
+      : '';
     this.sessOf.textContent = max
-      ? `${fmt.num(active)} active of ${fmt.num(max)} maximum (${fmt.pct(active, max)})`
+      ? `${fmt.num(active)} active of ${fmt.num(max)} maximum (${fmt.pct(active, max)})${validNote}`
       : summary.status === 'ok'
         ? `${fmt.num(active)} active (maximum not reported)`
         : `summary ${summary.status}: ${summary.message || ''}`;

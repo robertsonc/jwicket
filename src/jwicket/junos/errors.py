@@ -89,8 +89,9 @@ class SessionLost(JunosError):
 
 
 _DENIED = re.compile(r"permission denied|not authorized|authorization", re.IGNORECASE)
-# Verified wording for the standalone case is pending a recorded reply (qualification Q-REL-01);
-# these patterns are deliberately narrow so that an unexpected error is reported as a failure.
+# Recorded on SRX4100 25.2R1-S1.4: a standalone device answers get-chassis-cluster-status with
+# "error: Chassis cluster is not enabled" (jsrpd), and a class without the bit gets
+# "error: permission denied". The patterns stay narrow so that an unexpected error is a failure.
 _UNSUPPORTED = re.compile(
     r"not enabled|syntax error|unknown command|not supported|is not running", re.IGNORECASE
 )

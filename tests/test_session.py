@@ -87,6 +87,10 @@ class FilterTests(unittest.TestCase):
         system = kid(root, "system")
         self.assertEqual(child_tags(system), ["services"])  # never the whole system tree (login, passwords)
         self.assertEqual(child_tags(path(system, "services")), ["outbound-ssh"])
+        # Only the client fields the card shows: never its $9$ secret or device-id.
+        self.assertEqual(child_tags(path(system, "services", "outbound-ssh")), ["client"])
+        client = path(system, "services", "outbound-ssh", "client")
+        self.assertEqual(child_tags(client), ["name", "services", "servers"])
         self.assertEqual(child_tags(kid(root, "chassis")), ["high-availability"])
         # Never the whole [edit security] (IKE pre-shared keys) or a whole logical/tenant system (SECU-12).
         self.assertEqual(child_tags(kid(root, "security")), ["policies", "zones", "address-book"])
