@@ -35,14 +35,32 @@ class SessionFilterTests(unittest.TestCase):
     def test_valid_filters_map_to_rpc_parameters(self) -> None:
         got = S.device_filters(
             {"src": "10.10.0.0/16", "dst": "198.51.100.7", "sport": "1024", "dport": "443",
-             "proto": "TCP", "app": "junos-https", "iface": "ge-0/0/1.0", "other": "ignored"}
+             "proto": "TCP", "app": "https", "iface": "ge-0/0/1.0", "other": "ignored"}
         )
         self.assertEqual(
             got,
             {"source-prefix": "10.10.0.0/16", "destination-prefix": "198.51.100.7/32", "source-port": "1024",
-             "destination-port": "443", "protocol": "tcp", "application": "junos-https", "interface": "ge-0/0/1.0"},
+             "destination-port": "443", "protocol": "tcp", "application": "https", "interface": "ge-0/0/1.0"},
         )
         self.assertEqual(S.rpc_kwargs({"source-prefix": "10.0.0.0/8"}), {"source_prefix": "10.0.0.0/8"})
+
+    def test_application_is_an_alg_type_of_the_yang_enumeration(self) -> None:
+        """SES-21: the 24 values of the application leaf (24.4R2 YANG), matched case-insensitively and
+        sent lower-case; port 0 is outside the leaves' 1..65535 range."""
+        self.assertEqual(len(S.APPLICATIONS), 24)
+        for value in S.APPLICATIONS:
+            with self.subTest(value=value):
+                self.assertEqual(S.device_filters({"app": value.upper()}), {"application": value})
+        with self.assertRaises(S.FilterError) as ctx:
+            S.device_filters({"app": "junos-https"})
+        self.assertEqual(str(ctx.exception), "app junos-https is not an application type the device can filter on "
+                                             "(for example https, ftp, dns); filter it in the browser instead.")
+        for key in ("sport", "dport"):
+            with self.subTest(key=key), self.assertRaises(S.FilterError) as ctx:
+                S.device_filters({key: "0"})
+            self.assertEqual(str(ctx.exception), "port 0 cannot be filtered on the device")
+        self.assertEqual(S.device_filters({"dport": "65535", "sport": "1"}),
+                         {"destination-port": "65535", "source-port": "1"})
 
     def test_host_bits_are_normalised_not_rejected(self) -> None:
         self.assertEqual(S.device_filters({"src": "10.10.3.4/16"}), {"source-prefix": "10.10.0.0/16"})
@@ -50,6 +68,7 @@ class SessionFilterTests(unittest.TestCase):
     def test_bad_values_are_refused(self) -> None:
         for key, value in (("src", "10.0.0.0/33"), ("src", "host.example"), ("dport", "70000"), ("dport", "-1"),
                            ("sport", "4a"), ("proto", "tcp;show"), ("app", "a b"), ("app", "x" * 70),
+                           ("app", "junos-https"), ("sport", "0"), ("dport", "00"),
                            ("iface", "ge-0/0/0.0 | display"), ("iface", "../../etc")):
             with self.subTest(key=key, value=value), self.assertRaises(S.FilterError):
                 S.device_filters({key: value})
@@ -124,8 +143,46 @@ class SessionParseTests(unittest.TestCase):
         self.assertEqual(got["returned"], 3)
 
     def test_limit_truncates_and_says_so(self) -> None:
-        got = S.parse_sessions(xml(CLUSTER_REPLY), 2)
+        """One node: limit counts rows (each row is a session)."""
+        one_node = xml(
+            "<flow-session-information><flow-fpc-pic-id>on FPC0 PIC1:</flow-fpc-pic-id>"
+            "<flow-session><session-identifier>1</session-identifier><policy>p</policy></flow-session>"
+            "<flow-session><session-identifier>2</session-identifier><policy>p</policy></flow-session>"
+            "<flow-session><session-identifier>3</session-identifier><policy>p</policy></flow-session>"
+            "<displayed-session-count>3</displayed-session-count></flow-session-information>"
+        )
+        got = S.parse_sessions(one_node, 2)
         self.assertEqual((len(got["rows"]), got["returned"], got["truncated"]), (2, 3, True))
+        self.assertEqual(got["sessions_returned"], got["returned"])
+        self.assertNotIn("nodes", got)
+
+    def test_cluster_limit_counts_sessions_and_keeps_both_copies(self) -> None:
+        """SES-11: on a multi-node reply limit counts session ids; both copies of each kept id stay."""
+        got = S.parse_sessions(xml(CLUSTER_REPLY), 1)
+        self.assertEqual([(r["session_id"], r["location"]) for r in got["rows"]],
+                         [("1", "node0 on FPC0 PIC1:"), ("1", "node1")])
+        self.assertEqual((got["returned"], got["sessions_returned"], got["truncated"]), (3, 2, True))
+        everything = S.parse_sessions(xml(CLUSTER_REPLY), 2)
+        self.assertEqual([r["session_id"] for r in everything["rows"]], ["1", "2", "1"])
+        self.assertEqual((everything["sessions_returned"], everything["truncated"]), (2, False))
+
+    def test_cluster_ids_follow_the_first_node(self) -> None:
+        reply = xml(
+            "<multi-routing-engine-results>"
+            "<multi-routing-engine-item><re-name>node0</re-name><flow-session-information>"
+            "<flow-session><session-identifier>7</session-identifier></flow-session>"
+            "<flow-session><session-identifier>5</session-identifier></flow-session>"
+            "</flow-session-information></multi-routing-engine-item>"
+            "<multi-routing-engine-item><re-name>node1</re-name><flow-session-information>"
+            "<flow-session><session-identifier>9</session-identifier></flow-session>"
+            "<flow-session><session-identifier>5</session-identifier></flow-session>"
+            "<flow-session><session-identifier>7</session-identifier></flow-session>"
+            "</flow-session-information></multi-routing-engine-item>"
+            "</multi-routing-engine-results>"
+        )
+        got = S.parse_sessions(reply, 2)
+        self.assertEqual([r["id"] for r in got["rows"]], ["node0:7", "node0:5", "node1:5", "node1:7"])
+        self.assertEqual((got["sessions_returned"], got["truncated"], got["returned"]), (3, True, 5))
 
     def test_policy_without_index(self) -> None:
         self.assertEqual(S._split_policy("plain"), ("plain", None))
@@ -146,11 +203,13 @@ class SessionParseTests(unittest.TestCase):
 
     def test_summary_sums_spus_within_one_node(self) -> None:
         reply = xml(
-            "<r><a><active-sessions>10</active-sessions><max-sessions>100</max-sessions></a>"
-            "<b><active-sessions>5</active-sessions><max-sessions>100</max-sessions></b></r>"
+            "<r><a><active-sessions>10</active-sessions><max-sessions>100</max-sessions>"
+            "<failed-sessions>2</failed-sessions></a>"
+            "<b><active-sessions>5</active-sessions><max-sessions>100</max-sessions>"
+            "<failed-sessions>1</failed-sessions></b></r>"
         )
         got = S.parse_summary(reply)
-        self.assertEqual((got["active"], got["max"]), (15, 200))
+        self.assertEqual((got["active"], got["max"], got["failed"]), (15, 200, 3))
         self.assertNotIn("nodes", got)
 
     def test_cluster_summary_uses_the_largest_node(self) -> None:
@@ -168,8 +227,11 @@ class SessionParseTests(unittest.TestCase):
             "</multi-routing-engine-results>"
         )
         got = S.parse_summary(reply)
-        self.assertEqual((got["active"], got["max"], got["matching"], got["failed"]), (3000, 524288, 2900, 3))
+        self.assertEqual((got["active"], got["max"], got["matching"]), (3000, 524288, 2900))
+        # SES-23: never summed across nodes; whether each node counts its own failures is unknown.
+        self.assertIsNone(got["failed"])
         self.assertEqual([n["node"] for n in got["nodes"]], ["node0", "node1"])
+        self.assertEqual([n["failed"] for n in got["nodes"]], [2, 1])
         self.assertEqual(got["nodes"][1]["active"], 2990)
 
 
@@ -287,6 +349,34 @@ class LogSourceStateTests(unittest.TestCase):
                 got = self.sources(seclog, model=model)
                 report = next(d for d in got["databases"] if d["id"] == "report")
                 self.assertIn("not for this model or log mode", report["note"])
+
+    def test_log_states_fixture(self) -> None:
+        """LOG-12: tests/fixtures/log-states, read through logs.sources() with its software facts."""
+        from jwicket.junos import facts
+
+        directory = FIXTURES / "log-states"
+        software = facts.software(ElementTree.parse(directory / "get-software-information.xml").getroot())
+        self.assertEqual((software["model"], software["version"]), ("srx550m", "22.4R3"))
+        got = L.sources(ElementTree.parse(directory / "config.xml").getroot(), software["model"], software["version"])
+        files = {f["name"]: f for f in got["files"]}
+        self.assertEqual(list(files), ["messages", "interactive-commands", "traffic-old"])
+        self.assertTrue(files["messages"].get("assumed"))
+        self.assertEqual((files["traffic-old"]["inactive"], files["interactive-commands"]["inactive"]), (True, False))
+        traffic = got["traffic"]
+        self.assertEqual((traffic["mode"], traffic["effective_mode"]), ("stream-event", "stream-event"))
+        self.assertEqual((traffic["format"], traffic["disabled"], traffic["report"]), ("binary", True, True))
+        self.assertIn("disabled in the configuration", traffic["where"])
+        streams = {s["name"]: s for s in traffic["streams"]}
+        self.assertEqual(streams["to-siem"]["host"], "192.0.2.50")
+        self.assertEqual(streams["to-radius"]["radius"], "192.0.2.60")
+        self.assertEqual(streams["local-copy"]["file"], "traffic-stream.log")
+        self.assertEqual([s["inactive"] for s in traffic["streams"]], [False, False, False, True])
+        dbs = {d["id"]: d for d in got["databases"]}
+        self.assertEqual(list(dbs), ["report", "buffer"])
+        self.assertIs(dbs["report"]["supported"], False)
+        self.assertIn("23.1R1", dbs["report"]["note"])
+        self.assertTrue(dbs["report"]["disabled"] and dbs["buffer"]["disabled"])
+        self.assertFalse((directory / "live.json").exists())
 
     def test_report_queries_need_23_1(self) -> None:
         got = self.sources("<mode>stream</mode><report/>", model="srx345", version="22.4R3")
@@ -430,9 +520,16 @@ class LiveHttpTests(LiveHttpBase):
         self.assertTrue(data["meta"]["fixture"])
         self.assertEqual(data["meta"]["device_filters"], {})
         self.assertGreater(len(data["sessions"]["rows"]), 0)
-        status, headers, _ = self.get("/api/sessions")
+        self.assertEqual((data["meta"]["max_listed"], data["meta"]["rows"]), (S.MAX_UNFILTERED, "list"))
+        self.assertEqual(data["sessions"]["sessions_returned"], data["sessions"]["returned"])
+        self.assertEqual(data["summary"]["cached"], False)
+        self.assertRegex(data["summary"]["read_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        # Another read within the floor is refused with a machine-readable reason (BE-06).
+        status, headers, refused = self.get("/api/sessions?dport=53")
         self.assertEqual(status, 429)
         self.assertIn("retry-after", headers)
+        self.assertEqual((refused["reason"], refused["interval_s"], refused["error"]),
+                         ("rate", 1.5, "Reading too often."))
         self.clock.now += 2
         self.assertEqual(self.get("/api/sessions")[0], 200)
 
@@ -467,6 +564,7 @@ class LiveHttpTests(LiveHttpBase):
             _, _, data = self.get("/api/sessions")
             self.assertEqual(data["sessions"]["status"], "refused")
             self.assertEqual(data["sessions"]["rows"], [])
+            self.assertEqual((data["sessions"]["reason"], data["sessions"]["max_listed"]), ("over-limit", few))
             self.assertIn(f"{everything:,} sessions match", data["sessions"]["message"])
             self.clock.now += 2
             _, _, data = self.get("/api/sessions?dport=53")
@@ -476,10 +574,15 @@ class LiveHttpTests(LiveHttpBase):
 
     def test_filtered_read_keeps_the_table_wide_gauge(self) -> None:
         _, _, first = self.get("/api/sessions")
+        self.assertIs(first["summary"]["cached"], False)
         self.clock.now += 2
+        self.app.wall_clock = lambda: 1_795_503_700.0  # a later wall time: the gauge must keep its own
         _, _, narrow = self.get("/api/sessions?dport=53")
         self.assertEqual(narrow["summary"]["max"], first["summary"]["max"])
         self.assertIsNotNone(narrow["summary"]["active"])
+        self.assertIs(narrow["summary"]["cached"], True)
+        self.assertEqual(narrow["summary"]["read_at"], first["summary"]["read_at"])
+        self.assertNotEqual(narrow["meta"]["read_at"], first["summary"]["read_at"])
 
     def test_log_sources_and_tail(self) -> None:
         status, _, data = self.get("/api/logs/sources")
@@ -594,6 +697,10 @@ class SessionGuardTests(LiveHttpBase):
         device = SessionsDevice(RpcTimeout("RpcTimeoutError: timed out"))
         _, _, data = self.get("/api/sessions", self.session_for(device))
         self.assertEqual(data["sessions"]["status"], "count-unknown")
+        table = data["sessions"]
+        self.assertEqual((table["reason"], table["summary_status"], table["max_listed"]),
+                         ("summary-failed", "failed", 5000))
+        self.assertNotIn("active", data["sessions"])
         self.assertEqual(data["sessions"]["rows"], [])
         self.assertIn("took too long", data["sessions"]["message"])
         self.assertIsNone(data["matching"])
@@ -603,6 +710,8 @@ class SessionGuardTests(LiveHttpBase):
         device = SessionsDevice(xml("<flow-session-information/>"))
         _, _, data = self.get("/api/sessions", self.session_for(device))
         self.assertEqual(data["sessions"]["status"], "count-unknown")
+        self.assertEqual(data["sessions"]["reason"], "no-count")
+        self.assertNotIn("summary_status", data["sessions"])
         self.assertEqual(self.lists(device), [])
 
     def test_filtered_summary_without_a_count_is_bounded_by_the_active_count(self) -> None:
@@ -614,6 +723,8 @@ class SessionGuardTests(LiveHttpBase):
                              filtered_summary=xml("<flow-session-information/>"))
         _, _, data = self.get("/api/sessions?dport=443", self.session_for(big))
         self.assertEqual(data["sessions"]["status"], "count-unknown")
+        self.assertEqual((data["sessions"]["reason"], data["sessions"]["active"]),
+                         ("no-count-over-limit", S.MAX_UNFILTERED + 1))
         self.assertIn(f"{S.MAX_UNFILTERED + 1:,} sessions are active", data["sessions"]["message"])
         self.assertEqual(self.lists(big), [])
 
@@ -627,6 +738,40 @@ class SessionGuardTests(LiveHttpBase):
                 _, _, data = self.get("/api/sessions", self.session_for(device))
                 self.assertEqual(data["sessions"]["status"], status)
                 self.assertEqual(self.lists(device), [])
+
+    def test_rejected_filter_is_filter_rejected(self) -> None:
+        """SES-19: the device reads the whole table but not the filtered read: say so, list nothing."""
+        from jwicket.junos.errors import RpcUnsupported
+
+        device = SessionsDevice(xml(SUMMARY_OK.format(n=40)), filtered_summary=RpcUnsupported("syntax error"))
+        _, _, data = self.get("/api/sessions?dport=443&proto=tcp", self.session_for(device))
+        table = data["sessions"]
+        self.assertEqual(table["status"], "filter-rejected")
+        self.assertEqual(table["summary_status"], "unsupported")
+        self.assertEqual(table["filters"], {"destination-port": "443", "protocol": "tcp"})
+        self.assertEqual(table["filters"], data["meta"]["device_filters"])
+        self.assertEqual(table["rows"], [])
+        self.assertEqual(table["message"], "The device did not accept the filtered read (destination-port=443, "
+                                           "protocol=tcp) although it reads the whole table. Remove the device "
+                                           "filters, or filter in the browser instead.")
+        self.assertEqual(data["summary"]["status"], "ok")
+        self.assertEqual(self.lists(device), [])
+        denied = SessionsDevice(xml(SUMMARY_OK.format(n=40)), filtered_summary=RpcDenied("permission denied"))
+        _, _, data = self.get("/api/sessions?dport=443", self.session_for(denied))
+        self.assertEqual((data["sessions"]["status"], data["sessions"]["summary_status"]),
+                         ("filter-rejected", "denied"))
+
+    def test_unfiltered_or_both_failing_stays_unsupported(self) -> None:
+        """Unfiltered, or with a gauge that fails too, the state stays what the device said."""
+        from jwicket.junos.errors import RpcUnsupported
+
+        plain = SessionsDevice(RpcUnsupported("syntax error"))
+        _, _, data = self.get("/api/sessions", self.session_for(plain))
+        self.assertEqual(data["sessions"]["status"], "unsupported")
+        both = SessionsDevice(RpcUnsupported("syntax error"))
+        _, _, data = self.get("/api/sessions?dport=443", self.session_for(both))
+        self.assertEqual(data["sessions"]["status"], "unsupported")
+        self.assertEqual(self.lists(plain) + self.lists(both), [])
 
     def test_known_small_count_lists(self) -> None:
         device = SessionsDevice(xml(SUMMARY_OK.format(n=12)))
@@ -652,6 +797,7 @@ class SessionGuardTests(LiveHttpBase):
                     self.assertEqual(status, 429)
                     self.assertEqual(headers.get("retry-after"), "2")
                     self.assertIn("still running", data["error"])
+                    self.assertEqual(data["reason"], "busy")
         finally:
             sess.lock.release()
             api_mod.SESSION_WAIT_S = original
@@ -671,6 +817,330 @@ class SessionGuardTests(LiveHttpBase):
             self.assertEqual(self.get(path)[0], 200)
         reads = [f["filters"] for e, f in records if e == "read_sessions"]
         self.assertEqual(reads, ["", "destination-port=53", ""])
+
+
+class SummaryOnlyTests(LiveHttpBase):
+    """SES-12 (B-2): ``rows=none`` reads the table-wide summary only, from its own read bucket."""
+
+    def session_for(self, device: Any) -> str:
+        token, _ = self.app.sessions.create(user="op", backend="fixture", device=device, source="t")
+        return f"{COOKIE_PLAIN}={token}"
+
+    def rpcs(self, device: FakeDevice) -> List[Dict[str, Any]]:
+        return [p for n, p in device.calls if n == "get-flow-session-information"]
+
+    def test_summary_only_read(self) -> None:
+        records: List[Tuple[str, Dict[str, Any]]] = []
+
+        class Spy(AuditTrail):
+            def record(self, event: str, *, user: Optional[str], source: str, **fields: Any) -> None:
+                records.append((event, fields))
+
+        self.app.audit = Spy(None)
+        device = SessionsDevice(xml(SUMMARY_OK.format(n=12)))
+        cookie = self.session_for(device)
+        status, _, data = self.get("/api/sessions?rows=none", cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.rpcs(device), [{"summary": True}])
+        self.assertEqual(data["sessions"], {"status": "not-requested", "rows": []})
+        self.assertEqual((data["summary"]["active"], data["summary"]["cached"], data["matching"]), (12, False, 12))
+        meta = data["meta"]
+        self.assertEqual((meta["rows"], meta["device_filters"], meta["max_listed"]), ("none", {}, 5000))
+        self.assertEqual((meta["limit"], meta["min_interval_s"]), (S.DEFAULT_LIMIT, 1.5))
+        # Within 5 s of the stored gauge: no RPC at all.
+        self.clock.now += 2
+        status, _, again = self.get("/api/sessions?rows=none", cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.rpcs(device)), 1)
+        self.assertIs(again["summary"]["cached"], True)
+        self.assertEqual(again["summary"]["read_at"], data["summary"]["read_at"])
+        # Older than 5 s: one fresh summary.
+        self.clock.now += 4
+        self.assertEqual(self.get("/api/sessions?rows=none", cookie)[0], 200)
+        self.assertEqual(self.rpcs(device), [{"summary": True}, {"summary": True}])
+        reads = [f for e, f in records if e == "read_sessions"]
+        self.assertEqual(reads, [{"filters": "summary-only", "rows": 0, "status": "ok"}])
+
+    def test_bad_requests_cost_nothing(self) -> None:
+        device = SessionsDevice(xml(SUMMARY_OK.format(n=12)))
+        cookie = self.session_for(device)
+        for path, message in (
+            ("/api/sessions?rows=none&dport=443", "rows=none reads the table-wide summary only; it takes no filters."),
+            ("/api/sessions?rows=none&limit=5", "rows=none reads the table-wide summary only; it takes no filters."),
+            ("/api/sessions?rows=none&app=bogus", "rows=none reads the table-wide summary only; it takes no filters."),
+            ("/api/sessions?rows=bogus", "rows must be list or none"),
+        ):
+            with self.subTest(path=path):
+                status, _, data = self.get(path, cookie)
+                self.assertEqual((status, data["error"]), (400, message))
+        self.assertEqual(device.calls, [])
+        self.assertEqual(self.get("/api/sessions?rows=none", cookie)[0], 200)  # no read slot was used
+
+    def test_the_two_buckets_throttle_independently(self) -> None:
+        device = SessionsDevice(xml(SUMMARY_OK.format(n=12)))
+        cookie = self.session_for(device)
+        self.assertEqual(self.get("/api/sessions", cookie)[0], 200)
+        self.assertEqual(self.get("/api/sessions?rows=none", cookie)[0], 200)
+        status, _, data = self.get("/api/sessions?dport=22", cookie)
+        self.assertEqual((status, data["reason"]), (429, "rate"))
+        self.clock.now += 2
+        self.assertEqual(self.get("/api/sessions?rows=none", cookie)[0], 200)
+        self.assertEqual(self.get("/api/sessions?dport=22", cookie)[0], 200)
+
+    def test_summary_failure_is_a_panel_state(self) -> None:
+        device = SessionsDevice(RpcDenied("permission denied"))
+        _, _, data = self.get("/api/sessions?rows=none", self.session_for(device))
+        self.assertEqual(data["summary"]["status"], "denied")
+        self.assertNotIn("cached", data["summary"])
+        self.assertIsNone(data["matching"])
+        self.assertEqual(data["sessions"]["status"], "not-requested")
+
+
+class ReuseTests(LiveHttpBase):
+    """BE-05 (B-8): the same session's identical read within the floor is answered from that read."""
+
+    def test_identical_sessions_reads_share_one_device_read(self) -> None:
+        sess = next(iter(self.app.sessions._sessions.values()))
+        calls: List[str] = []
+        real_rpc = sess.device.rpc
+
+        def spy(name: str, **params: Any) -> Any:
+            calls.append(name)
+            return real_rpc(name, **params)
+
+        sess.device.rpc = spy  # type: ignore[method-assign]
+        status, _, first = self.get("/api/sessions?dport=53")
+        rpcs = len(calls)
+        self.assertEqual(status, 200)
+        self.assertNotIn("reused", first["meta"])
+        self.app.wall_clock = lambda: 1_795_503_601.0
+        status, _, second = self.get("/api/sessions?dport=53")
+        self.assertEqual(status, 200)
+        self.assertIs(second["meta"]["reused"], True)
+        self.assertEqual(second["meta"]["read_at"], first["meta"]["read_at"])
+        self.assertEqual(second["sessions"], first["sessions"])
+        self.assertEqual(len(calls), rpcs)
+        status, _, other = self.get("/api/sessions?dport=443")
+        self.assertEqual((status, other["reason"]), (429, "rate"))
+        self.clock.now += 1.5
+        status, _, third = self.get("/api/sessions?dport=53")
+        self.assertEqual(status, 200)
+        self.assertNotIn("reused", third["meta"])  # the window has passed: a fresh read
+        self.assertGreater(len(calls), rpcs)
+
+    def test_file_log_reads_share_one_get_log_and_tail_per_request(self) -> None:
+        sess = next(iter(self.app.sessions._sessions.values()))
+        self.assertEqual(self.get("/api/logs/sources")[0], 200)
+        reads: List[str] = []
+        real_rpc = sess.device.rpc
+
+        def spy(name: str, **params: Any) -> Any:
+            if name == "get-log":
+                reads.append(params["filename"])
+            return real_rpc(name, **params)
+
+        sess.device.rpc = spy  # type: ignore[method-assign]
+        status, _, first = self.get("/api/logs?file=traffic-log&lines=20")
+        self.assertEqual((status, len(first["log"]["lines"])), (200, 20))
+        cursor = first["log"]["cursor"]
+        older = L.tail(L.clean_lines("\n".join([f"x{i}" for i in range(3)])), cursor=None, want=1, contains=[],
+                       exclude=[])["cursor"]
+        status, _, second = self.get(f"/api/logs?file=traffic-log&cursor={cursor}")
+        self.assertEqual(status, 200)
+        self.assertIs(second["meta"]["reused"], True)
+        self.assertEqual(second["meta"]["read_at"], first["meta"]["read_at"])
+        self.assertEqual(second["log"]["lines"], [])  # nothing after the first read's cursor
+        status, _, third = self.get(f"/api/logs?file=traffic-log&lines=5&cursor={older}")
+        self.assertEqual(status, 200)
+        self.assertTrue(third["log"]["reset"])  # an unknown cursor: this request's own tail
+        self.assertEqual(len(third["log"]["lines"]), 5)
+        self.assertEqual(reads, ["traffic-log"])
+
+    def test_a_waiting_request_gets_the_read_in_flight(self) -> None:
+        """A second identical request while the first holds the device waits for it, then gets its
+        payload; the device is asked once."""
+        sess = next(iter(self.app.sessions._sessions.values()))
+        started = threading.Event()
+        release = threading.Event()
+        summaries: List[Dict[str, Any]] = []
+        real_rpc = sess.device.rpc
+
+        def slow(name: str, **params: Any) -> Any:
+            if params.get("summary"):
+                summaries.append(params)
+                started.set()
+                release.wait(5)
+            return real_rpc(name, **params)
+
+        sess.device.rpc = slow  # type: ignore[method-assign]
+        results: List[Tuple[int, Dict[str, str], Any]] = []
+        first = threading.Thread(target=lambda: results.append(self.get("/api/sessions?rows=none")))
+        first.start()
+        self.assertTrue(started.wait(5))
+        second = threading.Thread(target=lambda: results.append(self.get("/api/sessions?rows=none")))
+        second.start()
+        time_waited = threading.Event()
+        time_waited.wait(0.2)
+        release.set()
+        first.join(5)
+        second.join(5)
+        self.assertEqual([r[0] for r in results], [200, 200])
+        self.assertEqual(len(summaries), 1)
+        bodies = [r[2] for r in results]
+        self.assertEqual(sorted(bool(b["meta"].get("reused")) for b in bodies), [False, True])
+        self.assertEqual(bodies[0]["summary"], bodies[1]["summary"])
+
+    def test_log_read_429_has_a_reason(self) -> None:
+        """LOG-08: a different read of the same source within the floor is still refused, with a reason."""
+        self.assertEqual(self.get("/api/logs?source=buffer")[0], 200)
+        status, _, data = self.get("/api/logs?source=buffer&since=2026-11-24.06:00:00")
+        self.assertEqual((status, data["reason"], data["interval_s"]), (429, "rate", 1.5))
+
+
+# The 28 session-close reasons of Table 2 "Session Close Log Fields" (verified):
+# https://networkingdocs.hpe.com/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-flow-session-and-error-handling.html
+CLOSE_REASONS = (
+    "TCP FIN", "response received", "TCP CLIENT RST", "TCP SERVER RST", "idle Timeout", "aged out",
+    "sess timeout on pending state", "IKE pass-through child session ageout", "ICMP error", "ALG", "auth", "IDP",
+    "synproxy failure", "synproxy limit", "CP NACK", "source NAT allocation failure",
+    "error create IKE pass-through template", "CLI", "policy delete", "HA", "CP delete", "fwd session",
+    "parent closed", "multicast route change", "first path reroute, session recreated", "other", "unknown", "unset",
+)
+
+
+class LiveModelTests(unittest.TestCase):
+    """SES-25, SES-26, LOG-04: the development server's emulation (inferred device behaviour)."""
+
+    NOW = 1_795_503_600.0
+
+    def session(self, fixture: str) -> Any:
+        from jwicket.fixtures import FixtureSession
+
+        return FixtureSession(FIXTURES / fixture, "admin", clock=lambda: self.NOW)
+
+    def test_protocol_numbers_match_their_keyword(self) -> None:
+        dev = self.session("branch")
+        by_number = S.parse_sessions(dev.rpc("get-flow-session-information", protocol="17"), 2000)
+        by_name = S.parse_sessions(dev.rpc("get-flow-session-information", protocol="udp"), 2000)
+        self.assertGreater(by_name["returned"], 0)
+        self.assertEqual([r["id"] for r in by_number["rows"]], [r["id"] for r in by_name["rows"]])
+        by_six = S.parse_summary(dev.rpc("get-flow-session-information", summary=True, protocol="6"))
+        by_tcp = S.parse_summary(dev.rpc("get-flow-session-information", summary=True, protocol="tcp"))
+        self.assertEqual(by_six["matching"], by_tcp["matching"])
+
+    def test_application_matches_the_alg_type(self) -> None:
+        from jwicket.junos.errors import RpcFailed
+
+        dev = self.session("branch")
+        dns = S.parse_sessions(dev.rpc("get-flow-session-information", application="dns"), 2000)
+        self.assertGreater(dns["returned"], 0)
+        self.assertEqual({r["application"] for r in dns["rows"]}, {"dns"})
+        self.assertTrue(all(r["in"]["dport"] == 53 for r in dns["rows"]))
+        https = S.parse_sessions(dev.rpc("get-flow-session-information", application="https"), 2000)
+        self.assertEqual(https["returned"], 0)  # no profile reports the https application-protocol type
+        everything = S.parse_sessions(dev.rpc("get-flow-session-information"), 2000)
+        self.assertTrue(all(r["application"] in (None, "dns") for r in everything["rows"]))
+        with self.assertRaises(RpcFailed):
+            dev.rpc("get-flow-session-information", application="junos-https")
+
+    def test_cluster_model_lists_both_copies(self) -> None:
+        dev = self.session("cluster-lsys")
+        summary = S.parse_summary(dev.rpc("get-flow-session-information", summary=True))
+        self.assertEqual([n["node"] for n in summary["nodes"]], ["node0", "node1"])
+        self.assertEqual(summary["active"], max(n["active"] for n in summary["nodes"]))
+        self.assertLess(summary["nodes"][1]["active"], summary["nodes"][0]["active"])
+        self.assertIsNone(summary["failed"])
+        table = S.parse_sessions(dev.rpc("get-flow-session-information"), 2000)
+        self.assertEqual(len(table["nodes"]), 2)
+        self.assertGreater(table["sessions_returned"], 0)
+        self.assertEqual(table["returned"], 2 * table["sessions_returned"])
+        by_id: Dict[str, List[Dict[str, Any]]] = {}
+        for row in table["rows"]:
+            by_id.setdefault(row["session_id"], []).append(row)
+        for sid, copies in by_id.items():
+            with self.subTest(sid=sid):
+                self.assertEqual([c["location"] for c in copies], ["node0", "node1"])
+                self.assertEqual((copies[1]["in"]["bytes"], copies[1]["out"]["packets"]), (0, 0))
+                self.assertGreater(copies[0]["out"]["bytes"], 0)
+                self.assertNotIn("role", copies[1]["extra"])
+
+    def test_fixture_without_a_session_model_says_so(self) -> None:
+        from jwicket.junos.errors import RpcUnsupported
+
+        with self.assertRaises(RpcUnsupported) as ctx:
+            self.session("log-states").rpc("get-flow-session-information", summary=True)
+        self.assertEqual(ctx.exception.public, "This fixture has no session table.")
+
+    def test_every_fixture_close_reason_is_documented(self) -> None:
+        self.assertEqual(len(CLOSE_REASONS), 28)
+        specs = sorted(FIXTURES.glob("*/live.json"))
+        self.assertGreaterEqual(len(specs), 3)
+        for spec in specs:
+            for profile in json.loads(spec.read_text(encoding="utf-8"))["profiles"]:
+                for reason in profile.get("close", []):
+                    with self.subTest(fixture=spec.parent.name, profile=profile["name"], reason=reason):
+                        self.assertIn(reason, CLOSE_REASONS)
+
+    def test_devserver_sample_holds_only_documented_close_reasons(self) -> None:
+        import re
+
+        text = (FIXTURES / "log-samples" / "devserver-sample.txt").read_text(encoding="utf-8")
+        found = set(re.findall(r'reason="([^"]+)"', text)) - {"policy deny"}
+        self.assertTrue(found)
+        self.assertTrue(found <= set(CLOSE_REASONS), found - set(CLOSE_REASONS))
+        self.assertNotIn("TCP RST:", text)
+
+
+class ClusterSessionsHttpTests(LiveHttpBase):
+    """SES-26: the cluster fixture serves a two-node session table through the real endpoint."""
+
+    fixture = "cluster-lsys"
+
+    def test_two_nodes(self) -> None:
+        status, _, data = self.get("/api/sessions")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["sessions"]["status"], "ok")
+        self.assertEqual(len(data["summary"]["nodes"]), 2)
+        self.assertIsNone(data["summary"]["failed"])
+        self.assertEqual(len(data["sessions"]["nodes"]), 2)
+        self.assertEqual(data["sessions"]["returned"], 2 * data["sessions"]["sessions_returned"])
+        self.clock.now += 2
+        _, _, capped = self.get("/api/sessions?limit=1")
+        self.assertEqual(len(capped["sessions"]["rows"]), 2)
+        self.assertTrue(capped["sessions"]["truncated"])
+        self.assertEqual({r["session_id"] for r in capped["sessions"]["rows"]}.__len__(), 1)
+
+
+class NoSessionTableHttpTests(LiveHttpBase):
+    fixture = "log-states"
+
+    def test_unsupported_with_the_fixture_text(self) -> None:
+        status, _, data = self.get("/api/sessions")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["summary"], {"status": "unsupported", "message": "This fixture has no session table."})
+        self.assertEqual(data["sessions"]["status"], "unsupported")
+
+    def test_log_source_states(self) -> None:
+        """LOG-12: every source flag the log viewer reports, from one configuration."""
+        _, _, data = self.get("/api/logs/sources")
+        sources = data["sources"]
+        files = {f["name"]: f for f in sources["files"]}
+        self.assertTrue(files["messages"]["assumed"])
+        self.assertTrue(files["traffic-old"]["inactive"])
+        traffic = sources["traffic"]
+        self.assertEqual((traffic["mode"], traffic["format"], traffic["disabled"]), ("stream-event", "binary", True))
+        self.assertEqual([s["inactive"] for s in traffic["streams"]], [False, False, False, True])
+        self.assertEqual(traffic["streams"][0]["host"], "192.0.2.50")
+        self.assertEqual(traffic["streams"][1]["radius"], "192.0.2.60")
+        self.assertEqual(traffic["streams"][2]["file"], "traffic-stream.log")
+        dbs = {d["id"]: d for d in sources["databases"]}
+        self.assertIs(dbs["report"]["supported"], False)
+        self.assertIn("23.1R1", dbs["report"]["note"])
+        self.assertTrue(dbs["report"]["disabled"])
+        self.assertTrue(dbs["buffer"]["disabled"])
+        status, _, data = self.get("/api/logs?source=buffer")
+        self.assertEqual((status, data["log"]["status"]), (200, "ok"))
+        self.assertEqual(len(data["log"]["lines"]), 2)
 
 
 class LogSourcesFailureTests(LiveHttpBase):

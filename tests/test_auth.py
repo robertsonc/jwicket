@@ -165,6 +165,16 @@ class SessionStoreTests(unittest.TestCase):
         with self.assertRaises(SessionLimit):
             store.create(user="svc", backend="lab-token", device=FakeDevice("svc"), source="s")
 
+    def test_store_exposes_its_limits(self) -> None:
+        store = SessionStore(idle_s=900, absolute_s=3600, max_sessions=4, max_per_user=2, clock=self.clock)
+        self.assertEqual((store.idle_s, store.absolute_s, store.max_per_user), (900, 3600, 2))
+
+    def test_created_wall_is_the_wall_clock(self) -> None:
+        store = SessionStore(idle_s=900, absolute_s=3600, max_sessions=4, clock=self.clock,
+                             wall_clock=lambda: 1_795_500_000.0)
+        _token, sess = store.create(user="a", backend="netconf", device=FakeDevice("a"), source="s")
+        self.assertEqual((sess.created, sess.created_wall), (1000.0, 1_795_500_000.0))
+
     def test_failing_device_close_does_not_break_the_store(self) -> None:
         dev = ExplodingDevice("x")
         token, _ = self.store.create(user="x", backend="netconf", device=dev, source="127.0.0.1")
@@ -173,6 +183,222 @@ class SessionStoreTests(unittest.TestCase):
         self.assertTrue(any("failed" in line for line in logged.output))
         self.assertEqual(dev.closed, 1)
         self.assertEqual(self.store.count(), 0)
+
+
+class BackgroundTouchTests(unittest.TestCase):
+    """BE-01 (B-4): a background request checks expiry but never refreshes the idle clock."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.store = SessionStore(idle_s=900, absolute_s=3600, max_sessions=4, clock=self.clock)
+        self.device = FakeDevice("alice")
+        self.token, self.sess = self.store.create(user="alice", backend="netconf", device=self.device, source="s")
+
+    def test_background_get_does_not_extend(self) -> None:
+        self.clock.advance(600)
+        self.assertIs(self.store.get(self.token, touch=False), self.sess)
+        self.assertEqual(self.sess.last_seen, 1000.0)
+        self.clock.advance(301)
+        self.assertIsNone(self.store.get(self.token, touch=False))
+        self.assertEqual(self.device.closed, 1)
+
+    def test_background_get_still_refuses_an_expired_session(self) -> None:
+        self.clock.advance(901)
+        self.assertIsNone(self.store.get(self.token, touch=False))
+        self.assertIsNone(self.store.get(self.token))  # and a foreground request cannot revive it
+        self.assertEqual(self.device.closed, 1)
+
+    def test_foreground_get_extends(self) -> None:
+        self.clock.advance(600)
+        self.assertIs(self.store.get(self.token), self.sess)
+        self.assertEqual(self.sess.last_seen, 1600.0)
+        self.clock.advance(800)
+        self.assertIs(self.store.get(self.token, touch=False), self.sess)
+        self.clock.advance(101)
+        self.assertIsNone(self.store.get(self.token))
+
+    def test_background_never_outlives_the_absolute_limit(self) -> None:
+        for _ in range(4):
+            self.clock.advance(800)
+            self.assertIsNotNone(self.store.get(self.token))
+        self.clock.advance(401)  # 3601 s after sign-in
+        self.assertIsNone(self.store.get(self.token, touch=False))
+
+
+class TombstoneTests(unittest.TestCase):
+    """BE-02, BE-03 (B-5): why a session ended, kept briefly and boundedly, never as an authenticator."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.wall = FakeClock(1_795_500_000.0)
+        self.ended: List[Tuple[str, str]] = []
+        self.store = SessionStore(
+            idle_s=900, absolute_s=3600, max_sessions=4, max_per_user=1, clock=self.clock, wall_clock=self.wall,
+            on_end=lambda sess, reason: self.ended.append((sess.user, reason)),
+        )
+
+    def create(self, user: str = "alice", key: Any = "") -> Tuple[str, Any]:
+        token, sess = self.store.create(user=user, backend="netconf", device=FakeDevice(user), source="s",
+                                        user_key=(user if key == "" else key))
+        return token, sess
+
+    def advance(self, seconds: float) -> None:
+        self.clock.advance(seconds)
+        self.wall.advance(seconds)
+
+    def test_each_end_path_leaves_its_reason(self) -> None:
+        replaced, _ = self.create("alice")
+        self.create("alice")  # the same person signs in again elsewhere
+        idle, _ = self.create("bob")
+        signed_out, _ = self.create("carol")
+        lost, lost_sess = self.create("dave")
+        self.store.remove(signed_out)
+        self.store.drop(lost_sess, "device session lost")
+        self.advance(901)
+        self.assertIsNone(self.store.get(idle))
+        got = {name: self.store.ended(token) for name, token in
+               (("replaced", replaced), ("idle", idle), ("signed-out", signed_out), ("session-lost", lost))}
+        for reason, ended in got.items():
+            with self.subTest(reason=reason):
+                self.assertIsNotNone(ended)
+                assert ended is not None
+                self.assertEqual(ended.reason, reason)
+        self.assertEqual(got["replaced"].at_wall, 1_795_500_000.0)  # type: ignore[union-attr]
+        self.assertEqual(got["idle"].at_wall, 1_795_500_901.0)  # type: ignore[union-attr]
+
+    def test_absolute(self) -> None:
+        token, _ = self.create()
+        for _ in range(4):
+            self.advance(800)
+            self.assertIsNotNone(self.store.get(token))
+        self.advance(401)
+        self.assertIsNone(self.store.get(token))
+        ended = self.store.ended(token)
+        self.assertEqual(ended.reason if ended else None, "absolute")
+
+    def test_reap_leaves_the_reason_too(self) -> None:
+        token, _ = self.create()
+        self.advance(901)
+        self.assertEqual(len(self.store.reap()), 1)
+        ended = self.store.ended(token)
+        self.assertEqual(ended.reason if ended else None, "idle")
+
+    def test_new_sign_in_and_shutdown_leave_none(self) -> None:
+        mine, _ = self.create("alice")
+        self.store.remove(mine, reason="new-sign-in")
+        other, _ = self.create("bob")
+        self.store.close_all()
+        self.assertIsNone(self.store.ended(mine))
+        self.assertIsNone(self.store.ended(other))
+        self.assertEqual(self.ended, [("alice", "new-sign-in"), ("bob", "shutdown")])
+
+    def test_unknown_token_and_no_token(self) -> None:
+        self.create()
+        for token in (None, "", "never-issued"):
+            with self.subTest(token=token):
+                self.assertIsNone(self.store.ended(token))
+
+    def test_a_tombstone_never_authenticates(self) -> None:
+        token, _ = self.create()
+        self.store.remove(token)
+        self.assertIsNotNone(self.store.ended(token))
+        self.assertIsNone(self.store.get(token))
+        self.assertIsNone(self.store.get(token, touch=False))
+        self.assertIsNone(self.store.remove(token))
+        self.assertEqual(self.store.count(), 0)
+
+    def test_tombstones_hold_only_a_reason_and_a_time(self) -> None:
+        token, sess = self.create("alice")
+        self.store.remove(token)
+        ended = self.store.ended(token)
+        assert ended is not None
+        self.assertEqual(set(vars(ended)) if hasattr(ended, "__dict__") else set(ended.__dataclass_fields__),
+                         {"reason", "at_wall"})
+        dumped = repr(self.store._ended)
+        for value in ("alice", "s", token, sess.csrf):
+            self.assertNotIn(f"'{value}'", dumped)
+
+    def test_size_stays_capped(self) -> None:
+        store = SessionStore(idle_s=900, absolute_s=3600, max_sessions=4, max_per_user=1, clock=self.clock,
+                             wall_clock=self.wall)
+        first = None
+        for _ in range(1000):
+            token, _ = store.create(user="alice", backend="netconf", device=FakeDevice("alice"), source="s",
+                                    user_key="alice")
+            first = first or token
+        self.assertEqual(store.tombstones(), 64)  # max(64, 4 * max_sessions)
+        self.assertIsNone(store.ended(first))  # the oldest went first
+        big = SessionStore(idle_s=900, absolute_s=3600, max_sessions=40, max_per_user=1, clock=self.clock,
+                           wall_clock=self.wall)
+        for _ in range(1000):
+            big.create(user="a", backend="netconf", device=FakeDevice("a"), source="s", user_key="a")
+        self.assertEqual(big.tombstones(), 160)
+
+    def test_old_tombstones_are_pruned(self) -> None:
+        token, _ = self.create("alice")
+        self.store.remove(token)
+        self.advance(3601)
+        self.assertIsNone(self.store.ended(token))
+        other, _ = self.create("bob")
+        self.store.remove(other)  # a write prunes what is older than absolute_s
+        self.assertEqual(self.store.tombstones(), 1)
+
+    def test_on_end_for_idle_absolute_and_shutdown(self) -> None:
+        idle, _ = self.create("alice")
+        self.advance(901)
+        self.assertIsNone(self.store.get(idle))
+        self.assertIsNone(self.store.get(idle))  # already ended: no second call
+        busy, _ = self.create("bob")
+        for _ in range(4):
+            self.advance(800)
+            self.store.get(busy)
+        self.advance(401)
+        self.store.reap()
+        self.store.reap()
+        self.create("carol")
+        self.store.close_all()
+        self.assertEqual(self.ended, [("alice", "idle"), ("bob", "absolute"), ("carol", "shutdown")])
+
+    def test_a_failing_hook_does_not_break_the_store(self) -> None:
+        def explode(_sess: Any, _reason: str) -> None:
+            raise RuntimeError("audit trail unavailable")
+
+        self.store.on_end = explode
+        token, _ = self.create()
+        with self.assertLogs("jwicket.sessions", level="WARNING"):
+            self.assertIsNotNone(self.store.remove(token))
+        self.assertEqual(self.store.count(), 0)
+
+
+class SessionLimitTests(unittest.TestCase):
+    """BE-04 (B-7): the refusal at the cap carries bounds computed under the store lock."""
+
+    def test_bounds(self) -> None:
+        clock = FakeClock()
+        store = SessionStore(idle_s=900, absolute_s=3600, max_sessions=2, clock=clock)
+        store.create(user="a", backend="netconf", device=FakeDevice("a"), source="s")
+        clock.advance(100)
+        token_b, _ = store.create(user="b", backend="netconf", device=FakeDevice("b"), source="s")
+        clock.advance(500)
+        store.get(token_b)  # b was active just now
+        with self.assertRaises(SessionLimit) as ctx:
+            store.create(user="c", backend="netconf", device=FakeDevice("c"), source="s")
+        refusal = ctx.exception
+        self.assertEqual((refusal.open_count, refusal.max_sessions), (2, 2))
+        self.assertEqual(refusal.slot_free_by_s, 3000)  # a: 3600 after its sign-in at t=0, now t=600
+        self.assertEqual(refusal.slot_may_free_in_s, 300)  # a: idle since t=0, 900 s, now t=600
+
+    def test_refusal_names_no_one(self) -> None:
+        clock = FakeClock()
+        store = SessionStore(idle_s=900, absolute_s=3600, max_sessions=1, clock=clock)
+        store.create(user="alice-secret-name", backend="netconf", device=FakeDevice("a"), source="192.0.2.77")
+        with self.assertRaises(SessionLimit) as ctx:
+            store.create(user="bob", backend="netconf", device=FakeDevice("b"), source="s")
+        refusal = ctx.exception
+        self.assertNotIn("alice", str(refusal))
+        self.assertNotIn("192.0.2.77", str(refusal))
+        for value in (refusal.open_count, refusal.max_sessions, refusal.slot_free_by_s, refusal.slot_may_free_in_s):
+            self.assertIsInstance(value, int)
 
 
 class ThrottleTests(unittest.TestCase):

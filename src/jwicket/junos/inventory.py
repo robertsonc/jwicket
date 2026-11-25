@@ -10,8 +10,9 @@ Rules this module keeps (each one is a test in tests/test_inventory.py):
   then the default policy. Rows carry that order; the UI never re-sorts it silently. Unified
   policies (those with a dynamic application) are the exception: before the application is
   identified, Junos may match a list of potential policies rather than one ("a policy search might
-  return a list of policies instead of a fixed policy", configuring-unified-policies), so for them
-  configuration order is the order of candidates, not a single first match.
+  return a list of policies instead of a fixed policy", configuring-unified-policies). That
+  configuration order is then the order of those candidates is J-Wicket's inference, not a
+  documented statement.
 * Nothing is dropped silently. Configuration the model does not understand is reported per object
   (``unmodeled`` on policies, zones, interfaces, address entries, sets and books, applications and
   application sets) and per scope (``warnings``), so "not shown" is never mistaken for "not there".
@@ -32,12 +33,14 @@ Rules this module keeps (each one is a test in tests/test_inventory.py):
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from jwicket.junos.errors import MalformedReply
 from jwicket.junos.xmlutil import (
     Element,
     comments_before,
+    deactivated_parts,
     group_of,
     groups_in,
     inherited_parts,
@@ -52,6 +55,7 @@ from jwicket.junos.xmlutil import (
     statement_tags,
     text,
     text_of,
+    trailing_comment,
 )
 
 SCHEMA = "jwicket.inventory/1"
@@ -89,6 +93,14 @@ _HOST_INBOUND_KNOWN = {"system-services", "protocols"}
 # "application junos-defaults" is a match keyword of unified policies: the dynamic application's own
 # default ports and protocols (configuring-unified-policies). It is not a predefined application.
 DYNAMIC_DEFAULTS = "junos-defaults"
+# The logical-system and tenant names J-Wicket can address in a scope id (``api._SCOPE``). Junos may
+# accept other characters; until that character set is verified (owner decision OD-12) such scopes
+# are listed but not selectable.
+SELECTABLE_NAME = re.compile(r"^[A-Za-z0-9._\-]{1,63}\Z")
+NOT_SELECTABLE = (
+    "J-Wicket cannot address this name yet (it accepts letters, digits, dot, underscore and hyphen, up to 63 "
+    "characters)."
+)
 
 Json = Dict[str, Any]
 
@@ -148,7 +160,11 @@ def _address_entry(node: Element, comment: Optional[str] = None) -> Json:
         "value": value,
         "description": text(node, "description"),
         "group": group_of(node),
+        "inherited": inherited_parts(node),
+        "groups": groups_in(node),
         "inactive": is_inactive(node),
+        # Deactivated statements of an otherwise active entry (not in effect).
+        "inactive_parts": deactivated_parts(node),
         "comment": comment,
         "unmodeled": _unmodeled(node, _ADDRESS_KNOWN, ""),
     }
@@ -163,10 +179,15 @@ def _address_set(node: Element, comment: Optional[str] = None) -> Json:
         "addresses": addresses,
         "sets": sets,
         "inactive_members": inactive_addresses + inactive_sets,
+        "inactive_addresses": inactive_addresses,
+        "inactive_sets": inactive_sets,
         "description": text(node, "description"),
         "group": group_of(node),
+        "inherited": inherited_parts(node),
+        "groups": groups_in(node),
         "inactive": is_inactive(node),
         "comment": comment,
+        "part_comments": inner_comments(node),
         "unmodeled": _unmodeled(node, _ADDRESS_SET_KNOWN, ""),
     }
 
@@ -185,8 +206,11 @@ def _book(
         "sets": [_address_set(s, notes.get(id(s))) for s in kids(node, "address-set")],
         "description": text(node, "description"),
         "group": group_of(node),
+        "inherited": inherited_parts(node),
+        "groups": groups_in(node),
         "inactive": is_inactive(node),
         "comment": comment,
+        "part_comments": inner_comments(node),
         "unmodeled": _unmodeled(node, known, ""),
     }
 
@@ -205,31 +229,47 @@ def parse_address_books(security: Optional[Element]) -> List[Json]:
         legacy = kid(zone, "address-book")
         if legacy is not None and (present(legacy, "address") or present(legacy, "address-set")):
             zname = text(zone, "name") or "?"
-            books.append(_book(f"zone {zname}", legacy, [zname], zname, known=_LEGACY_BOOK_KNOWN))
+            books.append(_book(f"zone {zname}", legacy, [zname], zname, known=_LEGACY_BOOK_KNOWN,
+                               comment=comments_before(zone).get(id(legacy))))
     return books
+
+
+def _active_leaf(node: Element, name: str) -> Optional[str]:
+    """A leaf's value when it is present and not deactivated, else None."""
+    leaf = kid(node, name)
+    return None if leaf is None or is_inactive(leaf) else text_of(leaf)
 
 
 def parse_applications(apps: Optional[Element]) -> List[Json]:
     rows: List[Json] = []
     notes = comments_before(apps)
     for node in kids(apps, "application"):
-        terms = list(kids(node, "term"))
+        terms = [t for t in kids(node, "term") if not is_inactive(t)]
         rows.append(
             {
                 "name": text(node, "name") or "?",
                 "kind": "application",
-                "protocol": text(node, "protocol"),
-                "destination_port": text(node, "destination-port"),
-                "source_port": text(node, "source-port"),
-                # Terms are counted, not shown: their contents are J-Wicket's next step (Spec 001).
+                # Null when the leaf is deactivated (not in effect); the leaf is then in inactive_parts.
+                "protocol": _active_leaf(node, "protocol"),
+                "destination_port": _active_leaf(node, "destination-port"),
+                "source_port": _active_leaf(node, "source-port"),
+                # Terms in effect are counted, not shown: their contents are J-Wicket's next step (Spec 001).
                 "terms": len(terms),
                 "members": [],
                 "sets": [],
                 "inactive_members": [],
+                "inactive_applications": [],
+                "inactive_sets": [],
                 "description": text(node, "description"),
                 "group": group_of(node),
+                "inherited": inherited_parts(node),
+                "groups": groups_in(node),
                 "inactive": is_inactive(node),
+                # For example "destination-port 2121" (that such a leaf is a deactivatable one-liner is
+                # inferred).
+                "inactive_parts": deactivated_parts(node),
                 "comment": notes.get(id(node)),
+                "part_comments": inner_comments(node),
                 # For example application-protocol (an ALG), icmp-type, inactivity-timeout.
                 "unmodeled": _unmodeled(node, _APPLICATION_KNOWN, ""),
             }
@@ -248,10 +288,17 @@ def parse_applications(apps: Optional[Element]) -> List[Json]:
                 "members": members,
                 "sets": sets,
                 "inactive_members": inactive_members + inactive_sets,
+                "inactive_applications": inactive_members,
+                "inactive_sets": inactive_sets,
                 "description": text(node, "description"),
                 "group": group_of(node),
+                "inherited": inherited_parts(node),
+                "groups": groups_in(node),
                 "inactive": is_inactive(node),
+                # Deactivated members are listed above, not here.
+                "inactive_parts": deactivated_parts(node, ("name", "application", "application-set")),
                 "comment": notes.get(id(node)),
+                "part_comments": inner_comments(node),
                 "unmodeled": _unmodeled(node, _APPLICATION_SET_KNOWN, ""),
             }
         )
@@ -296,8 +343,11 @@ class AddressResolver:
         skipped: List[str] = []
         found = self._lookup(name, self._books_for(zones), skipped)
         if found is None:
+            # "unresolved" (the kind) means no active entry; the list names only what has no entry at
+            # all, so a deactivated entry is in inactive_skipped and not listed twice.
+            missing = [] if self._deactivated_entry(name, self._books_for(zones)) else [name]
             return {"name": name, "kind": "unresolved", "book": None, "leaves": [], "truncated": False,
-                    "unresolved": [name], "inactive_skipped": skipped}
+                    "unresolved": missing, "inactive_skipped": skipped}
         book, kind, _entry = found
         leaves: List[Json] = []
         unresolved: List[str] = []
@@ -315,6 +365,11 @@ class AddressResolver:
             # Deactivated entries of the same name that the lookup passed over ("book:name").
             "inactive_skipped": skipped,
         }
+
+    @staticmethod
+    def _deactivated_entry(name: str, books: List[Json]) -> bool:
+        return any(entry["name"] == name and entry["inactive"]
+                   for book in books for entry in list(book["addresses"]) + list(book["sets"]))
 
     @staticmethod
     def _lookup(name: str, books: List[Json], skipped: List[str]) -> Optional[Tuple[Json, str, Json]]:
@@ -350,7 +405,9 @@ class AddressResolver:
         seen.add(name)
         found = self._lookup(name, books, skipped)
         if found is None:
-            unresolved.append(name)
+            # A deactivated entry of that name is reported in skipped only.
+            if not self._deactivated_entry(name, books):
+                unresolved.append(name)
             return
         _book, kind, entry = found
         if kind == "address":
@@ -368,29 +425,39 @@ class ApplicationResolver:
         self._inactive = {a["name"] for a in apps if a["inactive"]}
 
     def resolve(self, name: str) -> Json:
+        """``unresolved`` names only what has no definition at all; a deactivated application or set
+        (the name itself, a member or a nested set) is in ``inactive_skipped``, which is always present.
+        ``kind`` "unresolved" still means no active definition."""
         if name == "any":
-            return {"name": name, "kind": "any", "leaves": [], "unresolved": []}
+            return {"name": name, "kind": "any", "leaves": [], "unresolved": [], "inactive_skipped": []}
         if name == DYNAMIC_DEFAULTS:
             # Unified policies: the dynamic application's own default ports and protocols.
-            return {"name": name, "kind": "dynamic-defaults", "leaves": [], "unresolved": []}
+            return {"name": name, "kind": "dynamic-defaults", "leaves": [], "unresolved": [], "inactive_skipped": []}
         if name not in self._apps:
             kind = "predefined" if name.startswith("junos-") else "unresolved"
-            out: Json = {"name": name, "kind": kind, "leaves": [], "unresolved": [] if kind == "predefined" else [name]}
-            if name in self._inactive:
-                out["inactive_skipped"] = [name]
-            return out
+            off = name in self._inactive
+            return {"name": name, "kind": kind, "leaves": [],
+                    "unresolved": [] if kind == "predefined" or off else [name],
+                    "inactive_skipped": [name] if off else []}
         leaves: List[Json] = []
         unresolved: List[str] = []
-        self._expand(name, leaves, unresolved, set(), 0)
-        return {"name": name, "kind": self._apps[name]["kind"], "leaves": leaves[:MAX_LEAVES], "unresolved": unresolved}
+        skipped: List[str] = []
+        self._expand(name, leaves, unresolved, set(), 0, skipped)
+        return {"name": name, "kind": self._apps[name]["kind"], "leaves": leaves[:MAX_LEAVES], "unresolved": unresolved,
+                "inactive_skipped": skipped}
 
-    def _expand(self, name: str, leaves: List[Json], unresolved: List[str], seen: Set[str], depth: int) -> None:
+    def _expand(
+        self, name: str, leaves: List[Json], unresolved: List[str], seen: Set[str], depth: int, skipped: List[str]
+    ) -> None:
         if name in seen or depth > MAX_EXPANSION_DEPTH or len(leaves) > MAX_LEAVES:
             return
         seen.add(name)
         app = self._apps.get(name)
         if app is None:
-            if name.startswith("junos-"):
+            if name in self._inactive:
+                if name not in skipped:
+                    skipped.append(name)
+            elif name.startswith("junos-"):
                 leaves.append({"name": name, "predefined": True})
             else:
                 unresolved.append(name)
@@ -408,7 +475,7 @@ class ApplicationResolver:
             )
             return
         for member in list(app["members"]) + list(app["sets"]):
-            self._expand(member, leaves, unresolved, seen, depth + 1)
+            self._expand(member, leaves, unresolved, seen, depth + 1, skipped)
 
 
 # --- policies -------------------------------------------------------------------------------------
@@ -580,9 +647,12 @@ def parse_policies(scope: str, security: Optional[Element], scope_inactive: bool
     ancestor = _ancestor_inactive(security, policies, scope_inactive)
     rows: List[Json] = []
     notes = comments_before(policies)
+    pair_trailing: Dict[Tuple[str, str], Optional[str]] = {}
     for pair in kids(policies, "policy"):
         frm = text(pair, "from-zone-name")
         to = text(pair, "to-zone-name")
+        if frm and to:
+            pair_trailing.setdefault((frm, to), trailing_comment(pair))
         rule_notes = comments_before(pair)
         for seq, node in enumerate(kids(pair, "policy"), 1):
             rows.append(
@@ -626,22 +696,37 @@ def parse_policies(scope: str, security: Optional[Element], scope_inactive: bool
     default = kid(policies, "default-policy")
     default_child = next((c for c in kids(default) if local(c.tag) in ("permit-all", "deny-all")), None)
     configured = local(default_child.tag) if default_child is not None else None
-    default_off = configured is not None and (
-        ancestor is not None or is_inactive(default) or is_inactive(default_child)
-    )
+    # The nearest deactivated statement: the default policy itself (or its action), then its ancestors.
+    default_reason: Optional[str] = None
+    if configured is not None:
+        default_reason = "self" if is_inactive(default) or is_inactive(default_child) else ancestor
+    default_off = default_reason is not None
+    rematch_node = kid(policies, "policy-rematch")
     rematch, rematch_off = _setting(policies, "policy-rematch", ancestor)
+    extensive = kid(rematch_node, "extensive")
+    pre_id_node = kid(policies, "pre-id-default-policy")
     pre_id, pre_id_off = _setting(policies, "pre-id-default-policy", ancestor)
+    other = _unmodeled(policies, _POLICIES_KNOWN, "") + _unmodeled(rematch_node, ("extensive",), "policy-rematch ")
     return {
         "rows": rows,
         # In effect only. A deactivated default policy leaves the Junos default (deny-all) in force.
         "default_policy": None if default_off else configured,
         "default_policy_inactive": configured if default_off else None,
+        "default_policy_inactive_reason": default_reason,
         "default_policy_group": group_of(default),
+        "default_policy_comment": notes.get(id(default)) if default is not None else None,
         "pre_id_default_policy": pre_id,
         "pre_id_default_policy_inactive": pre_id_off,
+        "pre_id_default_policy_comment": notes.get(id(pre_id_node)) if pre_id_node is not None else None,
         "policy_rematch": rematch,
         "policy_rematch_inactive": rematch_off,
-        "other_settings": _unmodeled(policies, _POLICIES_KNOWN, ""),
+        # "extensive" under an in-effect policy-rematch, itself active.
+        "policy_rematch_extensive": rematch and extensive is not None and not is_inactive(extensive),
+        "policy_rematch_extensive_inactive": rematch and extensive is not None and is_inactive(extensive),
+        "policy_rematch_comment": notes.get(id(rematch_node)) if rematch_node is not None else None,
+        "global_trailing_comment": trailing_comment(glob),
+        "pair_trailing": pair_trailing,
+        "other_settings": other,
         "ancestor_inactive": ancestor,
     }
 
@@ -674,6 +759,25 @@ def _host_inbound(hit: Optional[Element]) -> Json:
     return out
 
 
+def _host_inbound_facts(node: Element) -> Json:
+    """Whether ``node`` (a zone or an interface) has its own host-inbound-traffic, and how it stands."""
+    hit = kid(node, "host-inbound-traffic")
+    state = "absent" if hit is None else "inactive" if is_inactive(hit) else "active"
+    first = next(iter(_statement_nodes(hit)), None)
+    return {
+        "host_inbound": state,
+        # Entries written, active or not (a block can hold only deactivated entries).
+        "services_present": kid(hit, "system-services") is not None,
+        "protocols_present": kid(hit, "protocols") is not None,
+        "host_inbound_group": group_of(hit) or group_of(first),
+    }
+
+
+def _statement_nodes(node: Optional[Element]) -> List[Element]:
+    """Child elements that are configuration statements (comments left out)."""
+    return [child for child in kids(node) if local(child.tag) != "comment"]
+
+
 def parse_zones(security: Optional[Element]) -> List[Json]:
     rows = []
     zones = kid(security, "zones")
@@ -693,12 +797,17 @@ def parse_zones(security: Optional[Element]) -> List[Json]:
                     "protocols_except": ihit["protocols_except"],
                     "inactive_services": ihit["inactive_services"],
                     "inactive_protocols": ihit["inactive_protocols"],
+                    **_host_inbound_facts(ifc),
                     "group": group_of(ifc),
+                    "inherited": inherited_parts(ifc),
+                    "groups": groups_in(ifc),
                     "inactive": is_inactive(ifc),
+                    "inactive_parts": deactivated_parts(ifc),
                     "comment": if_notes.get(id(ifc)),
                     "unmodeled": _unmodeled(ifc, _INTERFACE_KNOWN, "") + ihit["unmodeled"],
                 }
             )
+        screen = kid(zone, "screen")
         rows.append(
             {
                 "name": text(zone, "name") or "?",
@@ -709,11 +818,18 @@ def parse_zones(security: Optional[Element]) -> List[Json]:
                 "protocols_except": hit["protocols_except"],
                 "inactive_services": hit["inactive_services"],
                 "inactive_protocols": hit["inactive_protocols"],
-                "screen": text(zone, "screen"),
+                **_host_inbound_facts(zone),
+                # Null when the screen statement is deactivated (then in inactive_parts): not in effect.
+                "screen": None if screen is None or is_inactive(screen) else text_of(screen),
                 "description": text(zone, "description"),
                 "group": group_of(zone),
+                "inherited": inherited_parts(zone),
+                "groups": groups_in(zone),
                 "inactive": is_inactive(zone),
+                # Interfaces and the zone's own address book carry their own inactive flag.
+                "inactive_parts": deactivated_parts(zone, ("name", "interfaces", "address-book")),
                 "comment": notes.get(id(zone)),
+                "part_comments": inner_comments(zone),
                 # For example tcp-rst, application-tracking, source-identity-log.
                 "unmodeled": _unmodeled(zone, _ZONE_KNOWN, "") + hit["unmodeled"],
             }
@@ -721,7 +837,13 @@ def parse_zones(security: Optional[Element]) -> List[Json]:
     return rows
 
 
-def _zone_pairs(rows: List[Json]) -> List[Json]:
+def zones_unmodeled(security: Optional[Element]) -> List[str]:
+    """Zone-level configuration not modelled as rows. ``functional-zone management`` exists as a
+    hierarchy level (verified on the Junos ES 9.3 page; its presence in 24.4 is inferred)."""
+    return ["functional-zone management"] if kid(kid(security, "zones"), "functional-zone") is not None else []
+
+
+def _zone_pairs(rows: List[Json], trailing: Optional[Dict[Tuple[str, str], Optional[str]]] = None) -> List[Json]:
     pairs: Dict[Tuple[str, str], Json] = {}
     for row in rows:
         if row["kind"] != "zone" or not row["from"] or not row["to"]:
@@ -732,6 +854,8 @@ def _zone_pairs(rows: List[Json]) -> List[Json]:
             {
                 "from": key[0], "to": key[1], "count": 0, "inactive": 0, "permit": 0, "deny": 0, "reject": 0,
                 "comment": row.get("pair_comment"),
+                # A comment after the pair's last rule.
+                "trailing_comment": (trailing or {}).get(key),
             },
         )
         entry["count"] += 1
@@ -774,7 +898,21 @@ def _object_warnings(books: List[Json], apps: List[Json], zones: List[Json]) -> 
         if app["inactive_members"]:
             out.append(f"{label} {app['name']} has deactivated members (not in effect): "
                        f"{_list(app['inactive_members'])}.")
+        if app["kind"] == "application" and app["inactive_parts"] and not app["inactive"]:
+            out.append(f"{_parts_off('Application', app['name'], app['inactive_parts'])}")
+    for book in books:
+        if book["inactive"]:
+            continue
+        for entry in book["addresses"]:
+            if entry["inactive_parts"] and not entry["inactive"]:
+                out.append(_parts_off("Address", entry["name"], entry["inactive_parts"]))
     for zone in zones:
+        if not zone["inactive"]:
+            if zone["inactive_parts"]:
+                out.append(_parts_off("Zone", zone["name"], zone["inactive_parts"]))
+            for ifc in zone["interfaces"]:
+                if ifc["inactive_parts"] and not ifc["inactive"]:
+                    out.append(_parts_off("Interface", ifc["name"], ifc["inactive_parts"]))
         places = [(f"Zone {zone['name']}", zone)] + [
             (f"Zone {zone['name']} interface {ifc['name']}", ifc) for ifc in zone["interfaces"]
         ]
@@ -791,10 +929,21 @@ def _object_warnings(books: List[Json], apps: List[Json], zones: List[Json]) -> 
     return out
 
 
+def _parts_off(kind: str, name: str, parts: List[str]) -> str:
+    return f"{kind} {name} has deactivated parts (not in effect): {', '.join(parts)}."
+
+
 _ANCESTOR_TEXT = {
     "policies": "[edit security policies] is deactivated",
     "security": "[edit security] is deactivated",
 }
+
+
+def _default_off_text(action: str, reason: Optional[str], label: str) -> str:
+    if reason == "self":
+        return f"The default policy {action} is deactivated in the configuration (not in effect)."
+    because = _ANCESTOR_TEXT.get(reason or "", f"{label} is deactivated")
+    return f"The default policy {action} is not in effect because {because}."
 
 
 def _scope_inventory(scope_id: str, label: str, node: Element, scope_inactive: bool) -> Json:
@@ -803,6 +952,7 @@ def _scope_inventory(scope_id: str, label: str, node: Element, scope_inactive: b
     books = parse_address_books(security)
     policies = parse_policies(scope_id, security, scope_inactive)
     zones = parse_zones(security)
+    zones_extra = zones_unmodeled(security)
     addresses = AddressResolver(books)
     app_resolver = ApplicationResolver(apps)
     for row in policies["rows"]:
@@ -830,16 +980,18 @@ def _scope_inventory(scope_id: str, label: str, node: Element, scope_inactive: b
             "Policy settings J-Wicket does not display yet: " + ", ".join(policies["other_settings"]) + "."
         )
     if policies["default_policy_inactive"]:
-        warnings.append(
-            f"The default policy {policies['default_policy_inactive']} is deactivated in the configuration, so "
-            "the Junos default (deny-all) applies."
-        )
+        warnings.append(_default_off_text(policies["default_policy_inactive"],
+                                          policies["default_policy_inactive_reason"], label))
     if policies["policy_rematch_inactive"]:
         warnings.append("policy-rematch is configured but deactivated (not in effect).")
+    elif policies["policy_rematch_extensive_inactive"]:
+        warnings.append("policy-rematch extensive is configured but deactivated (not in effect).")
     if policies["pre_id_default_policy"]:
         warnings.append("A pre-ID default policy is configured; J-Wicket shows its presence but not its contents.")
     elif policies["pre_id_default_policy_inactive"]:
         warnings.append("A pre-ID default policy is configured but deactivated (not in effect).")
+    if zones_extra:
+        warnings.append("Functional zone management is configured; J-Wicket does not display it yet.")
     warnings.extend(_object_warnings(books, apps, zones))
 
     group_counts: Dict[str, int] = {}
@@ -851,20 +1003,31 @@ def _scope_inventory(scope_id: str, label: str, node: Element, scope_inactive: b
         "id": scope_id,
         "label": label,
         "inactive": scope_inactive,
+        # Whether this scope's configuration node has these children at all (an empty inventory is
+        # not evidence that nothing is configured: Junos may leave out what a login class cannot view).
+        "security_present": security is not None,
+        "applications_present": kid(node, "applications") is not None,
         "policies": {
             "status": "ok",
             "rows": policies["rows"],
             "default_policy": policies["default_policy"],
             "default_policy_inactive": policies["default_policy_inactive"],
+            "default_policy_inactive_reason": policies["default_policy_inactive_reason"],
             "default_policy_group": policies["default_policy_group"],
+            "default_policy_comment": policies["default_policy_comment"],
             "policy_rematch": policies["policy_rematch"],
             "policy_rematch_inactive": policies["policy_rematch_inactive"],
+            "policy_rematch_extensive": policies["policy_rematch_extensive"],
+            "policy_rematch_comment": policies["policy_rematch_comment"],
             "pre_id_default_policy": policies["pre_id_default_policy"],
             "pre_id_default_policy_inactive": policies["pre_id_default_policy_inactive"],
-            "zone_pairs": _zone_pairs(policies["rows"]),
+            "pre_id_default_policy_comment": policies["pre_id_default_policy_comment"],
+            "ancestor_inactive": policies["ancestor_inactive"],
+            "global_trailing_comment": policies["global_trailing_comment"],
+            "zone_pairs": _zone_pairs(policies["rows"], policies["pair_trailing"]),
             "global_count": sum(1 for r in policies["rows"] if r["kind"] == "global"),
         },
-        "zones": {"status": "ok", "rows": zones},
+        "zones": {"status": "ok", "rows": zones, "unmodeled": zones_extra},
         "address_books": {"status": "ok", "rows": books},
         "applications": {"status": "ok", "rows": apps},
         "groups": [{"name": k, "policies": v} for k, v in group_counts.items()],
@@ -881,13 +1044,39 @@ def build_inventory(reply: Element) -> Dict[str, Json]:
     }
 
 
+def _scope_name(scope_id: str) -> Optional[str]:
+    """The logical-system or tenant name of a scope id, None for root."""
+    kind, sep, name = scope_id.partition(":")
+    return name if sep and kind in ("lsys", "tenant") else None
+
+
+def selectable(scope_id: str) -> bool:
+    """Whether J-Wicket can address this scope in a request (``api._SCOPE``; owner decision OD-12)."""
+    name = _scope_name(scope_id)
+    return name is None or bool(SELECTABLE_NAME.match(name))
+
+
 def scope_summaries(inventories: Dict[str, Json]) -> List[Json]:
-    return [
-        {
+    out: List[Json] = []
+    for inv in inventories.values():
+        entry: Json = {
             "id": inv["id"],
             "label": inv["label"],
             "policies": len(inv["policies"]["rows"]),
             "inactive": inv["inactive"],
+            "selectable": selectable(inv["id"]),
         }
+        if not entry["selectable"]:
+            entry["reason"] = NOT_SELECTABLE
+        out.append(entry)
+    return out
+
+
+def unselectable_warnings(inventories: Dict[str, Json]) -> List[str]:
+    """A snapshot warning per logical or tenant system whose name J-Wicket cannot address yet."""
+    return [
+        f"{inv['label']} cannot be opened in J-Wicket: its name has characters J-Wicket does not accept in a "
+        "scope yet."
         for inv in inventories.values()
+        if not selectable(inv["id"])
     ]

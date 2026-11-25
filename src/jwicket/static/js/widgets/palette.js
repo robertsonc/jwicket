@@ -1,17 +1,38 @@
-// widgets/palette.js: the Ctrl/Cmd-K command palette. Keyboard-first fuzzy search over items the
-// shell supplies (views, actions, scopes, policies, zones, recent filters).
+// widgets/palette.js: the Ctrl/Cmd-K command palette. Keyboard-first search over items the shell
+// supplies (views, actions, scopes, policies, zones, addresses, applications, recent filters).
 //
-//   const pal = new Palette({ getItems: () => [{ group, label, detail, hint: ['g','o'], icon, keywords, run }],
-//                             getLookups: (text) => [items computed from the text itself] });
-//   pal.open(); pal.close(); pal.isOpen
+//   const pal = new Palette({
+//     getItems: () => [{ id, group, label, name?, detail, hint: ['g','o'], icon, keywords, recentRank?, run }],
+//     getLookups: (text) => [items computed from the text itself],
+//   });
+//   pal.open(); pal.close(); pal.isOpen; pal.clearRecent()
+//
+// Ranking (rank(), SL-10): every item is matched on its `name` (the label unless given) in tiers:
+// exact, prefix, word-start substring, substring, initials (a word-boundary subsequence), and last
+// "every query word is somewhere in the label, detail or keywords". Ties go to the item run most
+// recently from the palette, then to the group (GROUP_ORDER), then to the shorter name. With a query
+// the list opens with a "Best match" group; with none it opens with "Recent".
 //
 // A leading ">" searches actions only. getLookups turns what was typed into actions of its own (a
 // pasted address, port or session id becomes "Sessions with 10.0.0.1", "Logs for session 42", ...);
-// those come first.
+// they are not ranked and follow the best matches.
+//
+// The recently run items are remembered by id, in memory only (names are device data): never in
+// browser storage, and the shell clears them at sign-out (clearRecent).
+//
+// Labels and details are device text: they are rendered with dom.vis(), so a hidden or
+// direction-changing character shows as a badge, and aria labels use format.plain().
 
-import { h, icon, marked } from '../dom.js';
+import { h, icon, vis } from '../dom.js';
+import { plain } from '../format.js';
+
+export const GROUP_ORDER = ['Look up', 'Views', 'Scopes', 'Recent filters', 'Actions', 'Policies', 'Zones', 'Addresses', 'Applications', 'Filters'];
 
 const SEPARATORS = new Set([' ', '-', '_', '.', ':', '/', '>', '@', '(', '→', '|']);
+const MAX_RESULTS = 60;
+const MAX_RECENT = 6;
+const MRU_SIZE = 24;
+const BEST_PREFIX = 3;
 
 function scoreOne(q, text) {
   const t = text.toLowerCase();
@@ -58,6 +79,162 @@ export function fuzzy(query, text) {
   return { score, hits: [...hits].sort((a, b) => a - b) };
 }
 
+// ---- ranking (SL-10) -------------------------------------------------------------------------------
+
+const norm = (s) => String(s ?? '').normalize('NFC').toLowerCase();
+const WORDISH = /[\p{L}\p{N}]/u;
+
+/** A word starts at i: the start of the text, or after a character that is not a letter or digit. */
+function wordStart(t, i) {
+  return i === 0 || !WORDISH.test(t[i - 1]);
+}
+
+const range = (at, n) => Array.from({ length: n }, (_, i) => at + i);
+
+/**
+ * Tier 4: each character of q (spaces ignored) found in order in t, each one at a word start or right
+ * after the previous matched character. Returns the matched indices, or null. Memoised search, so a
+ * repetitive name cannot make it slow.
+ */
+function initials(q, t) {
+  const chars = q.replace(/\s+/g, '');
+  if (!chars) return null;
+  const memo = new Map();
+  const go = (qi, prev) => {
+    if (qi === chars.length) return [];
+    const key = qi * (t.length + 2) + prev + 1;
+    if (memo.has(key)) return memo.get(key);
+    let found = null;
+    for (let j = prev + 1; j < t.length && !found; j += 1) {
+      if (t[j] !== chars[qi]) continue;
+      if (!(j === prev + 1 && prev >= 0) && !wordStart(t, j)) continue;
+      const rest = go(qi + 1, j);
+      if (rest) found = [j, ...rest];
+    }
+    memo.set(key, found);
+    return found;
+  };
+  return go(0, -1);
+}
+
+/** Tiers 0 to 4 of q against one name (both already normalised), or null. */
+function nameTier(q, t) {
+  if (!q || !t) return null;
+  if (t === q) return { tier: 0, hits: range(0, t.length) };
+  if (t.startsWith(q)) return { tier: 1, hits: range(0, q.length) };
+  const first = t.indexOf(q);
+  if (first >= 0) {
+    for (let at = first; at >= 0; at = t.indexOf(q, at + 1)) {
+      if (wordStart(t, at)) return { tier: 2, hits: range(at, q.length) };
+    }
+    return { tier: 3, hits: range(first, q.length) };
+  }
+  const sub = initials(q, t);
+  return sub ? { tier: 4, hits: sub } : null;
+}
+
+const groupIndex = (g) => {
+  const i = GROUP_ORDER.indexOf(g);
+  return i < 0 ? GROUP_ORDER.length : i;
+};
+
+/**
+ * rank(items, text, { recent }) -> [{ item, tier, hits }], best first; items that do not match are
+ * left out (and an empty text matches nothing).
+ *   tiers, on `name` (default: label), case-insensitive, NFC: 0 exact, 1 prefix, 2 word-start
+ *   substring, 3 substring, 4 initials (each matched character at a word start or right after the
+ *   previous one), 5 every query word is a substring of label + detail + keywords.
+ *   order: tier, then the index in `recent` (item ids, most recent first), then GROUP_ORDER, then the
+ *   shorter name, then the label (localeCompare, base sensitivity), then the input order.
+ *   hits: label indices for tiers 0 to 4 when the name is the label, else [].
+ */
+export function rank(items, text, { recent = [] } = {}) {
+  const q = norm(text).trim().replace(/\s+/g, ' ');
+  if (!q) return [];
+  const words = q.split(' ');
+  const mru = new Map();
+  (recent || []).forEach((id, i) => {
+    if (!mru.has(id)) mru.set(id, i);
+  });
+  const out = [];
+  (items || []).forEach((item, index) => {
+    if (!item) return;
+    const label = String(item.label ?? '');
+    const name = item.name !== undefined && item.name !== null ? String(item.name) : label;
+    const t = norm(name);
+    let tier = null;
+    let hits = [];
+    const m = nameTier(q, t);
+    if (m) {
+      tier = m.tier;
+      // Indices are into the normalised name: they are label indices only when nothing changed length.
+      if (name === label && t.length === label.length) hits = m.hits;
+    } else {
+      const hay = norm(`${label} ${item.detail || ''} ${item.keywords || ''}`);
+      if (words.every((w) => hay.includes(w))) tier = 5;
+    }
+    if (tier === null) return;
+    out.push({ item, tier, hits, index, name, label, mru: mru.has(item.id) ? mru.get(item.id) : Infinity, group: groupIndex(item.group) });
+  });
+  out.sort(
+    (a, b) =>
+      a.tier - b.tier ||
+      a.mru - b.mru ||
+      a.group - b.group ||
+      a.name.length - b.name.length ||
+      a.label.localeCompare(b.label, 'en', { sensitivity: 'base' }) ||
+      a.index - b.index,
+  );
+  return out.map(({ item, tier, hits }) => ({ item, tier, hits }));
+}
+
+// ---- highlights ------------------------------------------------------------------------------------
+
+/** [start, end) ranges from sorted indices. */
+function toRanges(indices) {
+  const out = [];
+  for (const i of indices || []) {
+    const last = out[out.length - 1];
+    if (last && last[1] === i) last[1] = i + 1;
+    else out.push([i, i + 1]);
+  }
+  return out;
+}
+
+/** Ranges of every query word in s (case-insensitive), when lower-casing keeps the offsets. */
+function wordRanges(words, s) {
+  const str = String(s ?? '');
+  const t = norm(str);
+  if (t.length !== str.length) return [];
+  const out = [];
+  for (const w of words) {
+    const at = t.indexOf(w);
+    if (at >= 0) out.push([at, at + w.length]);
+  }
+  return out;
+}
+
+/** Where to highlight the label and the detail of one ranked row. */
+function marksFor(row, text) {
+  const q = norm(text).trim().replace(/\s+/g, ' ');
+  const words = q ? q.split(' ') : [];
+  const it = row.item;
+  const label = String(it.label ?? '');
+  if (!q) return { label: [], detail: [] };
+  if (row.hits && row.hits.length) return { label: toRanges(row.hits), detail: [] };
+  if (row.tier !== undefined && row.tier !== null && row.tier <= 4) {
+    // Matched on a name that is part of the label ("Logs" in "Go to Logs"): highlight it there.
+    const name = norm(it.name ?? label);
+    const l = norm(label);
+    const at = l.length === label.length ? l.indexOf(name) : -1;
+    const m = at >= 0 ? nameTier(q, name) : null;
+    return { label: m ? toRanges(m.hits.map((i) => i + at)) : [], detail: [] };
+  }
+  return { label: wordRanges(words, label), detail: wordRanges(words, it.detail) };
+}
+
+// ---- the dialog ------------------------------------------------------------------------------------
+
 let seq = 0;
 
 export class Palette {
@@ -70,11 +247,17 @@ export class Palette {
     this.active = 0;
     this.opener = null;
     this.layer = null;
+    this.recent = []; // ids of items run from the palette, most recent first (memory only)
     this.id = `pal-${(seq += 1)}`;
   }
 
   get isOpen() {
     return Boolean(this.layer);
+  }
+
+  /** Forget the recently run items (the shell calls this at sign-out). */
+  clearRecent() {
+    this.recent = [];
   }
 
   open(text = '') {
@@ -92,7 +275,7 @@ export class Palette {
       'aria-expanded': 'true',
       'aria-controls': `${this.id}-list`,
       'aria-autocomplete': 'list',
-      'aria-label': 'Search views, policies, zones and actions, or paste an address, port or session id',
+      'aria-label': 'Search views, policies, zones, addresses, applications and actions, or paste an address, port or session id',
       placeholder: this.placeholder,
       autocomplete: 'off',
       spellcheck: 'false',
@@ -148,56 +331,76 @@ export class Palette {
     if (this.onClose) this.onClose();
   }
 
+  /** The rows to show, in order: [{ item, tier, hits, heading }]. */
   compute(text) {
     let query = text.trim();
     let items = this.items;
-    if (query.startsWith('>')) {
+    const actionsOnly = query.startsWith('>');
+    if (actionsOnly) {
       query = query.slice(1).trim();
       items = items.filter((it) => it.group === 'Actions');
     }
-    if (!query) {
-      return items.filter((it) => it.featured !== false && ['Recent filters', 'Views', 'Actions', 'Scopes'].includes(it.group));
-    }
+    if (!query) return this.idleRows(items, actionsOnly);
     let lookups = [];
-    if (this.getLookups && !text.trim().startsWith('>')) {
+    if (this.getLookups && !actionsOnly) {
       try {
-        lookups = (this.getLookups(query) || []).map((it) => ({ ...it, hits: [] }));
+        lookups = (this.getLookups(query) || []).map((item) => ({ item, tier: null, hits: [], heading: 'Look up' }));
       } catch (err) {
         console.error(err);
       }
     }
-    const scored = [];
-    for (const it of items) {
-      const main = fuzzy(query, it.label);
-      let score = main ? main.score : -Infinity;
-      let hits = main ? main.hits : [];
-      if (!main) {
-        const extra = fuzzy(query, `${it.detail || ''} ${it.keywords || ''}`);
-        if (extra) {
-          score = extra.score * 0.55;
-          hits = [];
-        }
-      }
-      if (score > -Infinity) scored.push({ ...it, score: score + (it.boost || 0), hits });
+    const ranked = rank(items, query, { recent: this.recent }).slice(0, MAX_RESULTS);
+    let best = ranked.filter((r) => r.tier === 0);
+    if (!best.length) best = ranked.filter((r) => r.tier === 1).slice(0, BEST_PREFIX);
+    const inBest = new Set(best);
+    const rows = best.map((r) => ({ ...r, heading: 'Best match' }));
+    rows.push(...lookups);
+    const rest = ranked.filter((r) => !inBest.has(r));
+    for (const g of GROUP_ORDER) {
+      for (const r of rest) if (r.item.group === g) rows.push({ ...r, heading: g });
     }
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored.slice(0, 60);
-    // Groups in order of their best match; items keep score order within a group.
-    const order = [];
-    for (const it of top) if (!order.includes(it.group)) order.push(it.group);
-    return [...lookups, ...order.flatMap((g) => top.filter((it) => it.group === g))];
+    for (const r of rest) if (!GROUP_ORDER.includes(r.item.group)) rows.push({ ...r, heading: r.item.group || 'Other' });
+    return rows;
+  }
+
+  /** No query: what was run or filtered recently, then views, scopes and actions. */
+  idleRows(items, actionsOnly) {
+    const shown = items.filter((it) => it.featured !== false);
+    const byId = new Map();
+    for (const it of shown) if (it.id && !byId.has(it.id)) byId.set(it.id, it);
+    const recent = [];
+    for (const id of this.recent) {
+      const it = byId.get(id);
+      if (it && !recent.includes(it)) recent.push(it);
+    }
+    const filters = shown
+      .filter((it) => Number.isFinite(it.recentRank))
+      .sort((a, b) => a.recentRank - b.recentRank);
+    for (const it of filters) if (!recent.includes(it)) recent.push(it);
+    const top = recent.slice(0, MAX_RECENT);
+    const rows = top.map((item) => ({ item, tier: null, hits: [], heading: 'Recent' }));
+    const taken = new Set(top);
+    for (const g of actionsOnly ? ['Actions'] : ['Views', 'Scopes', 'Actions']) {
+      for (const it of shown) if (it.group === g && !taken.has(it)) rows.push({ item: it, tier: null, hits: [], heading: g });
+    }
+    return rows;
   }
 
   render() {
-    this.results = this.compute(this.input.value);
+    const text = this.input.value;
+    this.results = this.compute(text);
     this.active = this.results.length ? 0 : -1;
     const nodes = [];
-    let group = null;
-    this.results.forEach((it, i) => {
-      if (it.group !== group) {
-        group = it.group;
-        nodes.push(h('div', { class: 'pal-group', role: 'presentation' }, group));
+    let heading = null;
+    this.results.forEach((row, i) => {
+      const it = row.item;
+      if (row.heading !== heading) {
+        heading = row.heading;
+        nodes.push(h('div', { class: ['pal-group', heading === 'Best match' && 'best'], role: 'presentation' }, heading));
       }
+      const marks = marksFor(row, text.trim().startsWith('>') ? text.trim().slice(1) : text);
+      const label = String(it.label ?? '');
+      const detail = it.detail ? String(it.detail) : '';
       nodes.push(
         h(
           'div',
@@ -206,6 +409,7 @@ export class Palette {
             id: `${this.id}-opt-${i}`,
             role: 'option',
             'aria-selected': i === this.active ? 'true' : 'false',
+            'aria-label': detail ? `${plain(label, { all: true })}, ${plain(detail, { all: true })}` : plain(label, { all: true }),
             dataset: { index: i },
             on: {
               mousemove: () => this.setActive(i, false),
@@ -214,15 +418,14 @@ export class Palette {
             },
           },
           icon(it.icon || 'arrow'),
-          h('span', { class: 'pal-label' }, marked(it.label, it.hits, null)),
-          it.detail ? h('span', { class: 'pal-detail' }, it.detail) : null,
+          h('span', { class: 'pal-label dev-text' }, vis(label, { all: true, marks: marks.label })),
+          detail ? h('span', { class: 'pal-detail dev-text' }, vis(detail, { all: true, marks: marks.detail })) : null,
           it.hint ? h('span', { class: 'pal-hint', 'aria-hidden': 'true' }, it.hint.map((k) => h('kbd', null, k))) : null,
         ),
       );
     });
     if (!nodes.length) {
-      nodes.push(h('div', { class: 'pal-empty' }, 'No match. Try a view, a policy or zone name, an address, a port or a session id, or ">" for actions.'));
-
+      nodes.push(h('div', { class: 'pal-empty' }, 'No match. Try a view, a policy, zone, address or application name, an address, a port or a session id, or ">" for actions.'));
     }
     this.list.replaceChildren(...nodes);
     this.syncActive();
@@ -247,9 +450,17 @@ export class Palette {
     }
   }
 
+  /** Remember an item as just run (memory only). */
+  noteRun(id) {
+    if (!id) return;
+    this.recent = [id, ...this.recent.filter((x) => x !== id)].slice(0, MRU_SIZE);
+  }
+
   run(i) {
-    const it = this.results[i];
-    if (!it) return;
+    const row = this.results[i];
+    if (!row) return;
+    const it = row.item;
+    this.noteRun(it.id);
     this.close({ restoreFocus: !it.keepFocus });
     try {
       it.run();

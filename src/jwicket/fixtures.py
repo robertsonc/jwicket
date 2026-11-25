@@ -14,7 +14,16 @@ from xml.etree import ElementTree
 
 from jwicket.junos.errors import RpcDenied, RpcFailed, RpcUnsupported
 from jwicket.junos.session import check_rpc
+from jwicket.junos.sessions import APPLICATIONS
 from jwicket.junos.xmlutil import Element, local, text
+
+# IANA protocol numbers (verified, IANA protocol-numbers registry) for the keywords the session filter
+# accepts, so a numeric protocol filter matches the same sessions as its keyword. ipip has none here:
+# IANA lists 4 (IPv4 encapsulation) and 94 (IPIP), and which one Junos means is unknown.
+PROTOCOL_NUMBERS = {
+    "icmp": 1, "igmp": 2, "tcp": 6, "egp": 8, "udp": 17, "rsvp": 46, "gre": 47, "esp": 50, "ah": 51,
+    "icmp6": 58, "ospf": 89, "pim": 103, "sctp": 132,
+}
 
 
 class FixtureSession:
@@ -65,11 +74,15 @@ class FixtureSession:
     def rpc(self, name: str, **params: Any) -> Element:
         check_rpc(name)
         self._maybe_fail(name)
-        if self._live is not None and name == "get-flow-session-information":
-            filters = {k: str(v) for k, v in params.items() if k != "summary"}
-            if params.get("summary"):
-                return self._live.summary_xml(filters)
-            return self._live.sessions_xml(filters)
+        if name == "get-flow-session-information":
+            if self._live is not None:
+                filters = {k: str(v) for k, v in params.items() if k != "summary"}
+                if params.get("summary"):
+                    return self._live.summary_xml(filters)
+                return self._live.sessions_xml(filters)
+            if not (self._dir / f"{name}.xml").is_file():
+                # Say so plainly: the development server must not blame the device for a fixture gap.
+                raise RpcUnsupported("fixture has no session table", "This fixture has no session table.")
         if self._live is not None and name == "get-security-log-information":
             return self._live.buffer_xml(str(params.get("newer_than") or ""))
         if self._live is not None and name in HEALTH_RPCS:
@@ -118,6 +131,20 @@ class LiveModel:
 
     Deterministic: the flows that start in a given second depend only on the fixture seed and that
     second, so every poll sees a consistent table, sessions age and close, and new ones appear.
+
+    How the device applies filters and lays out replies is emulated, and these are emulation choices
+    (inferred device behaviour), not facts about Junos:
+
+    * A protocol number matches the sessions of its keyword (IANA numbers).
+    * ``application`` matches a profile's optional ``alg`` (an application-protocol type of the
+      24.4R2 YANG enumeration); a profile without one matches no application filter and reports no
+      application.
+    * With ``nodes`` in the spec (a chassis cluster), summaries and lists are wrapped per node in
+      ``multi-routing-engine-results``; every session appears on every node under the same session
+      identifier (as in the CLI sample of show security flow session extensive node all; the XML
+      reply is not recorded), later nodes' copies have zero
+      counters (the backup copy; Spec 004 section 7.5), no role field is sent, and each later node
+      reports a slightly smaller, deterministic active count.
     """
 
     def __init__(self, spec: Dict[str, Any], clock: Callable[[], float] = time.time) -> None:
@@ -128,6 +155,7 @@ class LiveModel:
         self.rate = float(spec.get("flows_per_second", 2.0))
         self.profiles: List[Dict[str, Any]] = list(spec["profiles"])
         self.weights = [float(p.get("weight", 1)) for p in self.profiles]
+        self.nodes: List[str] = [str(n) for n in spec.get("nodes", [])]
 
     def _flows_in(self, slot: int) -> List[Dict[str, Any]]:
         rng = random.Random(f"{self.seed}:{slot}")  # noqa: S311 - synthetic fixture data, not security
@@ -168,7 +196,7 @@ class LiveModel:
 
     @staticmethod
     def _matches(flow: Dict[str, Any], filters: Dict[str, str]) -> bool:
-        """Emulates the device applying get-flow-session-information filters."""
+        """Emulates the device applying get-flow-session-information filters (see the class notes)."""
         prof = flow["prof"]
         for key, value in filters.items():
             if key == "source_prefix":
@@ -180,9 +208,15 @@ class LiveModel:
             elif key == "destination_port":
                 ok = int(value) == flow["dport"]
             elif key == "protocol":
-                ok = value == prof["proto"]
+                proto = str(prof["proto"])
+                ok = PROTOCOL_NUMBERS.get(proto) == int(value) if value.isdigit() else value == proto
             elif key == "application":
-                ok = value == prof["app"]
+                if value not in APPLICATIONS:
+                    # The server refuses such a value first; this covers direct callers.
+                    raise RpcFailed(
+                        f"fixture: application {value!r} is not an application-protocol type the RPC accepts"
+                    )
+                ok = value == prof.get("alg")
             elif key == "interface":
                 ok = value in (prof["in_iface"], prof["out_iface"])
             else:
@@ -191,19 +225,32 @@ class LiveModel:
                 return False
         return True
 
+    def _per_node(self, build: Callable[[int], Element]) -> Element:
+        """One reply, or on a cluster model one ``multi-routing-engine-item`` per node around it."""
+        if not self.nodes:
+            return build(0)
+        root = ElementTree.Element("multi-routing-engine-results")
+        for index, name in enumerate(self.nodes):
+            item = ElementTree.SubElement(root, "multi-routing-engine-item")
+            ElementTree.SubElement(item, "re-name").text = name
+            item.append(build(index))
+        return root
+
     def sessions_xml(self, filters: Dict[str, str]) -> Element:
         now = self.clock()
+        listed = [
+            f for f in self.flows(now)
+            if f["prof"].get("action") != "deny" and f["start"] <= now < f["start"] + f["duration"]
+            and self._matches(f, filters)
+        ]
+        return self._per_node(lambda node: self._session_list(listed, now, node))
+
+    def _session_list(self, listed: List[Dict[str, Any]], now: float, node: int) -> Element:
         root = ElementTree.Element("flow-session-information")
-        shown = 0
-        for f in self.flows(now):
+        for f in listed:
             prof = f["prof"]
-            if prof.get("action") == "deny" or not f["start"] <= now < f["start"] + f["duration"]:
-                continue
-            if not self._matches(f, filters):
-                continue
-            shown += 1
             age = now - f["start"]
-            node = ElementTree.SubElement(root, "flow-session")
+            item = ElementTree.SubElement(root, "flow-session")
             for tag, value in (
                 ("session-identifier", f["sid"]),
                 ("status", "Normal"),
@@ -214,8 +261,11 @@ class LiveModel:
                 ("start-time", int(f["start"])),
                 ("duration", int(age)),
             ):
-                ElementTree.SubElement(node, tag).text = str(value)
-            fwd = f["rate"] * age
+                ElementTree.SubElement(item, tag).text = str(value)
+            if prof.get("alg"):
+                ElementTree.SubElement(item, "application").text = str(prof["alg"])
+            # The backup copy on a later node carries no traffic (zero counters).
+            fwd = f["rate"] * age if node == 0 else 0.0
             # Forward wing: what the client sent (destination is the public address under DNAT).
             # Reverse wing: what the server answers to (source is the translated address under SNAT).
             public_dst = prof.get("public", {}).get(f["dst"], f["dst"]) if f["nat_dst"] else f["dst"]
@@ -225,14 +275,16 @@ class LiveModel:
                 ("Out", f["dst"], f["dport"], reply_dst, reply_dport, prof["out_iface"], fwd),
             )
             for direction, sa, sp, da, dp, iface, nbytes in wings:
-                w = ElementTree.SubElement(node, "flow-information")
+                w = ElementTree.SubElement(item, "flow-information")
+                packets = int(nbytes / 700) + 1 if node == 0 else 0
+                octets = int(nbytes) + 60 if node == 0 else 0
                 for tag, value in (
                     ("direction", direction), ("source-address", sa), ("source-port", sp),
                     ("destination-address", da), ("destination-port", dp), ("protocol", prof["proto"]),
-                    ("interface-name", iface), ("pkt-cnt", int(nbytes / 700) + 1), ("byte-cnt", int(nbytes) + 60),
+                    ("interface-name", iface), ("pkt-cnt", packets), ("byte-cnt", octets),
                 ):
                     ElementTree.SubElement(w, tag).text = str(value)
-        ElementTree.SubElement(root, "displayed-session-count").text = str(shown)
+        ElementTree.SubElement(root, "displayed-session-count").text = str(len(listed))
         return root
 
     def summary_xml(self, filters: Optional[Dict[str, str]] = None) -> Element:
@@ -243,19 +295,29 @@ class LiveModel:
         ]
         if filters:
             # A filtered summary reports the matching count only (displayed-session-count).
-            wrapper = ElementTree.Element("security-flow-information")
-            info = ElementTree.SubElement(wrapper, "flow-session-information")
             count = sum(1 for f in live if self._matches(f, filters))
-            ElementTree.SubElement(info, "displayed-session-valid").text = str(count)
-            ElementTree.SubElement(info, "displayed-session-count").text = str(count)
-            return wrapper
+
+            def filtered(_node: int) -> Element:
+                wrapper = ElementTree.Element("security-flow-information")
+                info = ElementTree.SubElement(wrapper, "flow-session-information")
+                ElementTree.SubElement(info, "displayed-session-valid").text = str(count)
+                ElementTree.SubElement(info, "displayed-session-count").text = str(count)
+                return wrapper
+
+            return self._per_node(filtered)
         active = len(live) + int(self.spec.get("extra_active", 0))
-        root = ElementTree.Element("flow-session-information")
-        summary = ElementTree.SubElement(root, "flow-session-summary-information")
-        ElementTree.SubElement(summary, "active-sessions").text = str(active)
-        ElementTree.SubElement(summary, "max-sessions").text = str(self.spec.get("max_sessions", 524288))
-        ElementTree.SubElement(summary, "failed-sessions").text = "0"
-        return root
+
+        def table(node: int) -> Element:
+            # Later nodes report a slightly smaller count that depends only on the time.
+            shown = active if node == 0 else max(0, active - node - int(now) // 7 % 3)
+            root = ElementTree.Element("flow-session-information")
+            summary = ElementTree.SubElement(root, "flow-session-summary-information")
+            ElementTree.SubElement(summary, "active-sessions").text = str(shown)
+            ElementTree.SubElement(summary, "max-sessions").text = str(self.spec.get("max_sessions", 524288))
+            ElementTree.SubElement(summary, "failed-sessions").text = "0"
+            return root
+
+        return self._per_node(table)
 
     # -- logs --
 

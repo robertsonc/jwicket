@@ -32,7 +32,8 @@
   font-size: 12px;
 }
 
-.pv-dot {
+.pv-dot,
+.pv-sub .sub-sep {
   color: var(--faint);
   white-space: pre;
 }
@@ -3045,4 +3046,345 @@ button.pv-ord-name:hover {
   .ob-tab svg {
     display: none;
   }
+}
+
+/* ---- UI-19: device text, comments, deactivated references (POL-UI-01..12, CRT-14) ---------------- */
+
+/* Device text is isolated, so a bidirectional character inside a name cannot reorder the text around
+   it (.dev-text, POL-SL-02); the hidden characters themselves show as .ctl-badge (app.css). */
+.pv-view .pv-desc,
+.pv-view .pv-name,
+.pv-view .pv-comment,
+.pv-view .zone,
+.pv-view .pv-v,
+.pv-view .pv-hint,
+.pv-view .pv-desc-full,
+.pv-view .pv-res-name,
+.pv-view .pv-objlink,
+.pv-view .pv-ord-name,
+.pv-view .pv-cmt-text,
+.pv-view .pv-mx-z,
+.pv-view .pv-cli-code > span,
+.pv-view .pv-badge > span,
+.pv-detail .pv-desc-full,
+.pv-detail .pv-cmt-text,
+.pv-detail .pv-objlink,
+.pv-detail .pv-ord-name,
+.pv-detail .pv-res-name,
+.pv-detail .zone,
+.pv-detail .pv-cli-code > span,
+.pv-detail .mono {
+  unicode-bidi: isolate;
+}
+
+/* a configuration comment (annotate) under a policy name: verbatim, line breaks kept, two lines */
+.pv-comment {
+  margin-top: 1px;
+  color: var(--muted);
+  font: 11px/1.4 var(--font-mono);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.pv-default .pv-comment {
+  font-weight: 400;
+}
+
+.pv-desc {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.pv-desc-full,
+.pv-cmt-text,
+.pv-comment-full {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* the comment icon of a zone-pair or global header; its tooltip holds the comment */
+.pv-sec-comment {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  cursor: help;
+}
+
+.pv-sec-comment svg {
+  width: 13px;
+  height: 13px;
+}
+
+.pv-mx-cell.has-comment {
+  background-image: linear-gradient(135deg, var(--line-strong) 0 5px, transparent 5px);
+}
+
+/* the "Configuration comments" panel section */
+.pv-cmts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pv-cmts li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  font-size: 12.5px;
+}
+
+.pv-cmt-where {
+  color: var(--muted);
+}
+
+.pv-cmt-text {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* amber: written but deactivated, not in effect */
+.pv-tag.amber {
+  color: var(--amber);
+  border-color: var(--amber-line);
+  background: var(--amber-soft);
+}
+
+.pv-amber {
+  color: var(--amber);
+}
+
+.pv-rule-v.amber {
+  color: var(--amber);
+}
+
+.pv-res.is-off {
+  border-color: var(--amber-line);
+}
+
+.pv-skip {
+  color: var(--amber);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pv-skip .pv-objlink {
+  color: inherit;
+}
+
+.pv-callout.sky { --tone: var(--sky); --tone-soft: var(--sky-soft); --tone-line: var(--sky-line); }
+
+.pv-unified,
+.pv-eval-off {
+  display: block;
+  color: var(--text);
+}
+
+.pv-implicit {
+  color: var(--muted);
+}
+
+/* a CLI command not offered: the name would break a pasted command (CRT-14) */
+.pv-cli-off {
+  align-items: flex-start;
+}
+
+.pv-cli-refused {
+  color: var(--muted);
+  font: 400 12px/1.45 var(--font-ui, inherit);
+  white-space: normal;
+}
+
+/* ---- UI-19 Objects: deactivated parts, except, comments, catalog ports (OBJ-40..63) --------------- */
+
+.ob-view .ob-svc,
+.ob-view .ob-own,
+.ob-view .ob-member-off,
+.ob-view .ob-bookname,
+.ob-view .ob-cmt,
+.ob-view .ob-book-desc,
+.ob-view .iface,
+.pv-detail .ob-svc,
+.pv-detail .ob-cmt,
+.pv-detail .iface,
+.pv-detail .ob-member-off {
+  unicode-bidi: isolate;
+}
+
+.ob-introrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.ob-introrow .ob-intro {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.ob-tabnote[hidden] {
+  display: none;
+}
+
+/* struck through: written but deactivated, not in effect */
+.is-struck,
+.pv-v.is-struck {
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.ob-ifaces li.is-off,
+.ob-hit tr.is-off td,
+.pv-mini tr.is-off td {
+  color: var(--muted);
+  opacity: .72;
+}
+
+/* host-inbound: "except" and the excluded entries; deactivated entries dashed and struck */
+.ob-except-w {
+  color: var(--muted);
+  font: 600 10.5px/19px var(--font-mono);
+}
+
+.ob-svc.is-except {
+  border-color: var(--deny-line);
+  color: var(--deny);
+  background: transparent;
+  text-decoration: line-through;
+  text-decoration-color: var(--deny-line);
+}
+
+.ob-except-note {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 19px;
+}
+
+.ob-svc.is-off {
+  border-style: dashed;
+  color: var(--muted);
+  background: transparent;
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.ob-svc-offn,
+.ob-own-off {
+  color: var(--amber);
+  font: 600 10.5px/19px var(--font-mono);
+}
+
+.ob-hit-off {
+  color: var(--amber);
+  font-size: 11.5px;
+}
+
+.ob-own.is-off {
+  border-style: dashed;
+  border-color: var(--amber-line);
+  background: transparent;
+  color: var(--amber);
+}
+
+/* set members */
+.ob-member-off {
+  color: var(--muted);
+  font: 11.5px/20px var(--font-mono);
+}
+
+.ob-member-off.is-struck {
+  cursor: pointer;
+}
+
+.ob-more-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.ob-more-link:hover {
+  color: var(--gold);
+}
+
+/* application-set ports from J-Wicket's own table */
+.ob-catalog-n {
+  color: var(--muted);
+  font: 11px var(--font-mono);
+}
+
+.pv-tag.ob-catalog {
+  border-style: dashed;
+  color: var(--muted);
+  cursor: help;
+}
+
+.ob-catalog-mark {
+  display: inline-flex;
+  margin-top: 3px;
+}
+
+.ob-used-off {
+  font-weight: 400;
+}
+
+/* book headers */
+.ob-book.is-off .ob-bookname {
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.ob-book-desc {
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+/* comments (annotate) in a detail */
+.ob-cmt {
+  color: var(--muted);
+  font: 12px/1.45 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ob-note svg {
+  color: var(--faint);
+}
+
+/* address books in lookup order */
+.ob-order-cap {
+  cursor: help;
+}
+
+.ob-order-n {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  border: 1px solid var(--gold-line);
+  color: var(--gold);
+  font: 700 10.5px/1 var(--font-mono);
+}
+
+.ob-pair.is-struck {
+  border-style: dashed;
+}
+
+.ob-pair.is-struck .mono {
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.ob-entries .ob-pair {
+  min-height: 26px;
 }

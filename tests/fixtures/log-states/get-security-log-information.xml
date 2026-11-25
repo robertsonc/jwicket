@@ -1,0 +1,16 @@
+<!-- SYNTHETIC. Records written before "security log disable"; element names follow J-Wicket's reading
+     of the security log buffer reply (logs.buffer_events), not a recorded reply. -->
+<security-log-information>
+  <security-event>
+    <security-event-time>2026-11-20.09:15:02</security-event-time>
+    <security-event-id>RT_FLOW_SESSION_CREATE</security-event-id>
+    <security-event-message>session created 10.10.0.11/50211->198.51.100.20/443 junos-https allow-out trust untrust</security-event-message>
+    <process><name>flowd</name></process>
+  </security-event>
+  <security-event>
+    <security-event-time>2026-11-20.09:15:31</security-event-time>
+    <security-event-id>RT_FLOW_SESSION_CLOSE</security-event-id>
+    <security-event-message>session closed TCP FIN: 10.10.0.11/50211->198.51.100.20/443 junos-https allow-out trust untrust</security-event-message>
+    <process><name>flowd</name></process>
+  </security-event>
+</security-log-information>

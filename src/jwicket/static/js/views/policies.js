@@ -18,8 +18,18 @@
 //
 // Strict CSP: DOM through ctx.dom.h()/svg() and textContent only; dynamic sizes through CSSOM custom
 // properties. Nothing read from the device is stored in the browser.
+//
+// Device text is untrusted (UI-19 POL-UI-06, CRT-14): every name, description and comment is shown
+// through ctx.dom.vis() (or markNodes(), which builds the same badges through the h it is given), so a
+// hidden or reordering character shows as a "U+202E" badge instead of being applied. Titles, labels and
+// toasts use format.plain(). A CLI command is never offered for a name with a line break or a C0/C1
+// control character (format.cliUnsafe); format characters (bidi, zero-width) are copied exactly.
+
+import { cliUnsafe, controlName, controlParts, countControls, hasControls, plain } from '../format.js';
 
 const ICON = 'M12 3l7.5 3v5.2c0 4.4-3.1 8.2-7.5 9.8-4.4-1.6-7.5-5.4-7.5-9.8V6z M8.8 11.8l2.3 2.3 4.3-4.4';
+// A speech bubble, for configuration comments (annotate).
+const COMMENT_ICON = 'M5 5.5h14v9.5h-8.5L6 19v-4H5z';
 const SEP = ' \u00b7 ';
 const ARROW = '\u2192';
 const LIST_LIMIT = 4;
@@ -46,6 +56,19 @@ export function qv(v) {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * qv() for a device string put into a query: each control or format character becomes the wildcard
+ * `*`, as Logs and Sessions do, so the query bar never holds an invisible or reordering character.
+ */
+export function qvDevice(v) {
+  return qv(starControls(v));
+}
+
+/** A device string with each control or format character replaced by `*` (the value qvDevice quotes). */
+function starControls(v) {
+  return controlParts(String(v ?? ''), { all: true }).map((p) => (p.ctl ? '*' : p.text)).join('');
+}
+
 export const pairKey = (from, to) => `${from}\u0000${to}`;
 
 export function scopeParts(id) {
@@ -64,60 +87,132 @@ export function scopeTitle(snap, id) {
   return 'Root system';
 }
 
-/** Quote a CLI word only when Junos would need it. */
+/**
+ * Quote a CLI word only when Junos would need it. Null when the word holds a line break or a C0/C1
+ * control character (format.cliUnsafe): such a word would break a pasted command, so no command is
+ * offered. Format characters (bidi, zero-width) are kept exactly, quoted, so the command names the same
+ * object as the device does.
+ */
 export function cliWord(word) {
-  const text = String(word);
+  const text = String(word ?? '');
+  if (cliUnsafe(text)) return null;
   return /^[A-Za-z0-9._:/-]+$/.test(text) ? text : `"${text.replace(/["\\]/g, '\\$&')}"`;
 }
 
-/** "logical-systems LS-A " / "tenants T-1 " / "" for show configuration. */
+/** "logical-systems LS-A " / "tenants T-1 " / "" for show configuration; null when the name is unsafe. */
 export function cliPrefix(scopeId) {
   const sp = scopeParts(scopeId);
-  if (sp.kind === 'lsys') return `logical-systems ${cliWord(sp.name)} `;
-  if (sp.kind === 'tenant') return `tenants ${cliWord(sp.name)} `;
-  return '';
+  if (sp.kind === 'root') return '';
+  const w = cliWord(sp.name);
+  if (w === null) return null;
+  return sp.kind === 'lsys' ? `logical-systems ${w} ` : `tenants ${w} `;
 }
 
-/** A copyable CLI block; <placeholders> are marked so the operator sees what to replace. */
-export function cliBlock(ctx, text, label = 'Copy command') {
+/** The words of a command joined with spaces, or null when any word is null (an unsafe name). */
+export function cliJoin(...words) {
+  const flat = words.flat();
+  return flat.some((w) => w === null || w === undefined) ? null : flat.join(' ').replace(/\s+$/, '');
+}
+
+/** "U+000A, U+0085": the characters of `names` that make a command unsafe to paste. */
+function unsafeChars(names) {
+  const seen = [];
+  for (const n of names || []) {
+    for (const ch of String(n ?? '')) {
+      if (!cliUnsafe(ch)) continue;
+      const name = controlName(ch);
+      if (!seen.includes(name)) seen.push(name);
+    }
+  }
+  return seen;
+}
+
+/** "U+200B, U+202E": the hidden (format) characters a command copies exactly. */
+function hiddenChars(text) {
+  const seen = [];
+  for (const p of controlParts(text)) if (p.ctl && !seen.includes(p.ctl)) seen.push(p.ctl);
+  return seen;
+}
+
+/**
+ * A copyable CLI block; <placeholders> are marked so the operator sees what to replace. Each word is
+ * shown through vis(), so a hidden character shows as a badge; the copy holds the exact characters.
+ * `text` null (a builder met an unsafe name, CRT-14): no command and no copy button, but a note naming
+ * the characters found in `names` (the names the command would have held).
+ */
+export function cliBlock(ctx, text, label = 'Copy command', names = []) {
   const { h, icon } = ctx.dom;
+  if (text === null || text === undefined) {
+    const chars = unsafeChars(names);
+    return h(
+      'div',
+      { class: 'cli pv-cli pv-cli-off', role: 'note' },
+      h('span', { class: 'pv-prompt', 'aria-hidden': 'true' }, '>'),
+      h(
+        'span',
+        { class: 'pv-cli-refused' },
+        `Command not offered: the name contains a line break or control character (shown as ${chars.length ? chars.join(', ') : 'a U+ badge'}) that would break a pasted command.`,
+      ),
+    );
+  }
+  const { vis } = ctx.dom;
   const code = h('code', { class: 'pv-cli-code' });
   String(text)
     .split(' ')
     .forEach((word, i) => {
       if (i) code.append(' ');
-      code.append(h('span', { class: /^<[^>]+>$/.test(word) ? 'pv-ph' : null }, word));
+      code.append(h('span', { class: /^<[^>]+>$/.test(word) ? 'pv-ph' : null }, vis(word, { all: true })));
     });
+  const hidden = hiddenChars(text);
+  const n = countControls(text);
+  const done = hidden.length
+    ? `Command copied. The command contains ${n} hidden ${n === 1 ? 'character' : 'characters'} (shown as ${hidden.join(', ')}).`
+    : 'Command copied. Paste it into the device CLI.';
   const btn = h(
     'button',
     {
       class: 'btn sm ghost icon',
       type: 'button',
-      title: 'Copy',
-      'aria-label': `${label}: ${text}`,
-      on: { click: () => ctx.ui.copy(text, 'Command copied. Paste it into the device CLI.') },
+      title: hidden.length ? `Copy (exact characters, including ${hidden.join(', ')})` : 'Copy',
+      'aria-label': `${label}: ${plain(text)}`,
+      on: { click: () => ctx.ui.copy(text, done) },
     },
     icon('copy'),
   );
   return h('div', { class: 'cli pv-cli' }, h('span', { class: 'pv-prompt', 'aria-hidden': 'true' }, '>'), code, btn);
 }
 
-/** Text with case-insensitive occurrences of `terms` wrapped in <mark>. */
-export function markNodes(h, text, terms) {
+/** A control or format character as a visible badge, built through `h` (the same badge as dom.vis). */
+function ctlBadge(h, name) {
+  return h('span', { class: 'ctl-badge', title: `A hidden ${name} character is here (shown, not applied)` }, name);
+}
+
+/**
+ * Device text as nodes built only through `h`: case-insensitive occurrences of `terms` wrapped in
+ * <mark class="pv-hit">, and each control or format character shown as a `ctl-badge` span instead of
+ * being applied (a badge inside a mark goes inside it). `all` (the default, for names) also badges tab
+ * and line feed; descriptions and comments pass `{ all: false }` and keep their line breaks.
+ */
+export function markNodes(h, text, terms, { all = true } = {}) {
   const s = String(text === null || text === undefined ? '' : text);
-  if (!terms || !terms.length || !s) return [s];
+  const pieces = (str) => controlParts(str, { all }).map((p) => (p.ctl ? ctlBadge(h, p.ctl) : p.text));
+  if (!s) return [s];
   const low = s.toLowerCase();
   const hits = [];
-  for (const t of terms) {
-    const tl = String(t).toLowerCase();
-    if (tl.length < 2) continue;
-    let i = low.indexOf(tl);
-    while (i >= 0 && hits.length < 64) {
-      hits.push([i, i + tl.length]);
-      i = low.indexOf(tl, i + tl.length);
+  // Offsets are taken from the lower-cased text; when lower-casing changes the length (a few
+  // characters do), the text is shown without marks rather than with marks in the wrong place.
+  if (terms && terms.length && low.length === s.length) {
+    for (const t of terms) {
+      const tl = String(t).toLowerCase();
+      if (!tl) continue;
+      let i = low.indexOf(tl);
+      while (i >= 0 && hits.length < 64) {
+        hits.push([i, i + tl.length]);
+        i = low.indexOf(tl, i + tl.length);
+      }
     }
   }
-  if (!hits.length) return [s];
+  if (!hits.length) return hasControls(s, { all }) ? pieces(s) : [s];
   hits.sort((a, b) => a[0] - b[0]);
   const merged = [];
   for (const hit of hits) {
@@ -128,20 +223,21 @@ export function markNodes(h, text, terms) {
   const out = [];
   let pos = 0;
   for (const [a, b] of merged) {
-    if (a > pos) out.push(s.slice(pos, a));
-    out.push(h('mark', { class: 'pv-hit' }, s.slice(a, b)));
+    if (a > pos) out.push(...pieces(s.slice(pos, a)));
+    out.push(h('mark', { class: 'pv-hit' }, pieces(s.slice(a, b))));
     pos = b;
   }
-  if (pos < s.length) out.push(s.slice(pos));
+  if (pos < s.length) out.push(...pieces(s.slice(pos)));
   return out;
 }
 
 /** A provenance badge row: configuration group, inherited parts, inactive. */
 export function provBadges(h, obj, { direct = true } = {}) {
   const out = [];
-  if (obj.group) out.push(h('span', { class: 'pv-badge b-group', title: `Comes from configuration group ${obj.group}` }, `group ${obj.group}`));
+  const nodes = (s) => markNodes(h, s, []);
+  if (obj.group) out.push(h('span', { class: 'pv-badge b-group', title: `Comes from configuration group ${plain(obj.group)}` }, 'group ', nodes(obj.group)));
   if ((obj.inherited || []).length) {
-    out.push(h('span', { class: 'pv-badge b-inherit', title: `Partly inherited: ${obj.inherited.join(', ')}` }, `inherits ${obj.inherited.join(', ')}`));
+    out.push(h('span', { class: 'pv-badge b-inherit', title: `Partly inherited: ${plain(obj.inherited.join(', '))}` }, 'inherits ', nodes(obj.inherited.join(', '))));
   }
   if (obj.inactive) out.push(h('span', { class: 'pv-badge b-inactive', title: 'Deactivated in the configuration (inactive:): not in effect' }, 'inactive'));
   if (!out.length && direct) out.push(h('span', { class: 'pv-direct' }, 'direct'));
@@ -162,6 +258,9 @@ export function haRole(r) {
 /**
  * Live session counts per policy name from the last Sessions poll in this tab (memory only), or null
  * when there is none or the scope is not the root system (flow sessions are read for root only).
+ * Chassis-cluster backup copies (query.sessionCopies: marked Backup by the device, or inferred from
+ * zero counters on the other node) are not counted; `backups` is how many were left out, and `why`
+ * says on what basis.
  */
 export function liveSessions(ctx) {
   const last = ctx.store.sessionsLast;
@@ -179,13 +278,15 @@ export function liveSessions(ctx) {
     total: 0,
     max: 0,
     backups: 0,
+    why: [],
   };
   if (table.status !== 'ok') return out;
-  for (const r of table.rows || []) {
-    if (haRole(r) === 'backup') {
-      out.backups += 1;
-      continue;
-    }
+  const rows = table.rows || [];
+  const copies = ctx.query && ctx.query.sessionCopies ? ctx.query.sessionCopies(rows) : { backups: new Set(), why: new Map() };
+  out.backups = copies.backups.size;
+  out.why = [...new Set(copies.why.values())];
+  for (const r of rows) {
+    if (copies.backups.has(r.id)) continue;
     const name = r.policy || '';
     if (!name) continue;
     const n = (out.counts.get(name) || 0) + 1;
@@ -226,15 +327,19 @@ export function keyName(fields, key) {
   return null;
 }
 
-/** Explicit state for the snapshot as a whole (no data, config not readable, no scope), or null. */
-export function inventoryState(ctx, snap, what, retry) {
+/**
+ * Explicit state for the snapshot as a whole (no data, config not readable, no scope), or null.
+ * `deniedHint` replaces the hint of the card shown when the login class may not read the configuration.
+ */
+export function inventoryState(ctx, snap, what, retry, { deniedHint = null } = {}) {
   const { h, stateCard } = ctx.dom;
   const again = retry ? [h('button', { class: 'btn sm', type: 'button', on: { click: retry } }, 'Read again')] : null;
   if (!snap) {
-    const err = ctx.store.inventoryError;
+    const err = inventoryErrorFor(ctx);
     if (err) {
       return stateCard({
-        status: err.status === 0 ? 'offline' : err.status === 404 ? 'unsupported' : 'failed',
+        // A named state (the shell's "busy" after waiting out other reads, SL-01) is shown as such.
+        status: typeof err.status === 'string' ? err.status : err.status === 0 ? 'offline' : err.status === 404 ? 'unsupported' : 'failed',
         title: err.status === 404 ? 'That scope is not in the configuration' : undefined,
         message: err.message,
         actions: again,
@@ -249,7 +354,7 @@ export function inventoryState(ctx, snap, what, retry) {
       message: cfg.message,
       hint:
         cfg.status === 'denied'
-          ? `The ${what} come from the configuration, which your Junos login class may not read. J-Wicket shows only what your login class allows; ask your Junos administrator if you need this view.`
+          ? deniedHint || `The ${what} come from the configuration, which your Junos login class may not read. J-Wicket shows only what your login class allows; ask your Junos administrator if you need this view.`
           : undefined,
       actions: cfg.status === 'failed' ? again : null,
     });
@@ -260,27 +365,42 @@ export function inventoryState(ctx, snap, what, retry) {
   return null;
 }
 
-/** "branch-fw-01 · Root system · committed configuration, inheritance expanded · read 09:27 UTC · as admin" */
+/**
+ * The last inventory read error when it is about the current scope (OBJ-31: the shell's error names
+ * its scope; an error without one is taken as current), else null.
+ */
+export function inventoryErrorFor(ctx) {
+  const err = ctx.store.inventoryError;
+  if (!err) return null;
+  return err.scope && err.scope !== ctx.store.scope ? null : err;
+}
+
+/**
+ * The line under the title, built by dom.viewSub (S-4): "branch-fw-01 · Root system · committed
+ * config, inheritance expanded · read 09:27:04 UTC · as admin · 2 min ago". When the configuration was
+ * not read it says so ("configuration not read (your login class does not allow it) · checked …"),
+ * never "committed config". Returns the nodes.
+ */
 export function subLine(ctx, snap, receivedAt) {
   const { h } = ctx.dom;
   const fmt = ctx.format;
   if (!snap) return ['Reading the configuration\u2026'];
   const meta = snap.meta || {};
   const dev = snap.device && snap.device.status === 'ok' ? snap.device : null;
-  const src = meta.source || {};
   const ra = meta.read_as || {};
-  const scope = scopeTitle(snap, meta.scope || ctx.store.scope);
-  const out = [];
-  const push = (...kids) => {
-    if (out.length) out.push(h('span', { class: 'pv-dot', 'aria-hidden': 'true' }, SEP));
-    out.push(...kids);
-  };
-  if (dev && dev.hostname) push(h('span', { class: 'mono' }, dev.hostname));
-  push(h('span', null, scope), snap.scope && snap.scope.inactive ? h('span', { class: 'pill reject pv-sub-pill' }, 'deactivated') : null);
-  push(h('span', { title: `${src.database || 'committed'} configuration database; ${src.inheritance ? 'group inheritance expanded' : 'group inheritance not expanded'}` }, `${src.database === 'committed' || !src.database ? 'committed' : src.database} config, ${src.inheritance ? 'inheritance expanded' : 'not expanded'}`));
-  push(h('span', { title: fmt.stamp(meta.read_at) }, `read ${fmt.time(meta.read_at)} UTC (${fmt.ago(receivedAt || meta.read_at)})`));
-  push(h('span', null, ra.backend === 'lab-token' ? 'lab token: as ' : 'as ', h('span', { class: 'mono' }, ra.user || '?')));
-  return out;
+  const extra = [];
+  if (snap.scope && snap.scope.inactive) extra.push(h('span', { class: 'pill reject pv-sub-pill' }, 'deactivated'));
+  if (meta.read_at || receivedAt) extra.push(fmt.ago(receivedAt || meta.read_at));
+  return ctx.dom.viewSub(null, {
+    host: dev && dev.hostname ? dev.hostname : null,
+    scope: scopeTitle(snap, meta.scope || ctx.store.scope),
+    readAt: meta.read_at,
+    user: ra.user || '?',
+    backend: ra.backend,
+    config: snap.config,
+    source: meta.source,
+    extra,
+  });
 }
 
 // ---- policy model --------------------------------------------------------------------------------
@@ -434,6 +554,7 @@ export function flowExample(row, Q) {
   };
 }
 
+/** The match-policies command for a zone pair, or null when a scope or zone name is unsafe (CRT-14). */
 function matchPoliciesCli(scopeId, from, to, ex = {}) {
   const sp = scopeParts(scopeId);
   const words = ['show security match-policies'];
@@ -442,31 +563,126 @@ function matchPoliciesCli(scopeId, from, to, ex = {}) {
   words.push('from-zone', from ? cliWord(from) : '<from-zone>', 'to-zone', to ? cliWord(to) : '<to-zone>');
   words.push('source-ip', ex.src || '<source-ip>', 'destination-ip', ex.dst || '<destination-ip>');
   words.push('source-port', ex.sport || EXAMPLE_SOURCE_PORT, 'destination-port', ex.port || '<destination-port>');
-  words.push('protocol', ex.proto || '<protocol>');
-  return words.join(' ');
+  words.push('protocol', ex.proto ? cliWord(ex.proto) : '<protocol>');
+  return cliJoin(words);
+}
+
+/** The names a command for this scope and these zones would hold (for the "not offered" note). */
+function cliNames(scopeId, ...names) {
+  return [scopeParts(scopeId).name, ...names.flat()].filter((x) => x !== null && x !== undefined);
 }
 
 function showConfigCli(row, scopeId) {
   const prefix = cliPrefix(row.scope || scopeId);
-  if (row.kind === 'global') return `show configuration ${prefix}security policies global policy ${cliWord(row.name)}`;
-  const from = zonesOf(row.from)[0] || '<from-zone>';
-  const to = zonesOf(row.to)[0] || '<to-zone>';
-  return `show configuration ${prefix}security policies from-zone ${cliWord(from)} to-zone ${cliWord(to)} policy ${cliWord(row.name)}`;
+  if (row.kind === 'global') return cliJoin('show configuration', prefix === null ? null : `${prefix}security policies global policy`, cliWord(row.name));
+  const from = zonesOf(row.from)[0];
+  const to = zonesOf(row.to)[0];
+  return cliJoin(
+    'show configuration',
+    prefix === null ? null : `${prefix}security policies from-zone`,
+    from ? cliWord(from) : '<from-zone>',
+    'to-zone',
+    to ? cliWord(to) : '<to-zone>',
+    'policy',
+    cliWord(row.name),
+  );
 }
 
-function inactiveText(row) {
-  if (row.inactive_reason === 'policy') return 'inactive: policy deactivated';
-  if (row.inactive_reason === 'zone-pair') return row.kind === 'global' ? 'inactive: global section deactivated' : 'inactive: zone pair deactivated';
-  return 'inactive';
+function showConfigNames(row, scopeId) {
+  return cliNames(row.scope || scopeId, row.name, zonesOf(row.from), zonesOf(row.to));
 }
 
-function inactiveSentence(row) {
-  if (row.inactive_reason === 'policy') return 'Inactive: this policy is deactivated in the configuration (inactive:). Junos skips it.';
-  if (row.inactive_reason === 'zone-pair') {
+// Why a row is inactive. "policy" and "zone-pair" are the policy's own statement or its zone pair (or
+// global block); "policies", "security" and "scope" are the nearest deactivated ancestor of every
+// policy in the scope (B-9 ancestor_inactive). That a deactivated ancestor takes its policies out of
+// effect is J-Wicket's reading of Junos (inferred, Spec 001 section 7.5): deactivated statements "do
+// not take effect when you issue the commit command" is verified, its reach to children is not.
+const ANCESTOR_REASONS = ['policies', 'security', 'scope'];
+
+function inactiveText(row, scopeLabel) {
+  const why = row.inactive_reason;
+  if (why === 'policy') return 'inactive: policy deactivated';
+  if (why === 'zone-pair') return row.kind === 'global' ? 'inactive: global section deactivated' : 'inactive: zone pair deactivated';
+  if (why === 'policies') return 'inactive: [security policies] deactivated';
+  if (why === 'security') return 'inactive: [security] deactivated';
+  if (why === 'scope') return `inactive: ${scopeLabel} deactivated`;
+  return `inactive: reason ${why === null || why === undefined ? 'not given' : why} (not known to this UI)`;
+}
+
+function ancestorSentence(why, scopeLabel) {
+  if (why === 'policies') return 'Inactive: [edit security policies] is deactivated, so none of this scope’s policies is in effect.';
+  if (why === 'security') return 'Inactive: [edit security] is deactivated, so none of this scope’s policies is in effect.';
+  if (why === 'scope') return `Inactive: ${scopeLabel} is deactivated in the configuration; nothing in it is in effect.`;
+  return null;
+}
+
+/** The sentence for an inactive row; never "Active." for a row marked inactive. */
+function inactiveSentence(row, scopeLabel) {
+  if (!row.inactive) return null;
+  const why = row.inactive_reason;
+  if (why === 'policy') return 'Inactive: this policy is deactivated in the configuration (inactive:). Junos skips it.';
+  if (why === 'zone-pair') {
     return row.kind === 'global'
       ? 'Inactive: the global policies section is deactivated, so Junos skips this policy.'
       : `Inactive: the zone pair from-zone ${zonesOf(row.from)[0]} to-zone ${zonesOf(row.to)[0]} is deactivated, so Junos skips every policy in it.`;
   }
+  return ancestorSentence(why, scopeLabel) || `Inactive: reason ${why === null || why === undefined ? 'not given' : why} (not known to this UI).`;
+}
+
+const ANCESTOR_BECAUSE = {
+  policies: ' (because [edit security policies] is deactivated)',
+  security: ' (because [edit security] is deactivated)',
+};
+
+/**
+ * The default policy as the UI shows it (POL-UI-02): `{ action, label, tip, badge, cls, group }`.
+ * `action` is what decides a flow no policy matched; `badge` is the amber "permit-all deactivated" chip
+ * of a deactivated default, else null; `group` is the configuration group, shown only with the
+ * configured or deactivated wording. Verified: the YANG default is deny-all, and "If there is no
+ * matching policy, the packet is dropped". Inferred: that a deactivated default leaves deny-all in
+ * force. The Overview duplicates the `label` strings (POL-SL-01): keep them in step.
+ */
+export function defaultState(pol, scopeLabel = 'this scope') {
+  const p = pol || {};
+  const group = p.default_policy_group || null;
+  if (p.default_policy) {
+    const act = p.default_policy;
+    return {
+      action: act,
+      label: group ? `configured, from group ${group}` : 'configured',
+      tip: `The default policy decides when nothing above matched (configured${group ? `, from group ${plain(group)}` : ''})`,
+      badge: null,
+      cls: act === 'permit-all' ? 'permit' : 'deny',
+      group,
+    };
+  }
+  if (p.default_policy_inactive) {
+    const act = p.default_policy_inactive;
+    const why = p.default_policy_inactive_reason;
+    const because = !why || why === 'self' ? '' : ANCESTOR_BECAUSE[why] || (why === 'scope' ? ` (because ${scopeLabel} is deactivated)` : ` (because of a deactivated ${why})`);
+    return {
+      action: 'deny-all',
+      label: `Junos default: the configured default-policy ${act} is deactivated${because}`,
+      tip: `default-policy ${act} is written in the configuration but deactivated (inactive:), so it is not in effect; the Junos default, deny-all, decides. (That the default then applies is J-Wicket’s reading: inferred.)`,
+      badge: `${act} deactivated`,
+      cls: 'deny',
+      group,
+    };
+  }
+  return {
+    action: 'deny-all',
+    label: 'not configured (Junos default: deny-all)',
+    tip: 'No default-policy is configured: the Junos default, deny-all, decides when nothing above matched',
+    badge: null,
+    cls: 'deny',
+    group: null,
+  };
+}
+
+/** The pre-ID default policy state for the unified-policy note: null when neither flag is set. */
+function preIdState(pol) {
+  if (pol.pre_id_default_policy) return 'configured (contents not shown)';
+  if (pol.pre_id_default_policy_inactive) return 'configured but deactivated (not in effect)';
   return null;
 }
 
@@ -479,6 +695,15 @@ const APP_KINDS = {
   'dynamic-defaults': 'the dynamic application’s defaults',
   unresolved: 'not found',
 };
+
+const IMPLICIT_TITLE = 'Not in the configuration: Junos adds application junos-defaults (or any) to a unified policy that names a dynamic application and no application.';
+
+/** Split "book:name" (an address inactive_skipped entry) at the first colon. */
+function skippedRef(ref) {
+  const s = String(ref);
+  const i = s.indexOf(':');
+  return i < 0 ? { book: null, name: s } : { book: s.slice(0, i), name: s.slice(i + 1) };
+}
 
 function bookLabel(book) {
   if (!book) return null;
@@ -539,6 +764,23 @@ class PoliciesView {
     if (this.mqWide && this.mqWide.addEventListener) this.mqWide.addEventListener('change', this.onWide);
     this.readRoute(ctx.route, true);
     this.load(false);
+  }
+
+  // ---- device text -----------------------------------------------------------------------------
+
+  /** A name (one line) as nodes, hidden characters shown as badges. */
+  v(s) {
+    return this.ctx.dom.vis(s, { all: true });
+  }
+
+  /** A description or comment as nodes (line breaks kept). */
+  vd(s) {
+    return this.ctx.dom.vis(s);
+  }
+
+  /** The label of the scope this snapshot is for ("Logical system LS-A"). */
+  scopeLabel() {
+    return scopeTitle(this.snap, (this.snap && this.snap.meta && this.snap.meta.scope) || this.ctx.store.scope);
   }
 
   // ---- lifecycle -------------------------------------------------------------------------------
@@ -618,16 +860,20 @@ class PoliciesView {
       // ticker) opens it, with its evaluation order, when the name is used in one place only.
       this.wantName = !sel && !parsed.error ? this.singleName(parsed.ast) : null;
     }
-    if (sel !== this.sel) {
-      if (sel) {
-        this.wantSel = sel;
-        this.tryOpenWanted();
-      } else if (this.panelKind === 'policy') {
-        this.sel = null;
-        this.ctx.ui.closePanel();
-      }
-    } else if (this.wantName) {
+    if (sel !== this.sel && sel) {
+      this.wantSel = sel;
       this.tryOpenWanted();
+      return;
+    }
+    // A link that names one policy opens it, even while another one is open (POL-UI-10). The open
+    // panel is closed only when no single policy is wanted, or the wanted one is not here.
+    if (!sel && this.wantName) {
+      const opened = this.tryOpenWanted();
+      if (opened !== false) return;
+    }
+    if (!sel && this.sel && this.panelKind === 'policy') {
+      this.sel = null;
+      this.ctx.ui.closePanel();
     }
   }
 
@@ -795,14 +1041,14 @@ class PoliciesView {
     const { icon } = this.ctx.dom;
     const out = [];
     const snap = this.snap;
-    const err = this.ctx.store.inventoryError;
+    const err = inventoryErrorFor(this.ctx);
     if (snap && err) {
       out.push(
         h(
           'div',
           { class: 'pv-notice deny', role: 'status' },
           icon('alert'),
-          h('span', null, h('b', null, 'The last read failed. '), `${err.message} This page still shows the read from ${this.fmt.time(snap.meta && snap.meta.read_at)} UTC.`),
+          h('span', null, h('b', null, 'The last read failed. '), this.vd(`${err.message} This page still shows the read from ${this.fmt.time(snap.meta && snap.meta.read_at)} UTC.`)),
         ),
       );
     }
@@ -812,12 +1058,39 @@ class PoliciesView {
           'div',
           { class: 'pv-notice reject', role: 'note' },
           icon('alert'),
-          h('span', null, h('b', null, `${scopeTitle(snap, snap.meta.scope)} is deactivated in the configuration. `), 'Nothing in this scope is in effect; the policies below are what the configuration holds, not what the device enforces.'),
+          h('span', null, h('b', null, this.v(`${scopeTitle(snap, snap.meta.scope)} is deactivated in the configuration. `)), 'Nothing in this scope is in effect; the policies below are what the configuration holds, not what the device enforces.'),
+        ),
+      );
+    }
+    // [edit security policies] or [edit security] deactivated (POL-UI-01): every policy of the scope is
+    // out of effect. A deactivated scope already has its banner above.
+    const why = this.ancestorReason();
+    if (why && why !== 'scope') {
+      out.push(
+        h(
+          'div',
+          { class: 'pv-notice reject', role: 'note' },
+          icon('alert'),
+          h('span', null, h('b', null, ancestorSentence(why, this.scopeLabel())), ' ', h('span', { class: 'faint' }, 'What Junos then enforces is J-Wicket’s reading (inferred).')),
         ),
       );
     }
     this.ctx.dom.put(this.noticeEl, ...out);
     this.noticeEl.hidden = !out.length;
+  }
+
+  /**
+   * The deactivated ancestor of every policy of the scope: `policies.ancestor_inactive` (B-9), or the
+   * reason every row shares when that is an ancestor reason. Null otherwise.
+   */
+  ancestorReason() {
+    const pol = this.snap && this.snap.scope && this.snap.scope.policies;
+    if (!pol || pol.status !== 'ok') return null;
+    if (pol.ancestor_inactive) return pol.ancestor_inactive;
+    const rows = pol.rows || [];
+    if (!rows.length) return null;
+    const first = rows[0].inactive_reason;
+    return ANCESTOR_REASONS.includes(first) && rows.every((r) => r.inactive_reason === first) ? first : null;
   }
 
   // ---- render ----------------------------------------------------------------------------------
@@ -844,6 +1117,13 @@ class PoliciesView {
       this.ctx.dom.put(this.stateEl, h('div', { class: 'pv-statewrap' }, h('p', { class: 'pv-state-what' }, 'The security policies of this scope are not shown.'), state));
       this.stateEl.hidden = false;
       if (this.panelKind) this.ctx.ui.closePanel();
+      // Nothing can be opened: drop a policy the address asks for (as tryOpenWanted does).
+      this.wantName = null;
+      if (this.wantSel || this.sel) {
+        this.wantSel = null;
+        this.sel = null;
+        this.saveRoute(false);
+      }
       return;
     }
     this.stateEl.hidden = true;
@@ -868,26 +1148,32 @@ class PoliciesView {
     this.tryOpenWanted();
   }
 
+  /**
+   * Opens the policy a link asked for (`sel`, or a single `name:` term). Returns true when one opened,
+   * false when nothing could be opened, and undefined while the inventory is not loaded yet.
+   */
   tryOpenWanted() {
-    if (!this.model) return;
+    if (!this.model) return undefined;
     if (!this.wantSel && this.wantName) {
       const idxs = this.model.byName.get(this.wantName) || [];
       this.wantName = null;
       if (idxs.length === 1) this.wantSel = this.model.rows[idxs[0]].id;
     }
-    if (!this.wantSel) return;
+    if (!this.wantSel) return false;
     const want = this.wantSel;
     this.wantSel = null;
     const idx = this.model.idById.get(want);
     if (idx === undefined) {
       this.sel = null;
       this.saveRoute(false);
+      if (this.panelKind === 'policy') this.ctx.ui.closePanel();
       this.ctx.ui.toast('That policy is not in this scope of the configuration.', 'warn');
-      return;
+      return false;
     }
     this.openDetail(idx, { push: false });
     const tr = this.trs[idx];
     if (tr && !tr.hidden) tr.scrollIntoView({ block: 'nearest' });
+    return true;
   }
 
   // ---- top: evaluation order, facts, matrix ----------------------------------------------------
@@ -907,7 +1193,7 @@ class PoliciesView {
     const fmt = this.fmt;
     const m = this.model;
     const c = m.counts;
-    const dp = m.pol.default_policy;
+    const ds = defaultState(m.pol, this.scopeLabel());
     const arrow = () => h('span', { class: 'pv-ss-arrow', 'aria-hidden': 'true' }, ARROW);
     const step = (n, value, label, target, cls, tip) =>
       h(
@@ -924,7 +1210,7 @@ class PoliciesView {
       arrow(),
       step(2, fmt.num(c.global), 'global', 'global', '', c.global ? 'Checked next, in order, for each zone pair they apply to' : 'No global policies are configured'),
       arrow(),
-      step(3, dp || 'deny-all', '', 'default', dp === 'permit-all' ? 'permit' : 'deny', dp ? `The default policy decides when nothing above matched (configured${m.pol.default_policy_group ? `, from group ${m.pol.default_policy_group}` : ''})` : 'No default-policy configured: the Junos default, deny-all, decides when nothing above matched'),
+      step(3, ds.action, ds.badge ? ds.badge : '', 'default', ds.cls, `${plain(ds.label)}. ${ds.tip}`),
     );
     const total = Math.max(1, m.rows.length);
     const seg = (cls, v) => (v ? h('i', { class: cls, style: { '--w': `${(v / total) * 100}%` } }) : null);
@@ -955,8 +1241,8 @@ class PoliciesView {
           groups.slice(0, 3).map((g) =>
             h(
               'button',
-              { class: 'pv-chipbtn gold', type: 'button', title: `Show the policies with parts from configuration group ${g.name} (${g.policies})`, on: { click: () => this.toggleTerm('group', g.name) } },
-              h('span', { class: 'mono' }, g.name),
+              { class: 'pv-chipbtn gold', type: 'button', title: `Show the policies with parts from configuration group ${plain(g.name, { all: true })} (${g.policies})`, on: { click: () => this.toggleTerm('group', g.name) } },
+              h('span', { class: 'mono' }, this.v(g.name)),
               h('span', { class: 'pv-chipcount' }, fmt.num(g.policies)),
             ),
           ),
@@ -987,21 +1273,13 @@ class PoliciesView {
           h('span', { class: 'pv-step-s' }, sub),
         ),
       );
-    const dp = pol.default_policy;
+    const ds = defaultState(pol, this.scopeLabel());
     const flow = h(
       'ol',
       { class: 'pv-flow', 'aria-label': 'Junos evaluation order' },
       step(1, 'Zone-pair policies', fmt.num(c.zone), `in ${fmt.plural(m.pairs.size, 'zone pair')}, top to bottom`, '', 'pairs', 'Checked first: the policies of the flow’s from-zone to to-zone pair, in configuration order'),
       step(2, 'Global policies', fmt.num(c.global), c.global ? 'for each pair they apply to' : 'none configured', '', 'global', 'Checked next, in order, when no zone-pair policy matched'),
-      step(
-        3,
-        'Default policy',
-        dp || 'deny-all',
-        dp ? (pol.default_policy_group ? `from group ${pol.default_policy_group}` : 'configured') : 'not configured: Junos default',
-        `${dp === 'permit-all' ? 'permit' : 'deny'} is-word`,
-        'default',
-        'Used when no policy above matched',
-      ),
+      step(3, 'Default policy', ds.action, this.v(ds.label), `${ds.cls} is-word`, 'default', `Used when no policy above matched. ${ds.tip}`),
     );
     const explain = h(
       'p',
@@ -1015,14 +1293,20 @@ class PoliciesView {
       'dl',
       { class: 'pv-facts' },
       h('div', { class: 'pv-fact' }, h('dt', null, 'Live sessions'), this.liveFact),
-      h(
-        'div',
-        { class: 'pv-fact' },
-        h('dt', null, 'Policy rematch'),
-        h('dd', null, pol.policy_rematch ? h('span', { title: 'Existing sessions are re-checked when policies change' }, 'on: re-checked on change') : h('span', { class: 'muted' }, 'off (not configured)')),
-      ),
-      pol.pre_id_default_policy
-        ? h('div', { class: 'pv-fact' }, h('dt', null, 'Pre-ID default policy'), h('dd', null, 'configured', h('span', { class: 'faint' }, ' (contents not shown)')))
+      h('div', { class: 'pv-fact' }, h('dt', null, 'Policy rematch'), h('dd', null, this.rematchFact(pol))),
+      pol.pre_id_default_policy || pol.pre_id_default_policy_inactive
+        ? h(
+            'div',
+            { class: 'pv-fact' },
+            h('dt', null, 'Pre-ID default policy'),
+            h(
+              'dd',
+              { title: pol.pre_id_default_policy_comment ? `Comment: ${plain(pol.pre_id_default_policy_comment)}` : null },
+              pol.pre_id_default_policy
+                ? ['configured', h('span', { class: 'faint' }, ' (contents not shown)')]
+                : h('span', { class: 'pv-amber' }, 'configured but deactivated (not in effect)'),
+            ),
+          )
         : null,
       h(
         'div',
@@ -1035,8 +1319,8 @@ class PoliciesView {
             ? m.scope.groups.map((g) =>
                 h(
                   'button',
-                  { class: 'pv-chipbtn gold', type: 'button', title: `Show the policies with parts from group ${g.name}`, on: { click: () => this.toggleTerm('group', g.name) } },
-                  h('span', { class: 'mono' }, g.name),
+                  { class: 'pv-chipbtn gold', type: 'button', title: `Show the policies with parts from group ${plain(g.name, { all: true })}`, on: { click: () => this.toggleTerm('group', g.name) } },
+                  h('span', { class: 'mono' }, this.v(g.name)),
                   h('span', { class: 'pv-chipcount' }, fmt.num(g.policies)),
                 ),
               )
@@ -1047,7 +1331,7 @@ class PoliciesView {
     const evalCard = h(
       'section',
       { class: 'tile pv-eval', 'aria-label': 'Evaluation order and facts' },
-      h('div', { class: 'tile-head' }, h('h2', { class: 'tile-title' }, icon('policies'), 'Evaluation order'), h('span', { class: 'tile-meta' }, scopeTitle(this.snap, this.ctx.store.scope))),
+      h('div', { class: 'tile-head' }, h('h2', { class: 'tile-title' }, icon('policies'), 'Evaluation order'), h('span', { class: 'tile-meta' }, this.v(scopeTitle(this.snap, this.ctx.store.scope)))),
       h('div', { class: 'tile-body pv-eval-body' }, flow, explain, facts),
     );
     this.mxCard = h(
@@ -1059,6 +1343,26 @@ class PoliciesView {
     put(this.cardsEl, evalCard);
     put(this.sideEl);
     this.placeMatrix();
+  }
+
+  /**
+   * policy-rematch in three states (POL-UI-03, POL-UI-12). The meaning of the "off" state is the
+   * contract's wording; the tooltip of "on" cites the YANG text only (J-Wicket shows the setting, not
+   * its effect on a given session).
+   */
+  rematchFact(pol) {
+    const { h } = this;
+    const note = pol.policy_rematch_comment ? ` Comment: ${plain(pol.policy_rematch_comment)}` : '';
+    if (pol.policy_rematch && pol.policy_rematch_extensive) {
+      return h('span', { title: `policy-rematch extensive is configured (YANG: "Perform policy extensive rematch").${note}` }, 'on, extensive: a session may stay up if another policy permits it');
+    }
+    if (pol.policy_rematch) {
+      return h('span', { title: `policy-rematch is configured (YANG: "enable policy-rematch"). Juniper Feature Explorer, feature 5004, describes what it re-checks; J-Wicket shows the setting.${note}` }, 'on: changed policies are re-checked');
+    }
+    if (pol.policy_rematch_inactive) {
+      return h('span', { class: 'pv-amber', title: `policy-rematch is written in the configuration but deactivated (inactive:).${note}` }, 'off: configured but deactivated (not in effect)');
+    }
+    return h('span', { class: 'muted' }, 'off (not configured): sessions of a renamed, deactivated or deleted policy are closed');
   }
 
   /** Central management and warnings as two chips beside the quick filters; each opens a short panel. */
@@ -1081,7 +1385,7 @@ class PoliciesView {
       chips.push(chip('managed', 'is-unknown', [icon('broadcast'), h('span', null, 'central management not known')], 'Whether another system manages this device could not be read'));
     } else if (mg.managed) {
       const names = (mg.clients || []).map((c) => c.client);
-      chips.push(chip('managed', 'is-gold', [icon('broadcast'), h('span', null, 'managed from '), h('b', { class: 'mono' }, names.slice(0, 2).join(', ')), names.length > 2 ? h('span', null, ` +${names.length - 2}`) : null], 'Another system also manages this device (outbound-ssh). Select for details.'));
+      chips.push(chip('managed', 'is-gold', [icon('broadcast'), h('span', null, 'managed from '), h('b', { class: 'mono' }, this.v(names.slice(0, 2).join(', '))), names.length > 2 ? h('span', null, ` +${names.length - 2}`) : null], 'Another system also manages this device (outbound-ssh). Select for details.'));
     }
     if (warnings.length) {
       chips.push(chip('warnings', 'is-amber', [icon('alert'), h('b', null, String(warnings.length)), h('span', null, warnings.length === 1 ? ' warning' : ' warnings')], 'What J-Wicket could not show, or what is not in effect. Select to read them.'));
@@ -1126,8 +1430,8 @@ class PoliciesView {
         'span',
         null,
         h('b', null, 'Also managed from '),
-        (mg.clients || []).map((c, i) => [i ? ', ' : null, h('b', { class: 'mono' }, c.client), (c.targets || []).length ? h('span', { class: 'mono faint' }, ` ${c.targets.join(', ')}`) : null]),
-        services.length ? h('span', { class: 'faint' }, ` (${services.join(', ')})`) : null,
+        (mg.clients || []).map((c, i) => [i ? ', ' : null, h('b', { class: 'mono' }, this.v(c.client)), (c.targets || []).length ? h('span', { class: 'mono faint' }, ' ', this.v(c.targets.join(', '))) : null]),
+        services.length ? h('span', { class: 'faint' }, ' (', this.v(services.join(', ')), ')') : null,
         h('span', { class: 'muted' }, '. Changes made there may overwrite these policies, and what you see can change without J-Wicket knowing.'),
       ),
     );
@@ -1147,10 +1451,10 @@ class PoliciesView {
           'li',
           null,
           icon('alert'),
-          h('span', null, 'Policy ', h('button', { class: 'policy-link', type: 'button', title: `Open policy ${mm[1]}`, on: { click: () => this.openDetail(idxs[0]) } }, mm[1]), ` ${mm[2]}`),
+          h('span', { class: 'dev-text' }, 'Policy ', h('button', { class: 'policy-link', type: 'button', title: `Open policy ${plain(mm[1])}`, on: { click: () => this.openDetail(idxs[0]) } }, this.v(mm[1])), ' ', this.vd(mm[2])),
         );
       }
-      return h('li', null, icon(/^Fixture/.test(w) ? 'info' : 'alert'), h('span', null, w));
+      return h('li', null, icon(/^Fixture/.test(w) ? 'info' : 'alert'), h('span', { class: 'dev-text' }, this.vd(w)));
     };
     return h(
       'div',
@@ -1172,7 +1476,7 @@ class PoliciesView {
     const grid = h('div', { class: 'pv-mx', role: 'grid', 'aria-label': 'Policies per zone pair. Rows: from-zone; columns: to-zone.', style: { '--pv-cols': String(zones.length) } });
     const label = (z, axis) => {
       const unknown = m.zonesKnown && !m.defined.has(z);
-      return h('span', { class: ['pv-mx-z', unknown && 'undefined'], title: `${axis} ${z}${unknown ? ' (not defined as a zone in this scope)' : ''}` }, z, unknown ? '*' : null);
+      return h('span', { class: ['pv-mx-z', unknown && 'undefined'], title: `${axis} ${plain(z)}${unknown ? ' (not defined as a zone in this scope)' : ''}` }, this.v(z), unknown ? '*' : null);
     };
     grid.append(h('div', { class: 'pv-mx-row', role: 'row' }, h('span', { class: 'pv-mx-corner', role: 'columnheader', 'aria-label': 'from-zone, to-zone' }), zones.map((z) => h('span', { class: 'pv-mx-col', role: 'columnheader' }, label(z, 'to')))));
     zones.forEach((from, r) => {
@@ -1204,14 +1508,16 @@ class PoliciesView {
             bar.append(seg);
           }
           btn.append(h('b', { class: 'pv-mx-n' }, String(st.count)), h('span', { class: 'pv-mx-mix' }, parts), liveEl, bar);
-          btn.title = `${from} \u2192 ${to}: ${fmt.plural(st.count, 'policy')} (${st.permit} permit, ${st.deny} deny, ${st.reject} reject, ${st.inactive} inactive)${pairInactive ? '; the zone pair is deactivated' : ''}. Select to filter.`;
+          const notes = [st.comment, st.trailing_comment].filter(Boolean).map((t) => plain(t)).join(' | ');
+          btn.title = `${plain(from)} \u2192 ${plain(to)}: ${fmt.plural(st.count, 'policy')} (${st.permit} permit, ${st.deny} deny, ${st.reject} reject, ${st.inactive} inactive)${pairInactive ? '; the zone pair is deactivated' : ''}. Select to filter.${notes ? ` Comment: ${notes}` : ''}`;
+          if (notes) btn.classList.add('has-comment');
         } else {
           btn.append(
             h('span', { class: 'pv-mx-dot', 'aria-hidden': 'true' }, '\u2014'),
             h('span', { class: 'pv-mx-g' }, globalsHere ? `${globalsHere} global` : 'default'),
             liveEl,
           );
-          btn.title = `${from} \u2192 ${to}: no zone-pair policy, so Junos checks ${globalsHere ? fmt.plural(globalsHere, 'global policy', 'global policies') : 'the global policies (none apply)'} and then the default policy. Select to filter.`;
+          btn.title = `${plain(from)} \u2192 ${plain(to)}: no zone-pair policy, so Junos checks ${globalsHere ? fmt.plural(globalsHere, 'global policy', 'global policies') : 'the global policies (none apply)'} and then the default policy. Select to filter.`;
         }
         btn.setAttribute('aria-label', btn.title);
         btn.addEventListener('click', () => this.togglePair(from, to));
@@ -1237,12 +1543,12 @@ class PoliciesView {
       this.mxLegendLive,
     );
     const notes = [];
-    if (undefinedZones.length) notes.push(`* Named in a policy but not defined as a zone in this scope: ${undefinedZones.join(', ')}.`);
-    if (!m.zonesKnown) notes.push('Zones could not be read; the zones shown are the ones named in policies.');
+    if (undefinedZones.length) notes.push([' * Named in a policy but not defined as a zone in this scope: ', this.v(undefinedZones.join(', ')), '.']);
+    if (!m.zonesKnown) notes.push(' Zones could not be read; the zones shown are the ones named in policies.');
     return [
       h('div', { class: 'pv-mx-scroll' }, grid),
       legend,
-      h('p', { class: 'pv-mx-note' }, 'Counts include inactive policies. A dashed square has no zone-pair policy: Junos checks the global policies that apply (shown), then the default policy. Select a square to filter the table.', notes.length ? ` ${notes.join(' ')}` : ''),
+      h('p', { class: 'pv-mx-note' }, 'Counts include inactive policies. A dashed square has no zone-pair policy: Junos checks the global policies that apply (shown), then the default policy. Select a square to filter the table.', notes),
     ];
   }
 
@@ -1303,10 +1609,11 @@ class PoliciesView {
         ),
       ),
     );
-    const defaultText = pol.default_policy || 'deny-all';
+    const ds = defaultState(pol, this.scopeLabel());
     for (const pair of m.pairs.values()) {
       const applying = m.globals.filter((i) => globalApplies(m.rows[i], pair.from, pair.to) && !m.rows[i].inactive).length;
       const countEl = h('span', { class: 'pv-sec-count' });
+      const st = m.stats.get(pair.key) || {};
       const head = h(
         'tr',
         { class: 'pv-sec', dataset: { sec: 'pair' } },
@@ -1317,6 +1624,7 @@ class PoliciesView {
             'div',
             { class: 'pv-sec-in' },
             h('span', { class: 'pv-sec-pair' }, this.zoneChip(pair.from, 'from'), h('span', { class: 'arrow' }, ARROW), this.zoneChip(pair.to, 'to')),
+            this.commentIcon([st.comment, st.trailing_comment], `the zone pair ${plain(pair.from)} → ${plain(pair.to)}`),
             h('span', { class: 'pv-sec-sub' }, 'checked in this order', SEP, countEl),
             pair.inactive ? h('span', { class: 'pill reject' }, 'zone pair deactivated') : null,
             h('span', { class: 'spacer' }),
@@ -1325,14 +1633,14 @@ class PoliciesView {
               {
                 class: 'pv-sec-then',
                 type: 'button',
-                title: `If no policy above matches a ${pair.from} \u2192 ${pair.to} flow: ${applying ? fmt.plural(applying, 'global policy', 'global policies') : 'no global policy applies'}, then the default policy. Show the full order.`,
+                title: `If no policy above matches a ${plain(pair.from)} → ${plain(pair.to)} flow: ${applying ? fmt.plural(applying, 'global policy', 'global policies') : 'no global policy applies'}, then the default policy (${ds.action}: ${plain(ds.label)}). Show the full order.`,
                 dataset: { from: pair.from, to: pair.to },
               },
               'no match ',
               h('span', { class: 'arrow' }, ARROW),
               applying ? ` ${applying} global ` : ' ',
               applying ? h('span', { class: 'arrow' }, ARROW) : null,
-              h('span', { class: defaultText === 'permit-all' ? 'act-permit' : 'act-deny' }, ` ${defaultText}`),
+              h('span', { class: ds.cls === 'permit' ? 'act-permit' : 'act-deny' }, ` ${ds.action}`),
               icon('chevron-right'),
             ),
           ),
@@ -1343,6 +1651,7 @@ class PoliciesView {
     if (m.globals.length) {
       const countEl = h('span', { class: 'pv-sec-count' });
       const allOff = m.globals.every((i) => m.rows[i].inactive_reason === 'zone-pair');
+      const globalComment = (m.globals.map((i) => m.rows[i].pair_comment).find(Boolean)) || null;
       const head = h(
         'tr',
         { class: 'pv-sec pv-sec-global', dataset: { sec: 'global' } },
@@ -1353,10 +1662,11 @@ class PoliciesView {
             'div',
             { class: 'pv-sec-in' },
             h('span', { class: 'pv-sec-pair' }, h('span', { class: 'pv-sec-name' }, 'Global policies')),
+            this.commentIcon([globalComment, pol.global_trailing_comment], 'the global section'),
             h('span', { class: 'pv-sec-sub' }, 'checked after the zone-pair policies of each pair they apply to', SEP, countEl),
             allOff ? h('span', { class: 'pill reject' }, 'global section deactivated') : null,
             h('span', { class: 'spacer' }),
-            h('span', { class: 'pv-sec-then static' }, 'no match ', h('span', { class: 'arrow' }, ARROW), h('span', { class: defaultText === 'permit-all' ? 'act-permit' : 'act-deny' }, ` ${defaultText}`)),
+            h('span', { class: 'pv-sec-then static', title: `Then the default policy: ${ds.action} (${plain(ds.label)})` }, 'no match ', h('span', { class: 'arrow' }, ARROW), h('span', { class: ds.cls === 'permit' ? 'act-permit' : 'act-deny' }, ` ${ds.action}`)),
           ),
         ),
       );
@@ -1366,6 +1676,17 @@ class PoliciesView {
     table.append(this.noMatch, this.defaultBody(cols.length));
     this.table = table;
     this.ctx.dom.put(this.tableHost, h('div', { class: 'pv-tablecard' }, table));
+  }
+
+  /**
+   * A comment icon for a section header (POL-UI-05): its tooltip holds the configuration comments
+   * (annotate) on the zone pair or global section, and the one after its last policy. Null when none.
+   */
+  commentIcon(texts, where) {
+    const list = (texts || []).filter(Boolean);
+    if (!list.length) return null;
+    const tip = `Configuration comment on ${where} (annotate; not a setting): ${list.map((t) => plain(t)).join(' | ')}`;
+    return this.h('span', { class: 'pv-sec-comment', title: tip, role: 'img', 'aria-label': tip }, this.ctx.dom.icon(COMMENT_ICON, { size: 13 }));
   }
 
   addSection(table, head, idxs, countEl, info) {
@@ -1382,8 +1703,7 @@ class PoliciesView {
   defaultBody(span) {
     const { h } = this;
     const pol = this.model.pol;
-    const configured = Boolean(pol.default_policy);
-    const action = pol.default_policy || 'deny-all';
+    const ds = defaultState(pol, this.scopeLabel());
     return h(
       'tbody',
       { class: 'pv-group pv-default', dataset: { kind: 'default' } },
@@ -1396,11 +1716,16 @@ class PoliciesView {
         'tr',
         { class: 'pv-row is-default', title: 'Show how Junos reaches the default policy' },
         h('td', { class: 'c-seq' }),
-        h('th', { scope: 'row', class: 'c-name' }, h('button', { class: 'pv-name', type: 'button', dataset: { explain: 'default' } }, 'default-policy')),
+        h(
+          'th',
+          { scope: 'row', class: 'c-name' },
+          h('button', { class: 'pv-name', type: 'button', dataset: { explain: 'default' } }, 'default-policy'),
+          pol.default_policy_comment ? h('div', { class: 'pv-comment', title: plain(pol.default_policy_comment) }, this.vd(pol.default_policy_comment)) : null,
+        ),
         h('td', { class: 'c-src', dataset: { label: 'Source' } }, h('span', { class: 'muted mono' }, 'any')),
         h('td', { class: 'c-dst', dataset: { label: 'Destination' } }, h('span', { class: 'muted mono' }, 'any')),
         h('td', { class: 'c-app', dataset: { label: 'Application' } }, h('span', { class: 'muted mono' }, 'any')),
-        h('td', { class: 'c-act' }, h('span', { class: ['pill', action === 'permit-all' ? 'permit' : 'deny'] }, action)),
+        h('td', { class: 'c-act' }, h('span', { class: ['pill', ds.cls] }, ds.action)),
         h('td', { class: 'c-live' }),
         h(
           'td',
@@ -1408,8 +1733,9 @@ class PoliciesView {
           h(
             'div',
             { class: 'pv-badges' },
-            configured ? null : h('span', { class: 'pv-badge', title: 'No default-policy is configured, so the Junos default applies: deny-all' }, 'not configured (Junos default)'),
-            pol.default_policy_group ? h('span', { class: 'pv-badge b-group' }, `group ${pol.default_policy_group}`) : null,
+            h('span', { class: ['pv-badge', ds.badge ? 'b-warn' : null], title: ds.badge ? ds.tip : `${plain(ds.label)}. ${ds.tip}` }, ds.badge ? ds.badge : this.v(ds.label)),
+            ds.badge ? h('span', { class: 'pv-badge', title: ds.tip }, this.v(ds.label)) : null,
+            ds.group ? h('span', { class: 'pv-badge b-group', title: `Comes from configuration group ${plain(ds.group)}` }, 'group ', this.v(ds.group)) : null,
           ),
         ),
       ),
@@ -1418,7 +1744,7 @@ class PoliciesView {
 
   zoneChip(z, axis) {
     const unknown = this.model && this.model.zonesKnown && z && !this.model.defined.has(z);
-    return this.h('span', { class: ['zone', unknown && 'pv-zone-undef'], title: unknown ? `${z}: not defined as a zone in this scope` : `${axis}-zone ${z}` }, z || '?');
+    return this.h('span', { class: ['zone', unknown && 'pv-zone-undef'], title: unknown ? `${plain(z)}: not defined as a zone in this scope` : `${axis}-zone ${plain(z)}` }, z ? this.v(z) : '?');
   }
 
   zoneList(list, axis) {
@@ -1427,10 +1753,23 @@ class PoliciesView {
     return zs.map((z) => this.zoneChip(z, axis));
   }
 
+  /** Whether the row's name, description or comments hold a hidden (control or format) character. */
+  hiddenIn(r) {
+    const out = [];
+    const add = (s, all) => {
+      for (const p of controlParts(String(s || ''), { all })) if (p.ctl && !out.includes(p.ctl)) out.push(p.ctl);
+    };
+    add(r.name, true);
+    add(r.description, false);
+    add(r.comment, false);
+    for (const c of r.part_comments || []) add(c.text, false);
+    return out;
+  }
+
   policyRow(idx) {
     const { h } = this;
     const r = this.model.rows[idx];
-    const nameBtn = h('button', { class: 'pv-name', type: 'button', 'aria-haspopup': 'dialog', title: `Open ${r.name}` }, h('span', { class: 'pv-hl', dataset: { text: r.name } }, r.name));
+    const nameBtn = h('button', { class: 'pv-name', type: 'button', 'aria-haspopup': 'dialog', title: `Open ${plain(r.name, { all: true })}` }, h('span', { class: 'pv-hl', dataset: { text: r.name } }, this.v(r.name)));
     const liveCell = h('td', { class: 'c-live', dataset: { label: 'Live' } });
     this.liveCells[idx] = liveCell;
     const qmark = h('span', { class: 'pv-qmark', hidden: true, dataset: { mark: '' } });
@@ -1444,7 +1783,8 @@ class PoliciesView {
         { scope: 'row', class: 'c-name' },
         nameBtn,
         r.kind === 'global' ? h('div', { class: 'pv-gzones' }, this.zoneList(r.from, 'from'), h('span', { class: 'arrow' }, ARROW), this.zoneList(r.to, 'to')) : null,
-        r.description ? h('div', { class: 'pv-desc', title: r.description }, r.description) : null,
+        r.comment ? h('div', { class: 'pv-comment pv-hl', title: plain(r.comment), dataset: { text: r.comment, all: '0' } }, this.vd(r.comment)) : null,
+        r.description ? h('div', { class: 'pv-desc pv-hl', title: plain(r.description), dataset: { text: r.description, all: '0' } }, this.vd(r.description)) : null,
       ),
       h('td', { class: 'c-src', dataset: { label: 'Source' } }, this.addrList(r, 'source')),
       h('td', { class: 'c-dst', dataset: { label: 'Destination' } }, this.addrList(r, 'destination')),
@@ -1463,9 +1803,21 @@ class PoliciesView {
   valueToken(key, value, extra) {
     return this.h(
       'span',
-      { class: ['pv-v', 'pv-hl', extra], dataset: { k: key, v: value, text: value }, title: `Filter by ${key}:${value} (Alt-click to exclude)` },
-      value,
+      { class: ['pv-v', 'pv-hl', extra], dataset: { k: key, v: value, text: value }, title: `Filter by ${key}:${plain(value, { all: true })} (Alt-click to exclude)` },
+      this.v(value),
     );
+  }
+
+  /** The amber "deactivated" tag of a reference whose entry (or a member) is written but inactive. */
+  skippedTag(res, what) {
+    const skipped = res.inactive_skipped || [];
+    if (!skipped.length) return null;
+    const names = what === 'address' ? skipped.map((x) => skippedRef(x).name) : skipped;
+    const title =
+      res.kind === 'unresolved'
+        ? `Deactivated: ${plain(res.name)} is written in the configuration but inactive, so this policy cannot use it (not in effect).`
+        : `Members deactivated (not in effect): ${plain(names.join(', '))}`;
+    return this.h('span', { class: 'pv-tag amber', title }, 'deactivated');
   }
 
   addrList(r, side) {
@@ -1480,10 +1832,20 @@ class PoliciesView {
       const res = resolved.find((x) => x.name === name) || {};
       const leaves = res.leaves || [];
       let hint = null;
-      if (res.kind === 'set') hint = h('span', { class: 'pv-tag', title: `Address set: ${leaves.length}${res.truncated ? '+' : ''} addresses` }, `set\u2009${leaves.length}${res.truncated ? '+' : ''}`);
-      else if (res.kind === 'address' && leaves.length === 1 && leaves[0].value && leaves[0].value !== name) hint = h('span', { class: 'pv-hint', title: `${leaves[0].kind || 'address'} ${leaves[0].value}` }, leaves[0].value);
-      const bad = res.kind === 'unresolved' || (res.unresolved || []).length;
-      ul.append(h('li', null, this.valueToken(key, name, name === 'any' && 'is-any'), hint, bad ? h('span', { class: 'pv-tag bad', title: 'No address book visible to this policy defines it' }, 'not found') : null));
+      if (res.kind === 'set') hint = h('span', { class: 'pv-tag', title: `Address set: ${leaves.length}${res.truncated ? '+' : ''} addresses` }, `set ${leaves.length}${res.truncated ? '+' : ''}`);
+      else if (res.kind === 'address' && leaves.length === 1 && leaves[0].value && leaves[0].value !== name) hint = h('span', { class: 'pv-hint', title: `${leaves[0].kind || 'address'} ${plain(leaves[0].value)}` }, this.v(leaves[0].value));
+      // "not found" only for a real miss; a deactivated entry or member gets the amber tag (POL-UI-08).
+      const missing = (res.kind === 'unresolved' && !(res.inactive_skipped || []).length) || (res.unresolved || []).length;
+      ul.append(
+        h(
+          'li',
+          null,
+          this.valueToken(key, name, name === 'any' && 'is-any'),
+          hint,
+          this.skippedTag(res, 'address'),
+          missing ? h('span', { class: 'pv-tag bad', title: 'No address book visible to this policy defines it' }, 'not found') : null,
+        ),
+      );
     });
     if (names.length > LIST_LIMIT) ul.append(h('li', { class: 'pv-more' }, `+${names.length - LIST_LIMIT} more`));
     return ul;
@@ -1491,27 +1853,42 @@ class PoliciesView {
 
   appList(r) {
     const { h } = this;
-    const names = (r.match && r.match.application) || [];
+    const mm = r.match || {};
+    const names = mm.application || [];
     const resolved = (r.resolved && r.resolved.application) || [];
     const ul = h('ul', { class: 'pv-names' });
     names.slice(0, LIST_LIMIT).forEach((name) => {
       const res = resolved.find((x) => x.name === name) || {};
       const leaves = res.leaves || [];
       let hint = null;
-      if (res.kind === 'set') hint = h('span', { class: 'pv-tag', title: `Application set: ${leaves.length} applications` }, `set\u2009${leaves.length}`);
+      if (res.kind === 'set') hint = h('span', { class: 'pv-tag', title: `Application set: ${leaves.length} applications` }, `set ${leaves.length}`);
       else if (res.kind === 'application' && leaves[0] && leaves[0].protocol) {
-        hint = h('span', { class: 'pv-hint' }, `${leaves[0].protocol}${leaves[0].destination_port ? `/${leaves[0].destination_port}` : ''}`);
+        hint = h('span', { class: 'pv-hint' }, this.v(`${leaves[0].protocol}${leaves[0].destination_port ? `/${leaves[0].destination_port}` : ''}`));
       } else if (res.kind === 'application' && leaves[0] && leaves[0].terms) hint = h('span', { class: 'pv-hint' }, `${leaves[0].terms} terms`);
       else if (res.kind === 'predefined' && this.Q && this.Q.PREDEFINED_APPS && this.Q.PREDEFINED_APPS[name]) {
         const k = this.Q.PREDEFINED_APPS[name];
         hint = h('span', { class: 'pv-hint', title: 'junos-defaults, as J-Wicket knows it' }, `${k.protocol}/${k.port}`);
+      } else if (res.kind === 'dynamic-defaults') {
+        hint = h('span', { class: 'pv-hint', title: 'Each dynamic application’s own default ports and protocols' }, 'dynamic app defaults');
       }
-      const bad = res.kind === 'unresolved' || (res.unresolved || []).length;
-      ul.append(h('li', null, this.valueToken('app', name, name === 'any' && 'is-any'), hint, bad ? h('span', { class: 'pv-tag bad', title: 'No application or application set with this name is defined' }, 'not found') : null));
+      const missing = (res.kind === 'unresolved' && !(res.inactive_skipped || []).length) || (res.unresolved || []).length;
+      const unmodeled = leaves.some((l) => (l.unmodeled || []).length);
+      ul.append(
+        h(
+          'li',
+          null,
+          this.valueToken('app', name, name === 'any' && 'is-any'),
+          mm.application_implicit ? h('span', { class: 'pv-tag sky', title: IMPLICIT_TITLE }, 'implicit') : null,
+          hint,
+          this.skippedTag(res, 'application'),
+          missing ? h('span', { class: 'pv-tag bad', title: 'No application or application set with this name is defined' }, 'not found') : null,
+          unmodeled ? h('span', { class: 'pv-tag amber', title: 'J-Wicket does not display these application settings yet.' }, 'settings not shown') : null,
+        ),
+      );
     });
     if (names.length > LIST_LIMIT) ul.append(h('li', { class: 'pv-more' }, `+${names.length - LIST_LIMIT} more`));
-    const dyn = (r.match && r.match.dynamic_application) || [];
-    if (dyn.length) ul.append(h('li', null, h('span', { class: 'pv-tag sky' }, 'dynamic'), h('span', { class: 'pv-hint' }, dyn.join(', '))));
+    const dyn = mm.dynamic_application || [];
+    if (dyn.length) ul.append(h('li', null, h('span', { class: 'pv-tag sky' }, 'dynamic'), h('span', { class: 'pv-hint' }, this.v(dyn.join(', ')))));
     return ul;
   }
 
@@ -1521,10 +1898,14 @@ class PoliciesView {
     const out = [];
     const b = (text, cls, title) => h('span', { class: ['pv-badge', cls], title: title || text }, text);
     // Settings that are neither a signal nor provenance: one neutral chip style, told apart by icon.
-    const nb = (iconName, text, title) => h('span', { class: 'pv-badge b-note', title: title || text }, icon(iconName, { size: 11 }), h('span', null, text));
-    if (r.inactive) out.push(b(inactiveText(r), 'b-inactive', inactiveSentence(r)));
-    if (r.group) out.push(b(`group ${r.group}`, 'b-group', `Comes from configuration group ${r.group}`));
-    if ((r.inherited || []).length) out.push(b(`inherits ${r.inherited.join(', ')}`, 'b-inherit', `Partly inherited from another group: ${r.inherited.join(', ')}`));
+    const nb = (iconName, text, title) => h('span', { class: 'pv-badge b-note', title: plain(title || text) }, icon(iconName, { size: 11 }), h('span', null, this.v(text)));
+    if (r.inactive) out.push(b(inactiveText(r, this.scopeLabel()), 'b-inactive', plain(inactiveSentence(r, this.scopeLabel()))));
+    if (r.group) out.push(h('span', { class: 'pv-badge b-group', title: `Comes from configuration group ${plain(r.group)}` }, 'group ', this.v(r.group)));
+    if ((r.inherited || []).length) out.push(h('span', { class: 'pv-badge b-inherit', title: `Partly inherited from another group: ${plain(r.inherited.join(', '))}` }, 'inherits ', this.v(r.inherited.join(', '))));
+    const comments = [r.comment, ...(r.part_comments || []).map((c) => c.text)].filter(Boolean);
+    if (comments.length) out.push(nb(COMMENT_ICON, 'comment', comments.join('\n')));
+    const hidden = this.hiddenIn(r);
+    if (hidden.length) out.push(b('hidden characters', 'b-warn', `The name, description or comment holds hidden characters, shown as badges: ${hidden.join(', ')}`));
     const log = [r.log && r.log.init ? 'init' : null, r.log && r.log.close ? 'close' : null].filter(Boolean);
     if (log.length) out.push(nb('logs', `log ${log.join('+')}`, `Logs session-${log.join(' and session-')}`));
     if (r.count) out.push(nb('rows', 'count', 'Counts traffic (then count)'));
@@ -1535,8 +1916,8 @@ class PoliciesView {
     if ((mm.source_identity || []).length) out.push(nb('user', 'source identity', `source-identity ${mm.source_identity.join(', ')}`));
     if ((mm.url_category || []).length) out.push(nb('globe', 'URL category', `url-category ${mm.url_category.join(', ')}`));
     if ((mm.source_end_user_profile || []).length) out.push(nb('user', 'end-user profile', `source-end-user-profile ${mm.source_end_user_profile.join(', ')}`));
-    if ((r.inactive_parts || []).length && !r.inactive) out.push(b('parts deactivated', 'b-warn', `Deactivated, not in effect: ${r.inactive_parts.join(', ')}`));
-    if ((r.unmodeled || []).length) out.push(b('settings not shown', 'b-warn', `J-Wicket does not display: ${r.unmodeled.join(', ')}`));
+    if ((r.inactive_parts || []).length && !r.inactive) out.push(b('parts deactivated', 'b-warn', `Deactivated, not in effect: ${plain(r.inactive_parts.join(', '))}`));
+    if ((r.unmodeled || []).length) out.push(b('settings not shown', 'b-warn', `J-Wicket does not display: ${plain(r.unmodeled.join(', '))}`));
     return out;
   }
 
@@ -1689,7 +2070,7 @@ class PoliciesView {
           status: 'empty',
           title: 'No policy matches this query',
           message: this.text,
-          hint: 'Policies match on names and on what their address books resolve to (addr:, src:, dst: are CIDR-aware). The default policy below still applies.',
+          hint: 'Free text searches names, descriptions, comments, zones, groups and addresses; addr:, src:, dst: are CIDR-aware. The default policy below still applies.',
           actions: [this.h('button', { class: 'btn sm', type: 'button', on: { click: () => this.setQuery('') } }, 'Clear the query')],
         }),
       );
@@ -1728,7 +2109,7 @@ class PoliciesView {
     const reasons = this.unknownReasons(this.model.rows[idx]);
     const what = new Set(reasons.map((r) => r.what));
     el.textContent = what.size === 1 && what.has('address') ? 'address ?' : what.size === 1 && what.has('port') ? 'port ?' : 'not known';
-    el.title = `Kept: J-Wicket cannot tell whether this policy matches. ${reasons.map((r) => `${r.name}: ${r.why}`).join('; ') || 'Part of the match is not readable.'}`;
+    el.title = `Kept: J-Wicket cannot tell whether this policy matches. ${plain(reasons.map((r) => `${r.name}: ${r.why}`).join('; ')) || 'Part of the match is not readable.'}`;
   }
 
   /** One sentence under the query bar when rows matched through application any or are unknown. */
@@ -1739,7 +2120,7 @@ class PoliciesView {
     if (viaAny.length) parts.push(`${fmt.plural(viaAny.length, 'policy matches', 'policies match')} through application any (every port), marked “any port”.`);
     if (unknown.length) {
       const names = [...new Set(unknown.flatMap((i) => this.unknownReasons(this.model.rows[i]).map((r) => r.name)))];
-      parts.push(`${fmt.plural(unknown.length, 'policy is', 'policies are')} kept but not certain: J-Wicket cannot read ${names.slice(0, 4).join(', ')}${names.length > 4 ? ', …' : ''} (marked “?”). The device decides: use “Explain a flow”.`);
+      parts.push(`${fmt.plural(unknown.length, 'policy is', 'policies are')} kept but not certain: J-Wicket cannot read ${plain(names.slice(0, 4).join(', '), { all: true })}${names.length > 4 ? ', …' : ''} (marked “?”). The device decides: use “Explain a flow”.`);
     }
     this.bar.setNotice(parts.join(' '), unknown.length ? 'warn' : 'info');
   }
@@ -1754,7 +2135,7 @@ class PoliciesView {
       this.hlKeys[idx] = key;
       const tr = this.trs[idx];
       if (!tr) continue;
-      for (const el of tr.querySelectorAll('.pv-hl')) this.ctx.dom.put(el, ...markNodes(this.h, el.dataset.text, this.terms));
+      for (const el of tr.querySelectorAll('.pv-hl')) this.ctx.dom.put(el, ...markNodes(this.h, el.dataset.text, this.terms, { all: el.dataset.all !== '0' }));
     }
   }
 
@@ -1780,10 +2161,10 @@ class PoliciesView {
   }
 
   togglePair(from, to) {
-    const cur = this.termValue('from') === from && this.termValue('to') === to;
+    const cur = this.termValue('from') === starControls(from) && this.termValue('to') === starControls(to);
     const next = editQuery(this.Q, this.text, {
       drop: (it) => this.isKey(it, 'from') || this.isKey(it, 'to') || this.isKey(it, 'zone'),
-      add: cur ? [] : [`from:${qv(from)}`, `to:${qv(to)}`],
+      add: cur ? [] : [`from:${qvDevice(from)}`, `to:${qvDevice(to)}`],
     });
     // Measured before the table changes, so this does not force a layout of the filtered table.
     const far = !cur && this.tableHost.getBoundingClientRect().top > window.innerHeight * 0.7;
@@ -1792,23 +2173,25 @@ class PoliciesView {
   }
 
   toggleTerm(key, value) {
-    const term = `${key}:${qv(value)}`;
-    const has = topItems(this.ast).some((it) => this.isKey(it, key) && it.op !== '!=' && it.values.length === 1 && it.values[0].text === String(value));
-    this.setQuery(editQuery(this.Q, this.text, { drop: (it) => this.isKey(it, key) && it.values.length === 1 && it.values[0].text === String(value), add: has ? [] : [term] }));
+    const term = `${key}:${qvDevice(value)}`;
+    const want = starControls(value);
+    const has = topItems(this.ast).some((it) => this.isKey(it, key) && it.op !== '!=' && it.values.length === 1 && it.values[0].text === want);
+    this.setQuery(editQuery(this.Q, this.text, { drop: (it) => this.isKey(it, key) && it.values.length === 1 && it.values[0].text === want, add: has ? [] : [term] }));
   }
 
   addFilter(key, value, exclude) {
-    const sameValue = (it) => it.values.length === 1 && it.values[0].text.toLowerCase() === String(value).toLowerCase();
+    const want = starControls(value).toLowerCase();
+    const sameValue = (it) => it.values.length === 1 && it.values[0].text.toLowerCase() === want;
     const drop = (it) => (this.isKey(it, key) && sameValue(it)) || (it.type === 'not' && this.isKey(it.item, key) && sameValue(it.item));
     const present = topItems(this.ast).some((it) => (exclude ? it.type === 'not' && this.isKey(it.item, key) && sameValue(it.item) : this.isKey(it, key) && it.op !== '!=' && sameValue(it)));
-    this.setQuery(editQuery(this.Q, this.text, { drop, add: present ? [] : [`${exclude ? '-' : ''}${key}:${qv(value)}`] }));
-    this.ctx.ui.announce(present ? `Removed ${key} ${value}` : `${exclude ? 'Excluding' : 'Filtering by'} ${key} ${value}`);
+    this.setQuery(editQuery(this.Q, this.text, { drop, add: present ? [] : [`${exclude ? '-' : ''}${key}:${qvDevice(value)}`] }));
+    this.ctx.ui.announce(present ? `Removed ${key} ${plain(value, { all: true })}` : `${exclude ? 'Excluding' : 'Filtering by'} ${key} ${plain(value, { all: true })}`);
   }
 
   renderPressed() {
     const from = this.termValue('from');
     const to = this.termValue('to');
-    for (const row of this.mxCells) for (const cell of row) cell.el.setAttribute('aria-pressed', cell.from === from && cell.to === to ? 'true' : 'false');
+    for (const row of this.mxCells) for (const cell of row) cell.el.setAttribute('aria-pressed', starControls(cell.from) === from && starControls(cell.to) === to ? 'true' : 'false');
     const zoneFilter = Boolean(from || to || this.termValue('zone'));
     this.noteEl.hidden = !(zoneFilter && this.model && this.model.globals.length);
   }
@@ -1936,9 +2319,14 @@ class PoliciesView {
       } else if (!live) {
         put(this.liveStrip, h('button', { class: 'link pv-inline-link', type: 'button', title: 'Read the session table once (one device read) to count live sessions per policy', on: { click: () => this.readSessionsOnce() } }, icon('sessions'), 'count live'));
       } else if (!ok) {
-        put(this.liveStrip, h('span', { class: 'muted', title: live.message || '' }, `live: ${live.status}`));
+        put(this.liveStrip, h('span', { class: 'muted', title: plain(live.message || '') }, `live: ${live.status}`));
       } else {
-        put(this.liveStrip, h('b', { class: 'num pv-ss-livenum', title: `${fmt.plural(live.total, 'live session')} in the Sessions poll at ${fmt.time(live.at)} UTC${live.truncated ? ' (partial list)' : ''}` }, fmt.num(live.total)), h('span', { class: 'pv-ss-l' }, ' live'), live.truncated ? h('span', { class: 'pill reject pv-ss-pill' }, 'partial') : null);
+        put(
+          this.liveStrip,
+          h('b', { class: 'num pv-ss-livenum', title: `${fmt.plural(live.total, 'live session')} in the Sessions poll at ${fmt.time(live.at)} UTC${live.truncated ? ' (partial list)' : ''}${live.backups ? '; backup copies not counted' : ''}` }, fmt.num(live.total)),
+          h('span', { class: 'pv-ss-l' }, ' live'),
+          live.truncated ? h('span', { class: 'pill reject pv-ss-pill' }, 'partial') : null,
+        );
       }
     }
     // summary fact
@@ -1952,16 +2340,22 @@ class PoliciesView {
           h('button', { class: 'link pv-inline-link', type: 'button', title: 'Read the session table once (one device read)', on: { click: () => this.readSessionsOnce() } }, icon('sessions'), 'Count now'),
         );
       } else if (!ok) {
-        this.ctx.dom.put(this.liveFact, h('span', { class: 'pill muted' }, live.status), ' ', h('span', { class: 'muted' }, live.status === 'refused' ? 'too many sessions to list; counts per policy are not available' : live.message || 'the session table could not be read'));
+        this.ctx.dom.put(this.liveFact, h('span', { class: 'pill muted' }, live.status), ' ', h('span', { class: 'muted' }, live.status === 'refused' ? 'too many sessions to list; counts per policy are not available' : this.vd(live.message || 'the session table could not be read')));
       } else {
         const filters = Object.entries(live.filters || {}).map(([k, v]) => `${k}=${v}`);
         this.ctx.dom.put(
           this.liveFact,
           h('b', { class: 'num pv-live-total' }, fmt.num(live.total)),
           h('span', { class: 'muted' }, ` in the poll at ${fmt.time(live.at)} UTC`),
-          filters.length ? h('span', { class: 'pill sky', title: 'The Sessions view asked the device for these sessions only' }, `device filter ${filters.join(' ')}`) : null,
+          filters.length ? h('span', { class: 'pill sky', title: 'The Sessions view asked the device for these sessions only' }, 'device filter ', this.v(filters.join(' '))) : null,
           live.truncated ? h('span', { class: 'pill reject', title: `The device returned more sessions (${live.returned}) than were listed` }, 'partial') : null,
-          live.backups ? h('span', { class: 'faint', title: 'Chassis cluster: backup copies of sessions are not counted' }, ` \u00b7 ${fmt.plural(live.backups, 'backup copy', 'backup copies')} not counted`) : null,
+          live.backups
+            ? h(
+                'span',
+                { class: 'faint', title: `Chassis cluster: ${fmt.plural(live.backups, 'backup copy', 'backup copies')} of sessions left out (${live.why.join('; ')})` },
+                ' \u00b7 backup copies not counted',
+              )
+            : null,
         );
       }
     }
@@ -1978,19 +2372,25 @@ class PoliciesView {
       this.ctx.ui.noteFixture(res.data.meta);
       this.ctx.store.setSessionsLast(res.data);
     } else if (res.status === 429) {
-      this.ctx.ui.toast(`The device was read moments ago. Try again in ${res.retryAfter || 2} s.`, 'warn');
+      const n = res.retryAfter || 2;
+      this.ctx.ui.toast(
+        res.reason === 'busy'
+          ? `Another read on your session is still running. Try again in ${n} s.`
+          : `Sessions were read moments ago for your session (perhaps in another tab). Try again in ${n} s.`,
+        'warn',
+      );
     } else if (res.status !== 401) {
-      this.ctx.ui.toast((res.data && res.data.error) || `The session table could not be read (HTTP ${res.status}).`, 'error');
+      this.ctx.ui.toast(plain((res.data && res.data.error) || `The session table could not be read (HTTP ${res.status}).`), 'error');
     }
   }
 
   goSessions(name) {
-    this.ctx.navigate('sessions', { q: `policy:${qv(name)}` });
+    this.ctx.navigate('sessions', { q: `policy:${qvDevice(name)}` });
   }
 
   goLogs(name) {
     const sp = scopeParts(this.ctx.store.scope);
-    const q = `policy:${qv(name)}${sp.kind === 'lsys' ? ` lsys:${qv(sp.name)}` : ''}`;
+    const q = `policy:${qvDevice(name)}${sp.kind === 'lsys' ? ` lsys:${qvDevice(sp.name)}` : ''}`;
     this.ctx.navigate('logs', { q });
   }
 
@@ -2148,28 +2548,33 @@ class PoliciesView {
     const siblings = isGlobal ? m.globals : pair ? pair.idxs : [];
     const pos = siblings.indexOf(idx) + 1;
     this.panelLive = h('p', { class: 'pv-hero-live' });
+    const cli = showConfigCli(row, scopeId);
+    const hidden = this.hiddenIn(row);
 
     const hero = h(
       'div',
       { class: 'pv-hero' },
-      h('p', { class: 'pv-eyebrow' }, `${isGlobal ? 'Global policy' : 'Zone-pair policy'}${SEP}${scopeTitle(this.snap, scopeId)}`),
+      h('p', { class: 'pv-eyebrow' }, `${isGlobal ? 'Global policy' : 'Zone-pair policy'}${SEP}`, this.v(scopeTitle(this.snap, scopeId))),
       h(
         'div',
         { class: 'pv-where' },
         h('span', { class: 'pv-where-zones' }, this.zoneLinks(row.from, 'from'), h('span', { class: 'arrow' }, ARROW), this.zoneLinks(row.to, 'to')),
         h('span', { class: 'pv-where-pos' }, isGlobal ? `global policy ${pos} of ${siblings.length}` : `policy ${pos} of ${siblings.length} in this zone pair`),
         this.actionPill(row.action),
-        row.inactive ? h('span', { class: 'pv-badge b-inactive' }, inactiveText(row)) : null,
-        row.group ? h('span', { class: 'pv-badge b-group' }, `group ${row.group}`) : null,
+        row.inactive ? h('span', { class: 'pv-badge b-inactive', title: plain(inactiveSentence(row, this.scopeLabel())) }, inactiveText(row, this.scopeLabel())) : null,
+        row.group ? h('span', { class: 'pv-badge b-group' }, 'group ', this.v(row.group)) : null,
+        hidden.length ? h('span', { class: 'pv-badge b-warn', title: `Hidden characters, shown as badges: ${hidden.join(', ')}` }, 'hidden characters') : null,
       ),
-      row.description ? h('p', { class: 'pv-desc-full' }, row.description) : null,
+      row.description ? h('p', { class: 'pv-desc-full' }, this.vd(row.description)) : null,
       this.panelLive,
       h(
         'div',
         { class: 'pv-hero-actions' },
-        h('button', { class: 'btn sm', type: 'button', title: `Sessions with policy:${row.name}`, on: { click: () => this.goSessions(row.name) } }, icon('sessions'), 'Sessions for this policy'),
-        h('button', { class: 'btn sm', type: 'button', title: `Logs with policy:${row.name}`, on: { click: () => this.goLogs(row.name) } }, icon('logs'), 'Logs for this policy'),
-        h('button', { class: 'btn sm ghost', type: 'button', title: 'Copy the show configuration command', on: { click: () => this.ctx.ui.copy(showConfigCli(row, scopeId), 'Command copied. Paste it into the device CLI.') } }, icon('terminal'), 'Copy CLI'),
+        h('button', { class: 'btn sm', type: 'button', title: `Sessions with policy:${plain(row.name, { all: true })}`, on: { click: () => this.goSessions(row.name) } }, icon('sessions'), 'Sessions for this policy'),
+        h('button', { class: 'btn sm', type: 'button', title: `Logs with policy:${plain(row.name, { all: true })}`, on: { click: () => this.goLogs(row.name) } }, icon('logs'), 'Logs for this policy'),
+        cli !== null
+          ? h('button', { class: 'btn sm ghost', type: 'button', title: 'Copy the show configuration command', on: { click: () => this.copyCli(cli) } }, icon('terminal'), 'Copy CLI')
+          : null,
       ),
     );
     this.renderPanelLive(idx);
@@ -2179,17 +2584,30 @@ class PoliciesView {
       hero,
       this.ruleCard(row),
       this.matchSection(row),
+      this.commentsSection(row),
       this.resolvedAddrSection(row, 'source', 'Source addresses, resolved'),
       this.resolvedAddrSection(row, 'destination', 'Destination addresses, resolved'),
-      this.resolvedAppSection(row),
+      this.resolvedAppSection(row, scopeId),
       this.thenSection(row),
       this.provenanceSection(row),
       this.unmodeledSection(row, scopeId),
       this.section('See it on the device', [
-        cliBlock(this.ctx, showConfigCli(row, scopeId)),
+        cliBlock(this.ctx, cli, 'Copy command', showConfigNames(row, scopeId)),
         h('p', { class: 'pv-small faint' }, 'The configuration as committed, with this policy’s exact path. Add | display inheritance to see what comes from groups.'),
       ]),
       this.evaluationSection(row, idx, scopeId),
+    );
+  }
+
+  /** Copies a command; the toast says how many hidden characters it holds, copied exactly. */
+  copyCli(text) {
+    const hidden = hiddenChars(text);
+    const n = countControls(text);
+    this.ctx.ui.copy(
+      text,
+      hidden.length
+        ? `Command copied. The command contains ${n} hidden ${n === 1 ? 'character' : 'characters'} (shown as ${hidden.join(', ')}).`
+        : 'Command copied. Paste it into the device CLI.',
     );
   }
 
@@ -2205,8 +2623,8 @@ class PoliciesView {
     return zs.map((z) =>
       h(
         'button',
-        { class: 'zone pv-zone-link', type: 'button', title: `Zone ${z} in Objects`, on: { click: () => this.ctx.navigate('objects', { tab: 'zones', q: `name:${qv(z)}`, sel: `zone|${z}` }) } },
-        z,
+        { class: 'zone pv-zone-link', type: 'button', title: `Zone ${plain(z, { all: true })} in Objects`, on: { click: () => this.ctx.navigate('objects', { tab: 'zones', q: `name:${qvDevice(z)}`, sel: `zone|${z}` }) } },
+        this.v(z),
       ),
     );
   }
@@ -2222,8 +2640,9 @@ class PoliciesView {
       const items = names.slice(0, 6).map((n) => {
         const r = resolved.find((x) => x.name === n) || {};
         const leaves = r.leaves || [];
-        const value = r.kind === 'address' && leaves.length === 1 ? leaves[0].value : r.kind === 'set' ? `set of ${leaves.length}${r.truncated ? '+' : ''}` : r.kind === 'unresolved' ? 'not found' : null;
-        return h('li', null, h('span', { class: ['mono', n === 'any' && 'muted'] }, n), value && value !== n ? h('span', { class: ['pv-rule-v', r.kind === 'unresolved' && 'bad'] }, value) : null);
+        const off = r.kind === 'unresolved' && (r.inactive_skipped || []).length;
+        const value = r.kind === 'address' && leaves.length === 1 ? leaves[0].value : r.kind === 'set' ? `set of ${leaves.length}${r.truncated ? '+' : ''}` : off ? 'deactivated' : r.kind === 'unresolved' ? 'not found' : null;
+        return h('li', null, h('span', { class: ['mono', n === 'any' && 'muted'] }, this.v(n)), value && value !== n ? h('span', { class: ['pv-rule-v', r.kind === 'unresolved' && (off ? 'amber' : 'bad')] }, this.v(value)) : null);
       });
       if (names.length > 6) items.push(h('li', { class: 'faint' }, `+${names.length - 6} more`));
       return h(
@@ -2241,16 +2660,23 @@ class PoliciesView {
     if (row.count) extras.push('count');
     if (row.tunnel) extras.push(`tunnel ${row.tunnel}`);
     if ((row.application_services || []).length) extras.push(row.application_services.join(', '));
+    const label = `${(mm.source || []).join(', ') || 'any'} to ${(mm.destination || []).join(', ') || 'any'}, application ${(mm.application || []).join(', ') || 'any'}: ${row.action}`;
     return h(
       'div',
-      { class: ['pv-rule', `is-${action}`, row.inactive && 'is-inactive'], role: 'img', 'aria-label': `${(mm.source || []).join(', ') || 'any'} to ${(mm.destination || []).join(', ') || 'any'}, application ${(mm.application || []).join(', ') || 'any'}: ${row.action}` },
+      { class: ['pv-rule', `is-${action}`, row.inactive && 'is-inactive'], role: 'img', 'aria-label': plain(label, { all: true }) },
       end('source', 'Source', row.from, 'from'),
       h(
         'div',
         { class: 'pv-rule-mid' },
-        h('div', { class: 'pv-rule-apps' }, apps.map((a) => h('span', { class: 'mono' }, a)), (mm.application || []).length > 4 ? h('span', { class: 'faint' }, `+${mm.application.length - 4}`) : null),
+        h(
+          'div',
+          { class: 'pv-rule-apps' },
+          apps.map((a) => h('span', { class: 'mono' }, this.v(a))),
+          mm.application_implicit ? h('span', { class: 'pv-tag sky', title: IMPLICIT_TITLE }, 'implicit') : null,
+          (mm.application || []).length > 4 ? h('span', { class: 'faint' }, `+${mm.application.length - 4}`) : null,
+        ),
         h('div', { class: 'pv-rule-line', 'aria-hidden': 'true' }, h('span', { class: 'pv-rule-actwrap' }, h('span', { class: ['pill', action === 'unknown' ? 'muted' : action, 'pv-rule-act'] }, row.action))),
-        h('div', { class: 'pv-rule-extra' }, extras.join(SEP)),
+        h('div', { class: 'pv-rule-extra' }, this.v(extras.join(SEP))),
       ),
       end('destination', 'Destination', row.to, 'to'),
     );
@@ -2268,18 +2694,21 @@ class PoliciesView {
 
   joinOrNone(list, none) {
     const { h } = this;
-    return list && list.length ? h('span', { class: 'mono' }, list.join(', ')) : h('span', { class: 'muted' }, none || 'none');
+    return list && list.length ? h('span', { class: 'mono' }, this.v(list.join(', '))) : h('span', { class: 'muted' }, none || 'none');
   }
 
   matchSection(row) {
     const { h } = this;
     const mm = row.match || {};
-    const side = (names, excluded) => (excluded ? h('span', null, h('span', { class: 'pv-tag bad' }, 'all except'), ' ', h('span', { class: 'mono' }, names.join(', '))) : this.joinOrNone(names, 'any'));
+    const side = (names, excluded) => (excluded ? h('span', null, h('span', { class: 'pv-tag bad' }, 'all except'), ' ', h('span', { class: 'mono' }, this.v(names.join(', ')))) : this.joinOrNone(names, 'any'));
+    const apps = mm.application_implicit
+      ? h('span', { title: IMPLICIT_TITLE }, h('span', { class: 'mono' }, this.v((mm.application || []).join(', '))), ' (implicit)')
+      : this.joinOrNone(mm.application, 'any');
     return this.section('Match', [
       this.kv([
         ['Source', side(mm.source || [], mm.source_excluded)],
         ['Destination', side(mm.destination || [], mm.destination_excluded)],
-        ['Application', this.joinOrNone(mm.application, 'any')],
+        ['Application', apps],
         ['Source identity', (mm.source_identity || []).length ? this.joinOrNone(mm.source_identity) : null],
         ['Dynamic application', (mm.dynamic_application || []).length ? this.joinOrNone(mm.dynamic_application) : null],
         ['URL category', (mm.url_category || []).length ? this.joinOrNone(mm.url_category) : null],
@@ -2291,8 +2720,47 @@ class PoliciesView {
     ]);
   }
 
+  /**
+   * Configuration comments (annotate) on this policy, inside it, and on its zone pair or the global
+   * section (POL-UI-05): shown verbatim, delimiters included, line breaks kept.
+   */
+  commentsSection(row) {
+    const { h } = this;
+    const items = [];
+    const item = (label, text) => items.push(h('li', null, h('span', { class: 'pv-cmt-where' }, label), h('span', { class: 'pv-cmt-text' }, this.vd(text))));
+    if (row.comment) item('On this policy: ', row.comment);
+    for (const c of row.part_comments || []) {
+      if (!c || !c.text) continue;
+      if (c.before) item(['Inside it, before ', h('span', { class: 'mono' }, this.v(c.before)), ': '], c.text);
+      else item('Inside it, at the end: ', c.text);
+    }
+    if (row.pair_comment) {
+      if (row.kind === 'global') item('On the global section: ', row.pair_comment);
+      else item(['On the zone pair ', this.v(zonesOf(row.from)[0] || '?'), ` ${ARROW} `, this.v(zonesOf(row.to)[0] || '?'), ': '], row.pair_comment);
+    }
+    if (!items.length) return null;
+    return this.section('Configuration comments', [h('ul', { class: 'pv-cmts' }, items), h('p', { class: 'pv-small muted' }, 'Written with annotate; not a setting.')]);
+  }
+
   objLink(name, tab, sel, title) {
-    return this.h('button', { class: 'pv-objlink', type: 'button', title, on: { click: () => this.ctx.navigate('objects', { tab, q: `name:${qv(name)}`, sel }) } }, name);
+    return this.h('button', { class: 'pv-objlink', type: 'button', title: plain(title, { all: true }), on: { click: () => this.ctx.navigate('objects', { tab, q: `name:${qvDevice(name)}`, sel }) } }, this.v(name));
+  }
+
+  /** "Deactivated: h3 in address book global is written but inactive …" lines, linked to Objects. */
+  skippedAddrLines(item) {
+    const { h } = this;
+    return (item.inactive_skipped || []).map((ref) => {
+      const { book, name } = skippedRef(ref);
+      return h(
+        'p',
+        { class: 'pv-skip' },
+        'Deactivated: ',
+        book ? this.objLink(name, 'address-books', `addr|${book}|${name}`, `Open ${name} in Objects`) : this.v(name),
+        ' in address book ',
+        this.v(book || '?'),
+        ' is written but inactive, so this policy cannot use it (not in effect).',
+      );
+    });
   }
 
   resolvedAddrSection(row, side, title) {
@@ -2302,18 +2770,22 @@ class PoliciesView {
     const blocks = list.map((item) => {
       const leaves = item.leaves || [];
       const single = item.kind === 'address' && leaves.length === 1 && leaves[0].name === item.name;
+      const skipped = item.inactive_skipped || [];
+      const off = item.kind === 'unresolved' && skipped.length > 0;
       const head = [
         item.kind === 'address' || item.kind === 'set'
           ? this.objLink(item.name, 'address-books', `${item.kind === 'set' ? 'set' : 'addr'}|${item.book || ''}|${item.name}`, `Open ${item.name} in Objects`)
-          : h('span', { class: 'pv-res-name' }, item.name),
-        h('span', { class: ['pv-tag', item.kind === 'unresolved' && 'bad'] }, ADDRESS_KINDS[item.kind] || item.kind),
-        single ? h('span', { class: 'pv-res-val' }, h('span', { class: 'faint' }, `${leaves[0].kind || 'address'} `), h('span', { class: 'mono ip' }, leaves[0].value || '')) : null,
-        item.book ? h('span', { class: 'pv-res-book' }, `from ${bookLabel(item.book)}`) : null,
+          : h('span', { class: 'pv-res-name' }, this.v(item.name)),
+        h('span', { class: ['pv-tag', off ? 'amber' : item.kind === 'unresolved' && 'bad'] }, off ? 'deactivated' : ADDRESS_KINDS[item.kind] || item.kind),
+        single ? h('span', { class: 'pv-res-val' }, h('span', { class: 'faint' }, `${leaves[0].kind || 'address'} `), h('span', { class: 'mono ip' }, this.v(leaves[0].value || ''))) : null,
+        item.book ? h('span', { class: 'pv-res-book' }, 'from ', this.v(bookLabel(item.book))) : null,
       ];
       const body = [];
       if (item.kind === 'any') body.push(h('p', { class: 'pv-small muted' }, 'Matches every address.'));
-      if (item.kind === 'unresolved') {
-        body.push(h('p', { class: 'pv-unres' }, `Not found: no address book visible ${row.kind === 'global' || !zonesOf(zones).length ? 'to this policy' : `from zone ${zonesOf(zones)[0]}`} defines ${item.name}.`));
+      if (off) {
+        body.push(...this.skippedAddrLines(item));
+      } else if (item.kind === 'unresolved') {
+        body.push(h('p', { class: 'pv-unres' }, `Not found: no address book visible ${row.kind === 'global' || !zonesOf(zones).length ? 'to this policy' : 'from zone '}`, row.kind === 'global' || !zonesOf(zones).length ? null : this.v(zonesOf(zones)[0]), ' defines ', this.v(item.name), '.'));
       }
       if (leaves.length && !single) {
         body.push(
@@ -2321,25 +2793,46 @@ class PoliciesView {
             'table',
             { class: 'table pv-mini' },
             h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Address'), h('th', { scope: 'col' }, 'Kind'), h('th', { scope: 'col' }, 'Value'))),
-            h('tbody', null, leaves.map((l) => h('tr', null, h('td', { class: 'mono' }, l.name), h('td', { class: 'muted' }, l.kind || ''), h('td', { class: 'mono ip' }, l.value || '')))),
+            h('tbody', null, leaves.map((l) => h('tr', null, h('td', { class: 'mono' }, this.v(l.name)), h('td', { class: 'muted' }, l.kind || ''), h('td', { class: 'mono ip' }, this.v(l.value || ''))))),
           ),
         );
       }
       if (item.truncated) body.push(h('p', { class: 'pv-small muted' }, `The list stops at ${leaves.length} addresses; the set is larger.`));
+      if (!off && skipped.length) {
+        body.push(
+          h(
+            'p',
+            { class: 'pv-skip' },
+            'Members deactivated (not in effect): ',
+            skipped.map((ref, i) => {
+              const { book, name } = skippedRef(ref);
+              return [i ? ', ' : null, book ? this.objLink(name, 'address-books', `addr|${book}|${name}`, `Open ${name} in Objects`) : this.v(name)];
+            }),
+          ),
+        );
+      }
       const unres = (item.unresolved || []).filter((n) => n !== item.name || item.kind !== 'unresolved');
-      if (unres.length) body.push(h('p', { class: 'pv-unres' }, `Members not found: ${unres.join(', ')}`));
-      return h('div', { class: ['pv-res', item.kind === 'unresolved' && 'is-bad'] }, h('div', { class: 'pv-res-head' }, head), body);
+      if (unres.length) body.push(h('p', { class: 'pv-unres' }, 'Members not found: ', this.v(unres.join(', '))));
+      return h('div', { class: ['pv-res', item.kind === 'unresolved' && (off ? 'is-off' : 'is-bad')] }, h('div', { class: 'pv-res-head' }, head), body);
     });
     return this.section(title, blocks.length ? blocks : h('p', { class: 'pv-small muted' }, 'No addresses in the match.'));
   }
 
-  resolvedAppSection(row) {
+  resolvedAppSection(row, scopeId) {
     const { h } = this;
     const list = (row.resolved && row.resolved.application) || [];
+    const prefix = cliPrefix(scopeId);
+    const appLink = (name) => this.objLink(name, 'applications', `app|${name}`, `Open ${name} in Objects`);
     const blocks = list.map((item) => {
       const body = [];
+      const skipped = item.inactive_skipped || [];
+      const off = item.kind === 'unresolved' && skipped.length > 0;
       if (item.kind === 'any') body.push(h('p', { class: 'pv-small muted' }, 'Matches every application.'));
-      if (item.kind === 'unresolved') body.push(h('p', { class: 'pv-unres' }, `Not found: no application or application set named ${item.name} is defined.`));
+      if (off) {
+        for (const n of skipped) body.push(h('p', { class: 'pv-skip' }, 'Deactivated: application ', appLink(n), ' is inactive (not in effect).'));
+      } else if (item.kind === 'unresolved') {
+        body.push(h('p', { class: 'pv-unres' }, 'Not found: no application or application set named ', this.v(item.name), ' is defined.'));
+      }
       if (item.kind === 'predefined') body.push(this.predefinedLine(item.name));
       if (item.kind === 'dynamic-defaults') body.push(h('p', { class: 'pv-small muted' }, 'Unified policy: each dynamic application’s own default ports and protocols. The port filter keeps this policy and marks it “port ?”.'));
       const leaves = item.leaves || [];
@@ -2358,25 +2851,42 @@ class PoliciesView {
                   : h(
                       'tr',
                       null,
-                      h('td', { class: 'mono' }, l.name),
-                      h('td', { class: 'mono' }, l.protocol || (l.terms ? `${l.terms} terms (not expanded)` : '\u2014')),
-                      h('td', { class: 'mono' }, l.destination_port || '\u2014'),
-                      h('td', { class: 'mono' }, l.source_port || '\u2014'),
+                      h(
+                        'td',
+                        { class: 'mono' },
+                        this.v(l.name),
+                        (l.unmodeled || []).length
+                          ? [' ', h('span', { class: 'pv-tag amber', title: 'J-Wicket does not display these application settings yet.' }, 'settings not shown: ', this.v(l.unmodeled.join(', ')))]
+                          : null,
+                      ),
+                      h('td', { class: 'mono' }, l.protocol ? this.v(l.protocol) : l.terms ? `${l.terms} terms (not expanded)` : '—'),
+                      h('td', { class: 'mono' }, l.destination_port ? this.v(l.destination_port) : '—'),
+                      h('td', { class: 'mono' }, l.source_port ? this.v(l.source_port) : '—'),
                     ),
               ),
             ),
           ),
         );
+        // CRT-06: where an application has settings J-Wicket does not display (an ALG, a timeout), the
+        // command to read them on the device. J-Wicket does not interpret what they do.
+        for (const l of leaves.filter((x) => !x.predefined && (x.unmodeled || []).length)) {
+          body.push(cliBlock(this.ctx, cliJoin('show configuration', prefix === null ? null : `${prefix}applications application`, cliWord(l.name)), 'Copy command', cliNames(scopeId, l.name)));
+        }
       }
+      if (!off && skipped.length) body.push(h('p', { class: 'pv-skip' }, 'Members deactivated (not in effect): ', skipped.map((n, i) => [i ? ', ' : null, appLink(n)])));
       const unres = (item.unresolved || []).filter((n) => n !== item.name || item.kind !== 'unresolved');
-      if (unres.length) body.push(h('p', { class: 'pv-unres' }, `Members not found: ${unres.join(', ')}`));
-      const nameEl =
-        item.kind === 'application' || item.kind === 'set'
-          ? this.objLink(item.name, 'applications', `app|${item.name}`, `Open ${item.name} in Objects`)
-          : h('span', { class: 'pv-res-name' }, item.name);
-      return h('div', { class: ['pv-res', item.kind === 'unresolved' && 'is-bad'] }, h('div', { class: 'pv-res-head' }, nameEl, h('span', { class: ['pv-tag', item.kind === 'unresolved' && 'bad'] }, APP_KINDS[item.kind] || item.kind)), body);
+      if (unres.length) body.push(h('p', { class: 'pv-unres' }, 'Members not found: ', this.v(unres.join(', '))));
+      const nameEl = item.kind === 'application' || item.kind === 'set' ? appLink(item.name) : h('span', { class: 'pv-res-name' }, this.v(item.name));
+      return h(
+        'div',
+        { class: ['pv-res', item.kind === 'unresolved' && (off ? 'is-off' : 'is-bad')] },
+        h('div', { class: 'pv-res-head' }, nameEl, h('span', { class: ['pv-tag', off ? 'amber' : item.kind === 'unresolved' && 'bad'] }, off ? 'deactivated' : APP_KINDS[item.kind] || item.kind)),
+        body,
+      );
     });
-    return this.section('Applications, resolved', blocks.length ? blocks : h('p', { class: 'pv-small muted' }, 'No applications in the match.'));
+    const mm = row.match || {};
+    const intro = mm.application_implicit ? h('p', { class: 'pv-small pv-implicit' }, h('span', { class: 'pv-tag sky' }, 'implicit'), ' ', IMPLICIT_TITLE) : null;
+    return this.section('Applications, resolved', [intro, blocks.length ? blocks : h('p', { class: 'pv-small muted' }, 'No applications in the match.')]);
   }
 
   /** A predefined application: its factory port when J-Wicket knows it, else say the port is not read. */
@@ -2390,7 +2900,7 @@ class PoliciesView {
       'div',
       { class: 'pv-small' },
       h('p', { class: 'muted' }, 'Port not read: J-Wicket does not expand junos-defaults, so the port filter keeps this policy and marks it “port ?”. To see the definition:'),
-      cliBlock(this.ctx, `show configuration groups junos-defaults applications application ${cliWord(name)}`),
+      cliBlock(this.ctx, cliJoin('show configuration groups junos-defaults applications application', cliWord(name)), 'Copy command', [name]),
     );
   }
 
@@ -2402,13 +2912,13 @@ class PoliciesView {
       return h(
         'tr',
         null,
-        h('td', { class: 'mono' }, name, h('span', { class: 'faint', title: 'junos-defaults, as J-Wicket knows it' }, ' predefined')),
+        h('td', { class: 'mono' }, this.v(name), h('span', { class: 'faint', title: 'junos-defaults, as J-Wicket knows it' }, ' predefined')),
         h('td', { class: 'mono' }, known.protocol),
         h('td', { class: 'mono' }, known.port),
         h('td', { class: 'faint' }, '—'),
       );
     }
-    return h('tr', null, h('td', { class: 'mono' }, name), h('td', { colspan: '3', class: 'muted' }, 'predefined (junos-defaults); port not read by J-Wicket'));
+    return h('tr', null, h('td', { class: 'mono' }, this.v(name)), h('td', { colspan: '3', class: 'muted' }, 'predefined (junos-defaults); port not read by J-Wicket'));
   }
 
   thenSection(row) {
@@ -2420,8 +2930,8 @@ class PoliciesView {
         ['Log', this.joinOrNone(log, 'no logging')],
         ['Count', row.count ? 'yes' : h('span', { class: 'muted' }, 'no')],
         ['Application services', this.joinOrNone(row.application_services, 'none')],
-        ['Tunnel', row.tunnel ? h('span', { class: 'mono' }, `ipsec-vpn ${row.tunnel}`) : h('span', { class: 'muted' }, 'none')],
-        ['Scheduler', row.scheduler ? h('span', { class: 'mono' }, row.scheduler) : h('span', { class: 'muted' }, 'none: always in effect while active')],
+        ['Tunnel', row.tunnel ? h('span', { class: 'mono' }, 'ipsec-vpn ', this.v(row.tunnel)) : h('span', { class: 'muted' }, 'none')],
+        ['Scheduler', row.scheduler ? h('span', { class: 'mono' }, this.v(row.scheduler)) : h('span', { class: 'muted' }, 'none: always in effect while active')],
       ]),
       row.action === 'unknown' ? h('p', { class: 'pv-unres' }, 'No permit, deny or reject action that J-Wicket recognises. Check the policy on the device.') : null,
     ]);
@@ -2429,26 +2939,27 @@ class PoliciesView {
 
   provenanceSection(row) {
     const { h } = this;
-    const state = inactiveSentence(row) || 'Active.';
+    // Never "Active." for a row marked inactive (POL-UI-01).
+    const state = row.inactive ? inactiveSentence(row, this.scopeLabel()) : 'Active.';
     const others = (row.groups || []).filter((g) => g !== row.group);
     const parts = row.inactive_parts || [];
     return this.section('Where it comes from', [
       this.kv([
-        ['Configured', row.group ? h('span', null, 'From configuration group ', h('b', { class: 'mono pv-gold' }, row.group)) : 'Directly in the configuration (no group).'],
-        ['Inherited parts', (row.inherited || []).length ? h('span', null, 'Partly inherited from another group: ', h('span', { class: 'mono' }, row.inherited.join(', '))) : h('span', { class: 'muted' }, 'none')],
-        ['Groups in this policy', (row.groups || []).length ? h('span', { class: 'mono' }, row.groups.join(', ')) : h('span', { class: 'muted' }, 'none')],
-        ['State', h('span', { class: row.inactive ? 'act-reject' : 'act-permit' }, state)],
+        ['Configured', row.group ? h('span', null, 'From configuration group ', h('b', { class: 'mono pv-gold' }, this.v(row.group))) : 'Directly in the configuration (no group).'],
+        ['Inherited parts', (row.inherited || []).length ? h('span', null, 'Partly inherited from another group: ', h('span', { class: 'mono' }, this.v(row.inherited.join(', ')))) : h('span', { class: 'muted' }, 'none')],
+        ['Groups in this policy', (row.groups || []).length ? h('span', { class: 'mono' }, this.v(row.groups.join(', '))) : h('span', { class: 'muted' }, 'none')],
+        ['State', h('span', { class: row.inactive ? 'act-reject' : 'act-permit' }, this.v(state))],
       ]),
       parts.length
         ? h(
             'div',
             { class: 'pv-callout reject' },
             h('p', null, h('b', null, 'Deactivated parts, not in effect. '), row.inactive ? 'The policy itself is also inactive.' : 'The policy is active, but Junos ignores these parts of it:'),
-            h('ul', { class: 'pv-bullets' }, parts.map((p) => h('li', { class: 'mono' }, p))),
+            h('ul', { class: 'pv-bullets' }, parts.map((p) => h('li', { class: 'mono' }, this.v(p)))),
             h('p', { class: 'pv-small muted' }, 'The match and action above already leave them out.'),
           )
         : null,
-      others.length && row.group ? h('p', { class: 'pv-small muted' }, `Other groups also contribute settings: ${others.join(', ')}.`) : null,
+      others.length && row.group ? h('p', { class: 'pv-small muted' }, 'Other groups also contribute settings: ', this.v(others.join(', ')), '.') : null,
       row.group || (row.groups || []).length
         ? h('p', { class: 'pv-small muted' }, 'A change made directly to an object that comes from a group may be overridden by the group, or may override it. J-Wicket shows where each part comes from so that you can decide where a change belongs.')
         : null,
@@ -2465,13 +2976,18 @@ class PoliciesView {
         'div',
         { class: 'pv-callout amber' },
         h('p', null, 'This policy has settings J-Wicket does not display yet. Check them on the device:'),
-        h('ul', { class: 'pv-bullets' }, unmodeled.map((u) => h('li', { class: 'mono' }, u))),
-        cliBlock(this.ctx, showConfigCli(row, scopeId)),
+        h('ul', { class: 'pv-bullets' }, unmodeled.map((u) => h('li', { class: 'mono' }, this.v(u)))),
+        cliBlock(this.ctx, showConfigCli(row, scopeId), 'Copy command', showConfigNames(row, scopeId)),
       ),
     );
   }
 
-  /** The evaluation order for one zone pair, as nodes. `current` marks a policy. */
+  /**
+   * The evaluation order for one zone pair, as nodes. `current` marks a policy. Rows with a dynamic
+   * application are marked "unified", and a note says that until the application is identified Junos
+   * may match a list of candidate policies (verified); listing them in configuration order is J-Wicket's
+   * reading of the order Junos considers them (inferred, POL-UI-09). The note decides no match.
+   */
   orderNodes(from, to, current) {
     const { h } = this;
     const m = this.model;
@@ -2479,6 +2995,7 @@ class PoliciesView {
     const pol = m.pol;
     const kids = [];
     let n = 1;
+    const isUnified = (r) => ((r.match && r.match.dynamic_application) || []).length > 0;
     const item = (idx) => {
       const r = m.rows[idx];
       const here = idx === current;
@@ -2486,11 +3003,12 @@ class PoliciesView {
         'li',
         { class: ['pv-ord', r.inactive && 'skipped', here && 'this'] },
         h('span', { class: 'pv-ord-n', 'aria-hidden': 'true' }, String(n++)),
-        h('button', { class: 'pv-ord-name', type: 'button', title: `Open ${r.name}`, on: { click: () => this.openDetail(idx, { push: false }) } }, r.name),
+        h('button', { class: 'pv-ord-name', type: 'button', title: `Open ${plain(r.name, { all: true })}`, on: { click: () => this.openDetail(idx, { push: false }) } }, this.v(r.name)),
         this.actionPill(r.action),
+        isUnified(r) ? h('span', { class: 'pv-tag sky', title: `Unified policy: dynamic-application ${plain(r.match.dynamic_application.join(', '))}` }, 'unified') : null,
         r.kind === 'global' ? h('span', { class: 'pv-ord-z' }, this.zoneList(r.from, 'from'), h('span', { class: 'arrow' }, ARROW), this.zoneList(r.to, 'to')) : null,
-        r.inactive ? h('span', { class: 'pv-ord-why' }, 'skipped: inactive') : null,
-        here ? h('span', { class: 'pv-ord-here' }, '\u2190 this policy') : null,
+        r.inactive ? h('span', { class: 'pv-ord-why', title: plain(inactiveSentence(r, this.scopeLabel())) }, 'skipped: inactive') : null,
+        here ? h('span', { class: 'pv-ord-here' }, '← this policy') : null,
       );
     };
     const group = (label, idxs, empty) => {
@@ -2499,10 +3017,10 @@ class PoliciesView {
       else kids.push(h('p', { class: 'pv-ord-empty' }, empty));
     };
     const pair = m.pairs.get(pairKey(from, to));
-    group(`Zone-pair policies for ${from} \u2192 ${to}, top to bottom`, pair ? pair.idxs : [], 'No zone-pair policy for this pair.');
+    group(['Zone-pair policies for ', this.v(from), ` ${ARROW} `, this.v(to), ', top to bottom'], pair ? pair.idxs : [], 'No zone-pair policy for this pair.');
     const applying = m.globals.filter((i) => globalApplies(m.rows[i], from, to));
-    group(`Then the global policies that apply to ${from} \u2192 ${to}`, applying, 'No global policy applies to this pair.');
-    const dp = pol.default_policy;
+    group(['Then the global policies that apply to ', this.v(from), ` ${ARROW} `, this.v(to)], applying, 'No global policy applies to this pair.');
+    const ds = defaultState(pol, this.scopeLabel());
     kids.push(
       h('p', { class: 'pv-ord-label' }, 'Then the default policy'),
       h(
@@ -2513,16 +3031,43 @@ class PoliciesView {
           { class: ['pv-ord', 'is-default', current === 'default' && 'this'] },
           h('span', { class: 'pv-ord-n', 'aria-hidden': 'true' }, String(n)),
           h('span', { class: 'pv-ord-name static' }, 'default-policy'),
-          h('span', { class: ['pill', dp === 'permit-all' ? 'permit' : 'deny'] }, dp || 'deny-all'),
-          h('span', { class: 'pv-ord-why' }, dp ? (pol.default_policy_group ? `from group ${pol.default_policy_group}` : 'configured') : 'not configured: Junos default'),
+          h('span', { class: ['pill', ds.cls] }, ds.action),
+          ds.badge ? h('span', { class: 'pv-tag amber', title: ds.tip }, ds.badge) : null,
+          h('span', { class: 'pv-ord-why', title: ds.tip }, this.v(ds.label)),
         ),
       ),
     );
+    const unified = [...(pair ? pair.idxs : []), ...applying].some((i) => isUnified(m.rows[i]));
+    if (unified) {
+      // JUNOS-01 (a deviation from the POL-UI-09 wording): the pre-ID default policy sets only the
+      // session timeout and logging before AppID identifies the application; it does not permit or
+      // deny (HPE unified policies page; 24.4R2 YANG: then { log, session-timeout }).
+      const pre = preIdState(pol);
+      let preText;
+      if (pol.pre_id_default_policy) {
+        preText = `Until then, the pre-ID default policy (${pre}) sets only the session timeout and session logging; it does not permit or deny (verified).`;
+      } else if (pol.pre_id_default_policy_inactive) {
+        preText = `Until then, a pre-ID default policy would set only the session timeout and session logging, not permit or deny (verified); this one is ${pre}, so J-Wicket reads that the default session timeouts apply and no pre-ID logs are written (inferred).`;
+      } else {
+        preText = 'Until then, no pre-ID default policy is configured: default session timeouts apply and no pre-ID logs are written (verified).';
+      }
+      kids.push(
+        h(
+          'p',
+          { class: 'pv-callout sky pv-unified' },
+          `This pair has unified policies (dynamic application). Until the application is identified, Junos may match a list of candidate policies, not one (verified); J-Wicket lists them in configuration order, which it reads as the order Junos considers them (inferred). ${preText}`,
+        ),
+      );
+    }
     kids.unshift(
       h(
         'p',
         { class: 'pv-ord-sum' },
-        `${fmt.plural((pair ? pair.idxs.length : 0) + applying.length + 1, 'step')} for a flow from ${from} to ${to}. The first policy whose match fits the flow decides; inactive ones are skipped.`,
+        `${fmt.plural((pair ? pair.idxs.length : 0) + applying.length + 1, 'step')} for a flow from `,
+        this.v(from),
+        ' to ',
+        this.v(to),
+        '. The first policy whose match fits the flow decides; inactive ones are skipped.',
       ),
     );
     return kids;
@@ -2535,21 +3080,21 @@ class PoliciesView {
     const rows = [];
     const hostList = (sd) => {
       if (sd.any) return h('span', { class: 'muted' }, 'any address');
-      const shown = sd.leaves.slice(0, 4).map((l, i) => [i ? ', ' : null, h('span', { class: 'mono' }, l.value || l.name), l.via && l.via !== l.value ? h('span', { class: 'faint' }, ` (${l.via})`) : null]);
+      const shown = sd.leaves.slice(0, 4).map((l, i) => [i ? ', ' : null, h('span', { class: 'mono' }, this.v(l.value || l.name)), l.via && l.via !== l.value ? h('span', { class: 'faint' }, ' (', this.v(l.via), ')') : null]);
       return [shown, sd.leaves.length > 4 ? h('span', { class: 'faint' }, `, +${sd.leaves.length - 4} more`) : null, sd.partial ? h('span', { class: 'faint' }, ' (list incomplete)') : null];
     };
     const within = (sd) => (sd.any ? hostList(sd) : [h('span', { class: 'muted' }, sd.leaves.length === 1 ? 'an address in ' : 'an address in one of '), hostList(sd)]);
     if (!ex.src) rows.push(['source-ip', within(c.src)]);
     if (!ex.dst) rows.push(['destination-ip', within(c.dst)]);
     if (!ex.port) {
-      const list = c.ports.slice(0, 6).map((p, i) => [i ? ', ' : null, h('span', { class: 'mono' }, `${p.port}${p.protocol ? `/${p.protocol}` : ''}`), h('span', { class: 'faint' }, ` (${p.name})`)]);
+      const list = c.ports.slice(0, 6).map((p, i) => [i ? ', ' : null, h('span', { class: 'mono' }, this.v(`${p.port}${p.protocol ? `/${p.protocol}` : ''}`)), h('span', { class: 'faint' }, ' (', this.v(p.name), ')')]);
       const extra = [];
       if (c.ports.length > 6) extra.push(h('span', { class: 'faint' }, `, +${c.ports.length - 6} more`));
       if (c.anyPort) extra.push(h('span', { class: 'muted' }, `${c.ports.length ? '; ' : ''}any port (application any)`));
-      if (c.unknownPorts.length) extra.push(h('span', { class: 'muted' }, `${c.ports.length || c.anyPort ? '; ' : ''}port not read by J-Wicket: ${c.unknownPorts.map((u) => u.name).join(', ')}`));
+      if (c.unknownPorts.length) extra.push(h('span', { class: 'muted' }, `${c.ports.length || c.anyPort ? '; ' : ''}port not read by J-Wicket: `, this.v(c.unknownPorts.map((u) => u.name).join(', '))));
       rows.push(['destination-port', [list, extra]]);
       const protos = [...new Set(c.ports.map((p) => p.protocol).filter(Boolean))];
-      if (protos.length) rows.push(['protocol', [h('span', { class: 'mono' }, protos.join(', ')), c.anyPort || c.unknownPorts.length ? h('span', { class: 'faint' }, ' (and what the other applications use)') : null]]);
+      if (protos.length) rows.push(['protocol', [h('span', { class: 'mono' }, this.v(protos.join(', '))), c.anyPort || c.unknownPorts.length ? h('span', { class: 'faint' }, ' (and what the other applications use)') : null]]);
     }
     if (!rows.length) return null;
     return h(
@@ -2572,6 +3117,10 @@ class PoliciesView {
       to = zonesOf(row.to).length === 1 ? row.to[0] : null;
     }
     const kids = [];
+    // POL-UI-01: a row out of effect because an ancestor is deactivated says so first.
+    if (row.inactive && ANCESTOR_REASONS.includes(row.inactive_reason)) {
+      kids.push(h('p', { class: 'pv-callout reject pv-eval-off' }, this.v(ancestorSentence(row.inactive_reason, this.scopeLabel()))));
+    }
     if (from && to) {
       kids.push(...this.orderNodes(from, to, idx));
     } else {
@@ -2580,7 +3129,11 @@ class PoliciesView {
         h(
           'p',
           { class: 'pv-small' },
-          `This global policy applies to every zone pair whose from-zone is in (${zl(row.from)}) and whose to-zone is in (${zl(row.to)}); “any” means every zone. For each such pair, Junos checks that pair’s zone-pair policies first, then the global policies in this order, then the default policy.`,
+          'This global policy applies to every zone pair whose from-zone is in (',
+          this.v(zl(row.from)),
+          ') and whose to-zone is in (',
+          this.v(zl(row.to)),
+          '); “any” means every zone. For each such pair, Junos checks that pair’s zone-pair policies first, then the global policies in this order, then the default policy.',
         ),
         h('p', { class: 'pv-ord-label' }, 'Global policies, in order'),
       );
@@ -2595,11 +3148,12 @@ class PoliciesView {
               'li',
               { class: ['pv-ord', r.inactive && 'skipped', i === idx && 'this'] },
               h('span', { class: 'pv-ord-n', 'aria-hidden': 'true' }, String(n++)),
-              h('button', { class: 'pv-ord-name', type: 'button', on: { click: () => this.openDetail(i, { push: false }) } }, r.name),
+              h('button', { class: 'pv-ord-name', type: 'button', on: { click: () => this.openDetail(i, { push: false }) } }, this.v(r.name)),
               this.actionPill(r.action),
+              ((r.match && r.match.dynamic_application) || []).length ? h('span', { class: 'pv-tag sky' }, 'unified') : null,
               h('span', { class: 'pv-ord-z' }, this.zoneList(r.from, 'from'), h('span', { class: 'arrow' }, ARROW), this.zoneList(r.to, 'to')),
               r.inactive ? h('span', { class: 'pv-ord-why' }, 'skipped: inactive') : null,
-              i === idx ? h('span', { class: 'pv-ord-here' }, '\u2190 this policy') : null,
+              i === idx ? h('span', { class: 'pv-ord-here' }, '← this policy') : null,
             );
           }),
         ),
@@ -2609,7 +3163,7 @@ class PoliciesView {
     const ex = flowExample(row, this.Q);
     kids.push(
       h('p', { class: 'pv-small' }, 'This shows order, not a match result. To test a flow, run on the device:'),
-      cliBlock(this.ctx, matchPoliciesCli(scopeId, from, to, ex)),
+      cliBlock(this.ctx, matchPoliciesCli(scopeId, from, to, ex), 'Copy command', cliNames(scopeId, from, to)),
       this.exampleCandidates(ex),
       h(
         'p',
@@ -2647,7 +3201,7 @@ class PoliciesView {
     // A select drawn like the inputs: native chevron hidden, an inline SVG one on the right.
     const selectWrap = (sel) => h('span', { class: 'pv-ex-selwrap' }, sel, h('span', { class: 'pv-ex-chev', 'aria-hidden': 'true' }, icon('chevron-down')));
     const zoneSelect = (key, label) => {
-      const sel = h('select', { class: 'input pv-ex-select', id: `pv-ex-${key}`, on: { change: () => { st[key] = sel.value || null; draw(); } } }, h('option', { value: '' }, 'choose a zone'), m.zones.map((z) => h('option', { value: z }, z)));
+      const sel = h('select', { class: 'input pv-ex-select', id: `pv-ex-${key}`, on: { change: () => { st[key] = sel.value || null; draw(); } } }, h('option', { value: '' }, 'choose a zone'), m.zones.map((z) => h('option', { value: z }, plain(z, { all: true }))));
       sel.value = st[key] || '';
       return h('div', { class: ['field', 'pv-ex-field', `pv-ex-f-${key}`] }, h('label', { for: `pv-ex-${key}` }, label), selectWrap(sel));
     };
@@ -2712,12 +3266,12 @@ class PoliciesView {
       }
       kids.push(
         h('h4', { class: 'pv-ex-h' }, 'Test the flow on the device'),
-        cliBlock(this.ctx, matchPoliciesCli(scopeId, st.from, st.to, ex)),
+        cliBlock(this.ctx, matchPoliciesCli(scopeId, st.from, st.to, ex), 'Copy command', cliNames(scopeId, st.from, st.to)),
         h('p', { class: 'pv-small muted' }, `Junos answers with the policy that matches. Fill in the fields above, or replace each <placeholder> in the command. ${ex.sport ? '' : `An empty source port uses ${EXAMPLE_SOURCE_PORT}, an example client port.`}`),
       );
       const terms = [];
-      if (st.from) terms.push(`from:${qv(st.from)}`);
-      if (st.to) terms.push(`to:${qv(st.to)}`);
+      if (st.from) terms.push(`from:${qvDevice(st.from)}`);
+      if (st.to) terms.push(`to:${qvDevice(st.to)}`);
       if (ex.src) terms.push(`src:${ex.src}`);
       if (ex.dst) terms.push(`dst:${ex.dst}`);
       if (terms.length) {
@@ -2727,21 +3281,27 @@ class PoliciesView {
             'div',
             { class: 'pv-ex-filter' },
             h('p', { class: 'pv-small' }, 'Narrow the table to the policies that name these zones and addresses (“any” counts; applications are not checked). This is a filter, not a match result.'),
-            h('button', { class: 'btn sm', type: 'button', on: { click: () => this.setQuery(q) } }, icon('filter'), h('span', { class: 'mono' }, q)),
+            h('button', { class: 'btn sm', type: 'button', on: { click: () => this.setQuery(q) } }, icon('filter'), h('span', { class: 'mono' }, this.v(q))),
           ),
         );
       }
       if (focusDefault || !st.from) {
+        const ds = defaultState(m.pol, this.scopeLabel());
+        const prefix = cliPrefix(scopeId);
         kids.push(
           h('h4', { class: 'pv-ex-h' }, 'The default policy'),
           h(
             'p',
             { class: 'pv-small' },
-            m.pol.default_policy
-              ? `Configured: ${m.pol.default_policy}${m.pol.default_policy_group ? `, from configuration group ${m.pol.default_policy_group}` : ''}. It decides every flow that no zone-pair or global policy matches.`
-              : 'Not configured, so the Junos default applies: deny-all. It decides every flow that no zone-pair or global policy matches.',
+            h('span', { class: ['pill', ds.cls] }, ds.action),
+            ds.badge ? [' ', h('span', { class: 'pv-tag amber', title: ds.tip }, ds.badge)] : null,
+            ' ',
+            this.v(ds.label),
+            '. It decides every flow that no zone-pair or global policy matches.',
           ),
-          cliBlock(this.ctx, `show configuration ${cliPrefix(scopeId)}security policies default-policy`),
+          ds.badge ? h('p', { class: 'pv-small muted' }, ds.tip) : null,
+          m.pol.default_policy_comment ? h('p', { class: 'pv-small pv-comment-full' }, 'Comment (annotate; not a setting): ', this.vd(m.pol.default_policy_comment)) : null,
+          cliBlock(this.ctx, cliJoin('show configuration', prefix === null ? null : `${prefix}security policies default-policy`), 'Copy command', cliNames(scopeId)),
         );
       }
       const sp = scopeParts(scopeId);

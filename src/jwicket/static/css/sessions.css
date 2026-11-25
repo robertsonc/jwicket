@@ -200,6 +200,40 @@
   color: var(--deny);
 }
 
+/* a 429: not a failure, only a note on the last-read time ("waiting: …") */
+.sx-read-ago.wait {
+  color: var(--amber);
+  white-space: normal;
+  max-width: 240px;
+}
+
+/* under the gauge on a chassis cluster: each node's count (never a sum), and failed sessions */
+.sx-nodes,
+.sx-failed {
+  color: var(--muted);
+  font: 11px/1.35 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sx-nodes[hidden],
+.sx-failed[hidden] {
+  display: none;
+}
+
+.sx-node-diff {
+  color: var(--amber);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: help;
+}
+
+.sx-failed {
+  color: var(--amber);
+  font-weight: 600;
+  cursor: help;
+}
+
 /* time to the next poll: a hairline that fills */
 .sx-next {
   position: absolute;
@@ -327,6 +361,64 @@
 .sx-live .live-pill.sx-first .dot {
   border-radius: 50%;
   animation: sx-reading 1s var(--ease) infinite;
+}
+
+/* the shell's idle pause (no operator input): PAUSED · idle, reads resume on the next input */
+.sx-live .live-pill.sx-idle .dot {
+  animation: none;
+  background: var(--muted);
+}
+
+/* a compact state card among the notices (the session count could not be read; rows stay) */
+.sx-notices > .state {
+  margin: 0;
+}
+
+/* a device filter the device did not accept: the query bar stays, the card says what to do */
+.sx-view .state[data-state="filter-rejected"] {
+  --state: var(--reject);
+  --state-soft: var(--reject-soft);
+}
+
+/* before the first read, while another read of this session holds the device turn (429) */
+.sx-waitnote {
+  flex: none;
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.sx-waitnote[hidden] {
+  display: none;
+}
+
+/*
+ * Device text (names, values, messages): isolated, so a direction-changing character, shown as a
+ * badge instead of applied, cannot reorder the text around it (the .dev-text rule of app.css).
+ */
+.sx-row .fx,
+.sx-zone,
+.sx-id,
+.sx-note-t,
+.fc-label,
+.sx-sugg-t,
+.sx-sugg-w,
+.sx-node-name,
+.sx-d-pills .pill,
+.sx-dv,
+.sx-detail .policy-link,
+.sx-d-kv dt,
+.sx-d-kv dd,
+.sx-d-table td {
+  unicode-bidi: isolate;
+}
+
+/* a CLI command J-Wicket will not build from the device values */
+.sx-cli-no {
+  margin: 4px 0 0;
+  color: var(--muted);
 }
 
 .sx-view:not(.sx-is-mobile) .sx-sortmenu-btn {
@@ -1833,6 +1925,11 @@ text.fd-hit:hover {
   }
   .sx-big {
     font-size: 24px;
+  }
+  .sx-of,
+  .sx-nodes,
+  .sx-failed {
+    white-space: normal;
   }
   .sx-stats {
     grid-column: auto;

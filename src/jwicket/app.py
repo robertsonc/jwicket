@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator, List, Optional
 
 from jwicket import __version__
-from jwicket.api import App, build_router
+from jwicket.api import App, build_router, prune_reuse, record_session_end
 from jwicket.auth.backends import AuthBackend, LabTokenBackend, NetconfBackend
 from jwicket.auth.sessions import SessionStore
 from jwicket.auth.throttle import LoginThrottle
@@ -73,7 +73,7 @@ def build_app(
     settings: Settings, backend: AuthBackend, *, fixture: bool = False, warnings: Optional[List[str]] = None
 ) -> App:
     auth = settings.auth
-    return App(
+    app = App(
         backend=backend,
         sessions=SessionStore(
             idle_s=auth.session_idle_s,
@@ -91,6 +91,9 @@ def build_app(
         fixture=fixture,
         extra_warnings=list(warnings or []),
     )
+    # Idle, absolute and shutdown ends get a session_ended audit event; the others have their own.
+    app.sessions.on_end = lambda sess, reason: record_session_end(app, sess, reason)
+    return app
 
 
 @contextlib.contextmanager
@@ -146,7 +149,8 @@ def serve(settings: Settings, app: App) -> int:
 
     def reaper() -> None:
         while not stop.wait(REAP_INTERVAL_S):
-            app.sessions.reap()
+            app.sessions.reap()  # ends are audited by the store's on_end hook
+            prune_reuse(app)  # B-8: drop reused reads past their window (OD-07)
             app.audit.flush()  # repeat counts of aggregated refusals whose window has ended
 
     threading.Thread(target=reaper, name="jwicket-reaper", daemon=True).start()

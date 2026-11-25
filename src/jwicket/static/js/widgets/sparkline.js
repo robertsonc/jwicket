@@ -53,6 +53,11 @@ export function scaleFor(values, { min = null, max = null } = {}) {
   return [lo, hi];
 }
 
+// Where the note's middle sits, in percent of the drawn height: chosen so its text box (about 14 px)
+// stays inside both the default 34 px chart and the 28 px one at phone width.
+const NOTE_LOW = '78%';
+const NOTE_HIGH = '29%';
+
 export class Sparkline {
   constructor({ height = 36, label = '', className = '', area = true, min = null, max = null } = {}) {
     this.height = height;
@@ -65,7 +70,9 @@ export class Sparkline {
     this.base = svg('line', { class: 'spark-base', x1: 0, x2: W, y1: height - 0.5, y2: height - 0.5, 'vector-effect': 'non-scaling-stroke' });
     this.dot = svg('path', { class: 'spark-dot', 'vector-effect': 'non-scaling-stroke' });
     // Bottom left: a zero-based line sits high, a centred one in the middle; neither meets the note.
-    this.note = svg('text', { class: 'spark-note', x: 0, y: height - 7, 'dominant-baseline': 'middle' });
+    // y in percent of the drawn height: CSS can draw the chart shorter than `height` (28 px at phone
+    // width), and a pixel y would then put the note below the chart.
+    this.note = svg('text', { class: 'spark-note', x: 0, y: NOTE_LOW, 'dominant-baseline': 'middle' });
     this.plot = svg(
       'svg',
       { class: 'spark-plot', viewBox: `0 0 ${W} ${height}`, preserveAspectRatio: 'none', x: 0, y: 0, width: '100%', height: '100%' },
@@ -88,6 +95,7 @@ export class Sparkline {
     this.el.classList.toggle('collecting', collecting);
     this.note.textContent = collecting ? (pts.length ? 'collecting…' : 'no data yet') : '';
     if (!pts.length) {
+      this.note.setAttribute('y', NOTE_LOW);
       this.linePath.setAttribute('d', '');
       this.areaPath.setAttribute('d', '');
       this.dot.setAttribute('d', '');
@@ -109,6 +117,8 @@ export class Sparkline {
     if (this.area) this.areaPath.setAttribute('d', collecting ? '' : `${d}L${W} ${h}L${x(0)} ${h}Z`);
     const last = pts[n - 1];
     this.dot.setAttribute('d', `M${W} ${y(last).toFixed(2)}h0`);
+    // F6: the "collecting" note goes on the side the line is not on, so the line never strikes it out.
+    this.note.setAttribute('y', collecting && y(last) > h / 2 ? NOTE_HIGH : NOTE_LOW);
     this.el.setAttribute(
       'aria-label',
       `${this.label || 'trend'}: ${n} ${n === 1 ? 'point' : 'points'}, lowest ${Math.min(...pts)}, highest ${Math.max(...pts)}, latest ${last}${collecting ? ' (still collecting)' : ''}`,

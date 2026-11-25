@@ -186,5 +186,49 @@ class ManagementTests(unittest.TestCase):
         self.assertFalse(F.mnha_configured(cfg))
 
 
+class TimeZoneTests(unittest.TestCase):
+    """BE-07 phase 1 (B-12): the configured time zone, as written; never assumed when not read."""
+
+    def zone(self, body: str, system_attrs: str = "") -> dict:  # type: ignore[type-arg]
+        return F.time_zone(xml(f"<configuration><system{system_attrs}>{body}</system></configuration>"))
+
+    def test_not_read(self) -> None:
+        self.assertEqual(F.time_zone(None)["status"], "failed")
+        self.assertNotIn("time_zone", F.time_zone(None))
+
+    def test_not_configured_means_the_junos_default(self) -> None:
+        expected = {"status": "ok", "time_zone": None, "configured": False, "deactivated": None,
+                    "source": "configuration"}
+        self.assertEqual(self.zone(""), expected)
+        self.assertEqual(F.time_zone(xml("<configuration/>")), expected)
+        self.assertEqual(F.time_zone(ElementTree.parse(BRANCH / "config.xml").getroot()), expected)
+
+    def test_configured(self) -> None:
+        self.assertEqual(self.zone("<time-zone>Europe/Paris</time-zone>"),
+                         {"status": "ok", "time_zone": "Europe/Paris", "configured": True, "deactivated": None,
+                          "source": "configuration"})
+        for raw in ("UTC", "GMT+8", "America/Argentina/Buenos_Aires", "Etc/GMT-14", "PDT"):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.zone(f"<time-zone>{raw}</time-zone>")["time_zone"], raw)
+
+    def test_deactivated(self) -> None:
+        for body, attrs in (('<time-zone inactive="inactive">Europe/Paris</time-zone>', ""),
+                            ("<time-zone>Europe/Paris</time-zone>", ' inactive="inactive"')):
+            with self.subTest(body=body, attrs=attrs):
+                self.assertEqual(self.zone(body, attrs),
+                                 {"status": "ok", "time_zone": None, "configured": False,
+                                  "deactivated": "Europe/Paris", "source": "configuration"})
+
+    def test_unrecognised_values_are_failed(self) -> None:
+        for raw in ("Europe/Par is", "Europe/Paris\u202e", "a\x01b", "x" * 65, " Europe/Paris", "Europe;Paris"):
+            with self.subTest(raw=repr(raw)):
+                node = ElementTree.Element("configuration")
+                system = ElementTree.SubElement(node, "system")
+                ElementTree.SubElement(system, "time-zone").text = raw
+                self.assertEqual(F.time_zone(node), {
+                    "status": "failed", "message": "The configured time zone is not a value J-Wicket recognises."})
+        self.assertEqual(self.zone("<time-zone/>")["status"], "failed")
+
+
 if __name__ == "__main__":
     unittest.main()

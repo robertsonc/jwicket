@@ -39,6 +39,12 @@ Route = Callable[[Request], Response]
 
 # Request line plus headers. Browsers send a few KiB; the cap keeps a slot from pinning megabytes.
 MAX_HEAD_BYTES = 16 * 1024
+# A connection over the cap waits this long for a slot before it is closed. A browser loading the app
+# opens about six connections at once, so two browser profiles loading together go over a cap of 8;
+# their requests for static files take milliseconds, so a short wait serves them instead of failing
+# the page's module graph (F1). Meanwhile the accept loop waits too: further connections queue in the
+# listen backlog, holding no thread.
+CONNECTION_QUEUE_S = 1.5
 
 
 class HeadTooLarge(http.client.HTTPException):
@@ -188,7 +194,7 @@ class JWicketServer(ThreadingHTTPServer):
         return True if deadline is None else deadline.cancel()
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._slots.acquire(blocking=False):
+        if not self._slots.acquire(timeout=CONNECTION_QUEUE_S):
             LOG.warning("connection limit reached; closing connection from %s", client_address[0])
             self.shutdown_request(request)
             return

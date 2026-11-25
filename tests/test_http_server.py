@@ -36,6 +36,7 @@ from helpers import (
     xml,
 )
 
+from jwicket import api as api_mod
 from jwicket import resources
 from jwicket.api import build_router
 from jwicket.auth.backends import LabTokenBackend
@@ -43,12 +44,12 @@ from jwicket.auth.sessions import SessionStore
 from jwicket.auth.throttle import LoginThrottle
 from jwicket.devserver import FixtureBackend
 from jwicket.fixtures import FixtureSession
-from jwicket.junos.errors import LoginUnavailable, SessionLost
+from jwicket.junos.errors import LoginUnavailable, RpcUnsupported, SessionLost
 from jwicket.junos.session import PyEzUserSession
 from jwicket.logs import AuditTrail, EscapeControls, escape_handlers, setup_logging
 from jwicket.settings import LogSettings
-from jwicket.web.http import COOKIE_PLAIN, COOKIE_TLS, CSP
-from jwicket.web.server import JWicketServer, make_tls_context
+from jwicket.web.http import COOKIE_PLAIN, COOKIE_TLS, CSP, Request
+from jwicket.web.server import CONNECTION_QUEUE_S, JWicketServer, make_tls_context
 
 FIXTURE_WARNING = "Fixture data: synthetic, not read from a device."
 
@@ -111,7 +112,7 @@ class SecurityHeaderTests(HttpCase):
             ("405 POST", lambda: self.srv.request("POST", "/api/inventory", body=b""), 405),
             ("405 PUT", lambda: self.srv.request("PUT", "/api/session"), 405),
             ("400 scope", lambda: self.srv.get("/api/inventory?scope=../etc", cookie), 400),
-            ("429", lambda: self.srv.get("/api/inventory", cookie), 429),
+            ("429", lambda: self.srv.get("/api/inventory?scope=lsys:OTHER", cookie), 429),
         ]
         for label, call, status in cases:
             with self.subTest(label):
@@ -226,13 +227,20 @@ class LoginTests(HttpCase):
         self.assertNotIn("csrf", body)
 
     def test_api_requires_a_session_cookie(self) -> None:
-        paths = ("/api/inventory", "/api/inventory?scope=root", "/api/export?format=json", "/api/export?format=csv")
+        paths = ("/api/inventory", "/api/inventory?scope=root", "/api/export?format=json", "/api/export?format=csv",
+                 "/api/sessions", "/api/sessions?rows=none", "/api/logs/sources", "/api/logs?file=messages")
         for path in paths:
-            for cookie in (None, f"{COOKIE_PLAIN}=forged-token", f"{COOKIE_TLS}=forged", "jwicket=forged"):
+            for cookie, reason in ((None, "none"), (f"{COOKIE_PLAIN}=forged-token", "unknown"),
+                                   (f"{COOKIE_TLS}=forged", "none"), ("jwicket=forged", "none")):
                 with self.subTest(path=path, cookie=cookie):
                     reply = self.srv.get(path, cookie)
                     self.assertEqual(reply.status, 401)
-                    self.assertIn("error", reply.json())
+                    body = reply.json()
+                    self.assertEqual(body["reason"], reason)
+                    self.assertNotIn("at", body)
+                    self.assertEqual(body["error"], "sign-in required" if reason == "none"
+                                     else "Your J-Wicket session has ended.")
+                    self.assertNotIn("set-cookie", reply.headers)
 
     def test_login_requires_same_origin(self) -> None:
         port = self.srv.port
@@ -300,6 +308,17 @@ class LoginTests(HttpCase):
         self.assertEqual((body["authenticated"], body["user"], body["csrf"]), (True, "admin", csrf))
         self.assertEqual(body["idle_timeout_s"], 900)
 
+    def test_session_facts_for_honest_wording(self) -> None:
+        """BE-08 (B-6): the absolute limit, when the session started and must end, the per-user limit."""
+        reply, cookie = self.srv.login("admin")
+        for label, body in (("login", reply.json()), ("session", self.srv.get("/api/session", cookie).json())):
+            with self.subTest(label):
+                self.assertEqual((body["absolute_timeout_s"], body["max_sessions_per_user"]), (3600, 1))
+                started = time.mktime(time.strptime(body["signed_in_at"], "%Y-%m-%dT%H:%M:%SZ"))
+                ends = time.mktime(time.strptime(body["ends_by"], "%Y-%m-%dT%H:%M:%SZ"))
+                self.assertEqual(ends - started, 3600)
+        self.assertNotIn("ends_by", self.srv.get("/api/session").json())
+
     def test_new_login_replaces_the_old_session(self) -> None:
         first = self.signed_in()
         old = self.app.sessions.get(self.token_of(first))
@@ -311,6 +330,21 @@ class LoginTests(HttpCase):
         self.assertTrue(self.srv.get("/api/session", second).json()["authenticated"])
         self.assertTrue(old.device.closed)  # type: ignore[union-attr]
         self.assertEqual(self.app.sessions.count(), 1)
+        # The same browser signing in again overwrites its cookie, so the old one keeps no reason.
+        self.assertEqual(self.srv.get("/api/inventory", first).json()["reason"], "unknown")
+        # The same Junos user signing in from another browser replaces this session, and says so.
+        self.assertEqual(self.srv.login("admin")[0].status, 200)
+        reply = self.srv.get("/api/inventory", second)
+        self.assertEqual(reply.status, 401)
+        body = reply.json()
+        self.assertEqual((body["reason"], body["error"]),
+                         ("replaced", "You were signed out: the same Junos user signed in again elsewhere."))
+        self.assertRegex(body["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotIn("by", body)
+        self.assertNotIn("set-cookie", reply.headers)  # every tab of this browser gets the same reason
+        session = self.srv.get("/api/session", second).json()
+        self.assertEqual((session["authenticated"], session["ended"]["reason"]), (False, "replaced"))
+        self.assertEqual(session["ended"]["at"], body["at"])
 
     def test_planted_cookie_is_never_adopted(self) -> None:
         planted = f"{COOKIE_PLAIN}=attacker-chosen-value-0123456789abcdefghijklmnop"
@@ -343,6 +377,39 @@ class LoginTests(HttpCase):
         self.assertFalse(self.srv.get("/api/session", cookie).json()["authenticated"])
         self.assertTrue(sess.device.closed)  # type: ignore[union-attr]
         self.assertEqual(self.app.sessions.count(), 0)
+
+    def test_signing_out_tells_the_other_tabs(self) -> None:
+        reply, cookie = self.srv.login("admin")
+        csrf = reply.json()["csrf"]
+        self.assertEqual(self.srv.post_json("/api/logout", {}, cookie=cookie, extra={"X-CSRF-Token": csrf}).status, 200)
+        body = self.srv.get("/api/sessions", cookie).json()
+        self.assertEqual((body["reason"], body["error"]), ("signed-out", "You signed out in another tab or window."))
+        self.assertEqual(self.srv.get("/api/session", cookie).json()["ended"]["reason"], "signed-out")
+
+    def test_no_ended_without_a_tombstone(self) -> None:
+        self.assertNotIn("ended", self.srv.get("/api/session").json())
+        self.assertNotIn("ended", self.srv.get("/api/session", f"{COOKIE_PLAIN}=never-issued").json())
+
+    def test_failed_sign_in_keeps_the_existing_session(self) -> None:
+        """BE-10: the browser's session is ended only after Junos accepted the new credentials."""
+        reply, cookie = self.srv.login("admin")
+        self.assertEqual(reply.status, 200)
+        self.assertEqual(self.srv.post_json("/api/login", {"username": "mallory", "password": "x"},
+                                            cookie=cookie).status, 401)
+        self.assertTrue(self.srv.get("/api/session", cookie).json()["authenticated"])
+        self.assertEqual(self.app.sessions.count(), 1)
+
+    def test_sign_in_throttle_reasons(self) -> None:
+        self.app.throttle = LoginThrottle(per_name=1, per_source=100, concurrent=1, clock=self.clock)
+        self.assertEqual(self.srv.post_json("/api/login", {"username": "mallory", "password": "x"}).status, 401)
+        body = self.srv.post_json("/api/login", {"username": "mallory", "password": "x"}).json()
+        self.assertEqual(body["reason"], "login-failures")
+        self.assertTrue(self.app.throttle.begin())
+        try:
+            body = self.srv.post_json("/api/login", {"username": "admin", "password": "x"}).json()
+        finally:
+            self.app.throttle.end()
+        self.assertEqual(body["reason"], "login-busy")
 
     def test_logout_without_a_session(self) -> None:
         out = self.srv.post_json("/api/logout", {})
@@ -475,6 +542,286 @@ class LoginTests(HttpCase):
         self.assertEqual(repeats[("login_failed", "format")], 19)
 
 
+BACKGROUND = {"X-JWicket-Background": "1"}
+
+
+class BackgroundRequestTests(HttpCase):
+    """BE-01 (B-4): background polls never refresh the idle clock; the header can only shorten."""
+
+    def get(self, path: str, cookie: str, value: Optional[str] = "1") -> Reply:
+        headers = {} if value is None else {"X-JWicket-Background": value}
+        return self.srv.get(path, cookie, headers=headers)
+
+    def test_background_polls_do_not_refresh_the_idle_clock(self) -> None:
+        cookie = self.signed_in()
+        self.clock.advance(600)
+        reply = self.get("/api/session", cookie)
+        self.assertEqual(reply.status, 200)
+        self.assertTrue(reply.json()["authenticated"])
+        self.clock.advance(301)  # 901 s after the last foreground request
+        reply = self.get("/api/inventory", cookie)
+        self.assertEqual(reply.status, 401)
+        body = reply.json()
+        self.assertEqual((body["reason"], body["error"]), ("idle", "Your session ended after 15 min without activity."))
+        self.assertRegex(body["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        session = self.get("/api/session", cookie, None).json()
+        self.assertEqual((session["authenticated"], session["ended"]["reason"]), (False, "idle"))
+
+    def test_foreground_requests_keep_the_session(self) -> None:
+        cookie = self.signed_in()
+        self.clock.advance(600)
+        self.assertEqual(self.get("/api/session", cookie, None).status, 200)  # no header: foreground
+        self.clock.advance(600)
+        self.assertTrue(self.get("/api/session", cookie).json()["authenticated"])
+
+    def test_background_header_on_post_is_ignored(self) -> None:
+        cookie = self.signed_in()
+        self.clock.advance(600)
+        # A POST always counts as foreground, even when it is then refused (here: no CSRF token).
+        refused = self.srv.post_json("/api/logout", {}, cookie=cookie, extra=dict(BACKGROUND))
+        self.assertEqual(refused.status, 403)
+        self.clock.advance(600)
+        self.assertTrue(self.get("/api/session", cookie).json()["authenticated"])
+
+    def test_header_values_other_than_1_are_foreground(self) -> None:
+        for value in ("true", "0", "yes", "11", "", "1 1"):
+            with self.subTest(value=value):
+                cookie = self.signed_in()
+                self.clock.advance(600)
+                self.assertTrue(self.get("/api/session", cookie, value).json()["authenticated"])
+                self.clock.advance(600)  # 600 s after the request above, 1200 s after sign-in
+                self.assertTrue(self.get("/api/session", cookie).json()["authenticated"])
+        self.assertTrue(api_mod.is_background(Request(method="GET", path="/", query={}, headers={
+            "X-JWicket-Background": " 1 "}, client="c", tls=False)))
+        self.assertFalse(api_mod.is_background(Request(method="HEAD", path="/", query={}, headers=dict(BACKGROUND),
+                                                       client="c", tls=False)))
+
+    def test_background_never_extends_past_the_absolute_limit(self) -> None:
+        cookie = self.signed_in()
+        for _ in range(4):
+            self.clock.advance(800)
+            self.assertEqual(self.get("/api/session", cookie, None).status, 200)
+        self.clock.advance(401)
+        body = self.get("/api/sessions?rows=none", cookie).json()
+        self.assertEqual((body["reason"], body["error"]), ("absolute", "Your session reached its 1 h limit."))
+
+    def test_idle_expiry_is_audited_once_without_secrets(self) -> None:
+        audit_dir = Path(tempfile.mkdtemp(prefix="jwicket-http-audit-"))
+        self.addCleanup(shutil.rmtree, audit_dir, True)
+        self.app.audit = AuditTrail(audit_dir / "audit.log")
+        self.addCleanup(self.app.audit.close)
+        password = "pw-that-must-not-be-logged"
+        reply, cookie = self.srv.login("admin", password=password)
+        self.clock.advance(901)
+        self.assertEqual(self.get("/api/inventory", cookie).status, 401)
+        self.assertEqual(self.get("/api/inventory", cookie).status, 401)
+        text = (audit_dir / "audit.log").read_text(encoding="utf-8")
+        entries = [json.loads(line) for line in text.splitlines()]
+        ended = [e for e in entries if e["event"] == "session_ended"]
+        self.assertEqual(len(ended), 1)
+        self.assertEqual((ended[0]["reason"], ended[0]["user"]), ("idle", "admin"))
+        for value in (password, self.token_of(cookie), reply.json()["csrf"]):
+            self.assertNotIn(value, text)
+
+    def test_new_sign_in_in_the_same_browser_is_audited_as_a_logout(self) -> None:
+        audit_dir = Path(tempfile.mkdtemp(prefix="jwicket-http-audit-"))
+        self.addCleanup(shutil.rmtree, audit_dir, True)
+        self.app.audit = AuditTrail(audit_dir / "audit.log")
+        self.addCleanup(self.app.audit.close)
+        cookie = self.signed_in("admin")
+        self.assertEqual(self.srv.login("auditor", cookie=cookie)[0].status, 200)
+        entries = [json.loads(line) for line in (audit_dir / "audit.log").read_text(encoding="utf-8").splitlines()]
+        logouts = [e for e in entries if e["event"] == "logout"]
+        self.assertEqual([(e["user"], e["reason"]) for e in logouts], [("admin", "new-sign-in")])
+        self.assertFalse(any(e["event"] == "session_ended" for e in entries))
+
+
+class SlowDevice(FakeDevice):
+    """Holds the software read until released, so a second request arrives while the first reads."""
+
+    def __init__(self, user: str) -> None:
+        super().__init__(user, {"get-software-information": xml(
+            "<software-information><host-name>fw</host-name></software-information>"),
+            "get-configuration": xml("<configuration><security/></configuration>"),
+            "get-chassis-cluster-status": RpcUnsupported("not a cluster")})
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def rpc(self, name: str, **params: Any) -> Any:
+        if name == "get-software-information":
+            self.started.set()
+            self.release.wait(5)
+        return super().rpc(name, **params)
+
+
+class ReuseHttpTests(HttpCase):
+    """BE-05 (B-8): another tab's identical read within the floor gets the read just made."""
+
+    def make_backend(self) -> Any:
+        self.devices: List[Any] = []
+
+        def factory(user: str) -> Any:
+            dev = SlowDevice(user) if user == "slow" else FixtureSession(BRANCH, user)
+            self.devices.append(dev)
+            return dev
+
+        return StaticBackend(factory)
+
+    def count_rpcs(self, cookie: str) -> List[str]:
+        calls: List[str] = []
+        sess = self.app.sessions.get(self.token_of(cookie))
+        assert sess is not None
+        real_rpc = sess.device.rpc
+
+        def spy(name: str, **params: Any) -> Any:
+            calls.append(name)
+            return real_rpc(name, **params)
+
+        sess.device.rpc = spy  # type: ignore[method-assign]
+        return calls
+
+    def test_two_inventory_reads_share_one_device_read(self) -> None:
+        cookie = self.signed_in()
+        calls = self.count_rpcs(cookie)
+        first = self.read("/api/inventory", cookie)
+        self.assertEqual(first.status, 200)
+        rpcs = len(calls)
+        self.app.wall_clock = lambda: 1_795_600_000.0
+        second = self.srv.get("/api/inventory", cookie)
+        self.assertEqual(second.status, 200)
+        self.assertEqual(second.json()["meta"]["read_at"], first.json()["meta"]["read_at"])
+        self.assertIs(second.json()["meta"]["reused"], True)
+        self.assertNotIn("reused", first.json()["meta"])
+        self.assertEqual(second.json()["scope"], first.json()["scope"])
+        self.assertEqual(len(calls), rpcs)
+        other = self.srv.get("/api/inventory?scope=lsys:OTHER", cookie)
+        self.assertEqual((other.status, other.json()["reason"]), (429, "rate"))
+        # An export promises a fresh read: right after an inventory read it reads again.
+        export = self.srv.get("/api/export?format=json", cookie)
+        self.assertEqual(export.status, 200)
+        self.assertNotIn("reused", export.json()["meta"])
+        self.assertGreater(len(calls), rpcs)
+        self.assertEqual(self.srv.get("/api/export?format=json", cookie).status, 429)
+
+    def test_reused_reads_are_not_audited(self) -> None:
+        records: List[str] = []
+
+        class Spy(AuditTrail):
+            def record(self, event: str, *, user: Optional[str], source: str, **fields: Any) -> None:
+                records.append(event)
+
+        self.app.audit = Spy(None)
+        cookie = self.signed_in()
+        self.read("/api/inventory", cookie)
+        self.srv.get("/api/inventory", cookie)
+        self.assertEqual(records.count("read_inventory"), 1)
+
+    def test_reuse_is_never_across_sessions(self) -> None:
+        a = self.signed_in("admin")
+        b = self.signed_in("operator")
+        self.assertEqual(self.read("/api/inventory", a).status, 200)
+        reply = self.srv.get("/api/inventory", b)
+        self.assertEqual(reply.status, 200)
+        self.assertNotIn("reused", reply.json()["meta"])
+        self.assertEqual(reply.json()["meta"]["read_as"]["user"], "operator")
+
+    def test_a_waiting_request_gets_the_read_in_flight(self) -> None:
+        cookie = self.signed_in("slow")
+        device = self.devices[-1]
+        results: List[Reply] = []
+        self.clock.advance(5)
+        first = threading.Thread(target=lambda: results.append(self.srv.get("/api/inventory", cookie)))
+        first.start()
+        self.assertTrue(device.started.wait(5))
+        second = threading.Thread(target=lambda: results.append(self.srv.get("/api/inventory", cookie)))
+        second.start()
+        time.sleep(0.2)  # the second request is now waiting for the device turn
+        device.release.set()
+        first.join(10)
+        second.join(10)
+        self.assertEqual([r.status for r in results], [200, 200])
+        self.assertEqual([c[0] for c in device.calls].count("get-software-information"), 1)
+        bodies = [r.json() for r in results]
+        self.assertEqual(bodies[0]["meta"]["read_at"], bodies[1]["meta"]["read_at"])
+        self.assertEqual(sorted(bool(b["meta"].get("reused")) for b in bodies), [False, True])
+
+    def test_a_failed_read_in_flight_leaves_the_waiter_busy(self) -> None:
+        cookie = self.signed_in("slow")
+        device = self.devices[-1]
+        device.replies["get-software-information"] = SessionLost("gone")
+        results: List[Reply] = []
+        self.clock.advance(5)
+        first = threading.Thread(target=lambda: results.append(self.srv.get("/api/inventory", cookie)))
+        first.start()
+        self.assertTrue(device.started.wait(5))
+        second = threading.Thread(target=lambda: results.append(self.srv.get("/api/inventory", cookie)))
+        second.start()
+        time.sleep(0.2)
+        device.release.set()
+        first.join(10)
+        second.join(10)
+        statuses = sorted(r.status for r in results)
+        self.assertEqual(statuses, [401, 429])
+        busy = next(r for r in results if r.status == 429).json()
+        self.assertEqual(busy["reason"], "busy")
+
+    def test_only_one_request_waits_for_the_read_in_flight(self) -> None:
+        """SEC-4: a third identical request while one already waits gets a busy 429 at once, so one
+        session cannot hold the server's connection slots with copies of one request."""
+        cookie = self.signed_in("slow")
+        device = self.devices[-1]
+        results: List[Reply] = []
+        self.clock.advance(5)
+        first = threading.Thread(target=lambda: results.append(self.srv.get("/api/inventory", cookie)))
+        first.start()
+        self.assertTrue(device.started.wait(5))
+        second = threading.Thread(target=lambda: results.append(self.srv.get("/api/inventory", cookie)))
+        second.start()
+        time.sleep(0.2)  # the second request now waits for the read in flight
+        began = time.monotonic()
+        third = self.srv.get("/api/inventory", cookie)
+        self.assertLess(time.monotonic() - began, 2.0)
+        self.assertEqual((third.status, third.json()["reason"]), (429, "busy"))
+        device.release.set()
+        first.join(10)
+        second.join(10)
+        self.assertEqual(sorted(r.status for r in results), [200, 200])
+        sess = self.app.sessions.get(self.token_of(cookie))
+        assert sess is not None
+        self.assertEqual(sess.reuse_waiters, {})
+
+    def test_reused_reads_are_dropped_after_their_window(self) -> None:
+        """SEC-3 (OD-07): a stored read is held for its window only, not for the session's life."""
+        cookie = self.signed_in()
+        self.assertEqual(self.read("/api/inventory", cookie).status, 200)
+        sess = self.app.sessions.get(self.token_of(cookie))
+        assert sess is not None
+        self.assertIn("inventory", sess.reuse)
+        self.clock.advance(api_mod.REUSE_MAX_S + 0.1)
+        api_mod.prune_reuse(self.app)  # what the reaper runs every 30 s
+        self.assertEqual(sess.reuse, {})
+        # So does the session's next request of any kind (here a foreground /api/session).
+        self.clock.advance(5)
+        self.assertEqual(self.read("/api/inventory", cookie).status, 200)
+        self.clock.advance(api_mod.REUSE_MAX_S)
+        self.assertTrue(self.srv.get("/api/session", cookie).json()["authenticated"])
+        self.assertEqual(sess.reuse, {})
+        # A lookup past the window drops the entry too.
+        self.clock.advance(5)
+        self.assertEqual(self.read("/api/inventory", cookie).status, 200)
+        self.assertIn("inventory", sess.reuse)
+        self.clock.advance(api_mod.MIN_READ_INTERVAL_S)
+        self.assertIsNone(api_mod.reuse_hit(self.app, sess, "inventory", "root", api_mod.MIN_READ_INTERVAL_S))
+        self.assertNotIn("inventory", sess.reuse)
+        # Storing a read drops the session's other entries past the window.
+        sess.reuse["logs:file:messages"] = ("messages", self.clock() - 10, ["old line"])
+        api_mod.remember(self.app, sess, "inventory", "root", self.clock(), {"meta": {}})
+        self.assertEqual(sorted(sess.reuse), ["inventory"])
+        # A read slower than the longest window is not kept at all.
+        api_mod.remember(self.app, sess, "inventory", "root", self.clock() - 3, {"meta": {}})
+        self.assertNotIn("inventory", sess.reuse)
+
+
 class InventoryTests(HttpCase):
     def test_inventory_snapshot_shape(self) -> None:
         cookie = self.signed_in()
@@ -489,13 +836,17 @@ class InventoryTests(HttpCase):
         self.assertEqual(meta["source"], {"database": "committed", "inheritance": True, "groups_annotated": True})
         self.assertRegex(meta["read_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertTrue(meta["generator"].startswith("jwicket "))
-        self.assertEqual(meta["scopes"], [{"id": "root", "label": "Root system", "policies": 10, "inactive": False}])
+        self.assertEqual(meta["scopes"], [{"id": "root", "label": "Root system", "policies": 10, "inactive": False,
+                                           "selectable": True}])
         self.assertEqual(data["device"]["hostname"], "branch-fw-01")
         self.assertEqual(data["device"]["status"], "ok")
         self.assertEqual(data["ha"], {"status": "ok", "mode": "standalone"})
         self.assertTrue(data["management"]["managed"])
         self.assertEqual(data["management"]["clients"][0]["client"], "central-mgr")
-        self.assertEqual(data["config"], {"status": "ok"})
+        self.assertEqual(data["config"], {"status": "ok", "filter": "full"})
+        # The branch configuration sets no time zone, so the Junos default (UTC) applies.
+        self.assertEqual(data["clock"], {"status": "ok", "time_zone": None, "configured": False, "deactivated": None,
+                                         "source": "configuration"})
         self.assertEqual(data["scope"]["id"], "root")
         self.assertEqual(len(data["scope"]["policies"]["rows"]), 10)
         self.assertIn(FIXTURE_WARNING, data["warnings"])
@@ -520,22 +871,40 @@ class InventoryTests(HttpCase):
         self.assertEqual(data["meta"]["read_as"]["user"], "auditor")
         self.assertNotIn(b'"rows"', reply.body)
         self.assertNotIn(b"allow-web", reply.body)
+        # Never assume UTC when the configuration was not read.
+        self.assertEqual(data["clock"], data["config"])
+        self.assertEqual(data["clock"]["status"], "denied")
+        self.assertEqual(data["management"]["status"], "denied")
+        self.assertNotIn("filter", data["config"])
+        # CRT-03: an empty CSV would read as "no policies"; it is refused with the reason instead.
         csv_reply = self.read("/api/export?format=csv", cookie)
-        self.assertEqual(csv_reply.status, 200)
-        self.assertEqual(len(list(csv.reader(io.StringIO(csv_reply.body.decode())))), 2)  # title and header only
+        self.assertEqual(csv_reply.status, 409)
+        self.assertNotIn("content-disposition", csv_reply.headers)
+        body = csv_reply.json()
+        self.assertEqual(body["config"], {"status": "denied", "message": data["config"]["message"]})
+        self.assertEqual(body["error"], f"The configuration was not read (denied: {data['config']['message']}), so "
+                                        "there are no policies to export as CSV.")
+        json_reply = self.read("/api/export?format=json", cookie)
+        self.assertEqual(json_reply.status, 200)
+        self.assertRegex(json_reply.headers["content-disposition"],
+                         r'^attachment; filename="jwicket-branch-fw-01-root-\d{8}T\d{6}Z-config-denied\.json"$')
+        self.assertEqual(json_reply.json()["config"]["status"], "denied")
 
     def test_reading_again_within_two_seconds_is_429(self) -> None:
+        """A different read within the floor is refused; the identical one is answered from the first."""
         cookie = self.signed_in()
         self.assertEqual(self.read("/api/inventory", cookie).status, 200)
-        reply = self.srv.get("/api/inventory", cookie)
+        reply = self.srv.get("/api/inventory?scope=lsys:OTHER", cookie)
         self.assertEqual(reply.status, 429)
         self.assertEqual(reply.headers.get("retry-after"), "2")
-        self.assertEqual(reply.json()["retry_after_s"], 2)
+        body = reply.json()
+        self.assertEqual((body["retry_after_s"], body["reason"], body["interval_s"]), (2, "rate", 2.0))
         self.clock.advance(1)
-        reply = self.srv.get("/api/inventory", cookie)
+        reply = self.srv.get("/api/inventory?scope=lsys:OTHER", cookie)
         self.assertEqual((reply.status, reply.headers.get("retry-after")), (429, "1"))
         self.clock.advance(1)
-        self.assertEqual(self.srv.get("/api/inventory", cookie).status, 200)
+        self.assertEqual(self.srv.get("/api/inventory?scope=lsys:OTHER", cookie).status, 404)
+        self.assertEqual(self.srv.get("/api/inventory", cookie).status, 429)
 
     def test_rate_limit_is_per_operator(self) -> None:
         a = self.signed_in()
@@ -553,8 +922,8 @@ class InventoryTests(HttpCase):
 
     def test_malformed_scope_is_400(self) -> None:
         cookie = self.signed_in()
-        for scope in ("../etc", "lsys:", "tenant:", "lsys:a%20b", "LSYS:x", "root;x", "root%00", "lsys:" + "a" * 64,
-                      "lsys:a/b", "global", "%27or%201=1"):
+        for scope in ("../etc", "lsys:", "tenant:", "lsys:a%20b", "lsys:LS%20A", "LSYS:x", "root;x", "root%00",
+                      "lsys:" + "a" * 64, "lsys:a/b", "global", "%27or%201=1"):
             with self.subTest(scope=scope):
                 self.assertEqual(self.srv.get(f"/api/inventory?scope={scope}", cookie).status, 400)
 
@@ -602,9 +971,11 @@ class InventoryTests(HttpCase):
         self.assertEqual(self.srv.get("/api/export?format=csv").status, 401)
 
     def test_export_is_rate_limited(self) -> None:
+        """An export promises a fresh read, so it is never answered from a stored one (B-8)."""
         cookie = self.signed_in()
         self.assertEqual(self.read("/api/export?format=json", cookie).status, 200)
-        self.assertEqual(self.srv.get("/api/export?format=csv", cookie).status, 429)
+        reply = self.srv.get("/api/export?format=json", cookie)
+        self.assertEqual((reply.status, reply.json()["reason"]), (429, "rate"))
 
     def test_export_right_after_loading_the_page_is_allowed(self) -> None:
         # Export has its own read bucket: loading the inventory and then exporting it is normal use.
@@ -704,9 +1075,16 @@ class SessionLostTests(HttpCase):
                 self.assertEqual(reply.status, 401)
                 body = reply.json()
                 self.assertIs(body.get("signed_out"), True)
-                self.assertTrue(body["error"])
+                self.assertEqual((body["error"], body["reason"]), ("Your device session ended. Sign in again.",
+                                                                   "session-lost"))
+                self.assertRegex(body["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
                 self.assertFalse(self.srv.get("/api/session", cookie).json()["authenticated"])
                 self.assertEqual(self.app.sessions.count(), 0)
+                # Later requests with the same cookie say why too.
+                later = self.read(path, cookie).json()
+                self.assertEqual((later["reason"], later["error"], later["at"]),
+                                 ("session-lost", "Your device session ended. Sign in again.", body["at"]))
+                self.assertNotIn("signed_out", later)
 
     def test_session_lost_mid_snapshot_closes_the_device_session(self) -> None:
         sw = xml("<software-information><host-name>fw</host-name></software-information>")
@@ -733,11 +1111,22 @@ class CapacityTests(HttpCase):
 
     def test_session_cap_is_503_and_closes_the_new_device_session(self) -> None:
         self.app.sessions = SessionStore(idle_s=900, absolute_s=3600, max_sessions=1, clock=self.clock)
+        self.app.wall_clock = lambda: 1_795_500_000.0
         self.assertEqual(self.srv.login("alice")[0].status, 200)
+        self.clock.advance(100)
         reply = self.srv.post_json("/api/login", {"username": "bob", "password": "x"})
         self.assertEqual(reply.status, 503)
         self.assertNotIn("set-cookie", reply.headers)
+        self.assertNotIn("retry-after", reply.headers)  # an automatic retry would not help
         self.assertEqual([d.closed for d in self.devices], [0, 1])
+        body = reply.json()
+        self.assertEqual(body["error"], "Too many people are signed in to J-Wicket on this device. Try again later.")
+        self.assertEqual(body["reason"], "session-limit")
+        self.assertEqual(body["sessions"], {"open": 1, "max": 1})
+        self.assertEqual((body["slot_free_by_s"], body["slot_may_free_in_s"]), (3500, 800))
+        self.assertEqual(body["slot_free_by"], "2026-11-24T06:58:20Z")  # 06:00:00 wall time + 3500 s
+        self.assertNotIn(b"alice", reply.body)  # no other user's name or source
+        self.assertNotIn(b"127.0.0.1", reply.body)
 
     def test_device_service_unreachable_is_503(self) -> None:
         def factory(_user: str) -> Any:
@@ -746,7 +1135,11 @@ class CapacityTests(HttpCase):
         self.app.backend = StaticBackend(factory)
         reply = self.srv.post_json("/api/login", {"username": "alice", "password": "x"})
         self.assertEqual(reply.status, 503)
-        self.assertNotIn("127.0.0.1:830", reply.json()["error"])  # operator-safe message only
+        body = reply.json()
+        self.assertNotIn("127.0.0.1:830", body["error"])  # operator-safe message only
+        self.assertEqual(body["reason"], "unavailable")
+        for key in ("sessions", "slot_free_by", "slot_free_by_s", "slot_may_free_in_s"):
+            self.assertNotIn(key, body)
 
 
 class LabTokenHttpTests(HttpCase):
@@ -828,7 +1221,8 @@ class ConnectionCapTests(HttpCase):
                 finally:
                     third.close()
             self.assertEqual(data, b"", "the third connection was not closed by the server")
-            self.assertLess(time.monotonic() - start, 2.0)
+            # The server waits CONNECTION_QUEUE_S for a free slot before closing; allow a loaded runner 1 s more.
+            self.assertLess(time.monotonic() - start, CONNECTION_QUEUE_S + 1.0)
             self.assertTrue(any("connection limit" in line for line in logged.output))
         finally:
             for sock in held:
@@ -841,6 +1235,30 @@ class ConnectionCapTests(HttpCase):
                 return False
 
         self.assertTrue(wait_until(serves, timeout=5), "server did not recover after held connections closed")
+
+    def test_a_connection_over_the_cap_waits_briefly_for_a_slot(self) -> None:
+        """F1: two browser profiles loading at once go over the cap for a moment; a connection that
+        finds every slot taken is served when one frees within CONNECTION_QUEUE_S, not dropped."""
+        held = [socket.create_connection(("127.0.0.1", self.srv.port), timeout=5) for _ in range(2)]
+        replies: List[int] = []
+
+        def third() -> None:
+            try:
+                replies.append(self.srv.get("/healthz").status)
+            except (ConnectionError, OSError):
+                replies.append(0)
+
+        worker = threading.Thread(target=third)
+        try:
+            time.sleep(0.2)  # both slots are taken by the silent connections
+            worker.start()
+            time.sleep(0.3)
+            held[0].close()  # a slot frees well inside the queue wait
+            worker.join(5)
+            self.assertEqual(replies, [200])
+        finally:
+            for sock in held:
+                sock.close()
 
 
 class IdleConnectionTests(HttpCase):

@@ -1,0 +1,499 @@
+<!-- SYNTHETIC. Shaped like <get-configuration database="committed" inherit="inherit" groups="groups">
+     on Junos 24.4; not captured from a device. See tests/fixtures/README.md.
+     branch-edge: a copy of branch with policy and object edge cases (deactivated statements,
+     configuration comments, unified policies, hidden and direction-changing characters). Whether
+     Junos accepts every one of these names and texts is not verified: they test that J-Wicket shows
+     hostile text visibly, not what a device allows. -->
+<configuration xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos" junos:commit-seconds="1795500000" junos:commit-localtime="2026-11-23 04:00:00 UTC" junos:commit-user="admin">
+  <system>
+    <time-zone>Europe/Paris</time-zone>
+    <syslog>
+      <file>
+        <name>messages</name>
+        <contents><name>any</name><notice/></contents>
+        <contents><name>authorization</name><info/></contents>
+      </file>
+      <file>
+        <name>interactive-commands</name>
+        <contents><name>interactive-commands</name><any/></contents>
+      </file>
+      <file>
+        <name>traffic-log</name>
+        <contents><name>any</name><any/></contents>
+        <match>RT_FLOW_SESSION</match>
+        <structured-data/>
+      </file>
+    </syslog>
+    <services>
+      <outbound-ssh>
+        <client inactive="inactive">
+          <name>central-mgr</name>
+          <device-id>FIXTURE-DEVICE-ID</device-id>
+          <secret>$9$FIXTURE-PLACEHOLDER-NOT-A-SECRET</secret>
+          <services><netconf/></services>
+          <servers>
+            <name>192.0.2.10</name>
+            <port>7804</port>
+          </servers>
+        </client>
+        <client>
+          <name>sd-cloud</name>
+          <services><netconf/></services>
+          <servers>
+            <name>198.51.100.77</name>
+            <port>7804</port>
+          </servers>
+        </client>
+      </outbound-ssh>
+    </services>
+  </system>
+  <security>
+    <log>
+      <mode>event</mode>
+    </log>
+    <junos:comment>/* book note: owner netops */</junos:comment>
+    <address-book>
+      <name>global</name>
+      <description>Shared objects ‮evil​</description>
+      <address junos:group="corp-baseline" inactive="inactive">
+        <name>corp-lan</name>
+        <ip-prefix>10.10.0.0/16</ip-prefix>
+      </address>
+      <address>
+        <name>web1</name>
+        <ip-prefix>10.20.0.10/32</ip-prefix>
+      </address>
+      <address>
+        <name>web2</name>
+        <ip-prefix>10.20.0.11/32</ip-prefix>
+      </address>
+      <address>
+        <name>mail</name>
+        <description>Inbound mail relay</description>
+        <ip-prefix>10.20.0.25/32</ip-prefix>
+      </address>
+      <address>
+        <name>partner-portal</name>
+        <dns-name><name>portal.partner.example</name></dns-name>
+      </address>
+      <address>
+        <name>branch-printers</name>
+        <range-address>
+          <name>10.10.40.10</name>
+          <to><range-high>10.10.40.19</range-high></to>
+        </range-address>
+      </address>
+      <address>
+        <name>bad-host-1</name>
+        <ip-prefix>198.51.100.66/32</ip-prefix>
+      </address>
+      <address>
+        <name>bad-host-2</name>
+        <ip-prefix>203.0.113.99/32</ip-prefix>
+      </address>
+      <address-set>
+        <name>web-servers</name>
+        <address><name>web1</name></address>
+        <address><name>web2</name></address>
+      </address-set>
+      <address-set>
+        <name>dmz-all</name>
+        <address><name>mail</name></address>
+        <address-set><name>web-servers</name></address-set>
+      </address-set>
+      <address-set>
+        <name>blocklist</name>
+        <address><name>bad-host-1</name></address>
+        <address><name>bad-host-2</name></address>
+      </address-set>
+      <junos:comment>/* host note ‮reversed */</junos:comment>
+      <address><name>h1</name><description>Web host</description><ip-prefix>192.0.2.1/32</ip-prefix></address>
+      <address><name>h2</name><ip-prefix>192.0.2.2/32</ip-prefix></address>
+      <address inactive="inactive"><name>h3</name><ip-prefix>192.0.2.3/32</ip-prefix></address>
+      <address><name>h4</name><ip-prefix>192.0.2.4/32</ip-prefix><future-knob/></address>
+      <address><name>bidi‮name</name><ip-prefix>192.0.2.5/32</ip-prefix></address>
+      <address><name>cafe.de</name><dns-name><name>cafe.de</name></dns-name></address>
+      <address><name>wild</name><wildcard-address><name>10.0.0.1/255.0.255.0</name></wildcard-address></address>
+      <address-set>
+        <name>s-mixed</name>
+        <address><name>h1</name></address>
+        <address inactive="inactive"><name>h2</name></address>
+        <address><name>h3</name></address>
+      </address-set>
+      <address-set inactive="inactive"><name>s-off</name><address><name>h4</name></address></address-set>
+      <address-set><name>s-outer</name><address-set><name>s-off</name></address-set></address-set>
+    </address-book>
+    <address-book>
+      <name>dmz-book</name>
+      <address>
+        <name>dmz-jump</name>
+        <ip-prefix>10.20.0.50/32</ip-prefix>
+      </address>
+      <attach>
+        <zone><name>dmz</name></zone>
+      </attach>
+    </address-book>
+    <address-book>
+      <name>empty-book</name>
+      <attach><zone><name>trust</name></zone></attach>
+    </address-book>
+    <address-book>
+      <name>off-attach</name>
+      <address><name>h9</name><ip-prefix>198.51.100.9/32</ip-prefix></address>
+      <attach><zone inactive="inactive"><name>untrust</name></zone></attach>
+    </address-book>
+    <address-book inactive="inactive">
+      <name>off-book</name>
+      <address><name>h8</name><ip-prefix>198.51.100.8/32</ip-prefix></address>
+      <attach><zone><name>dmz</name></zone></attach>
+    </address-book>
+    <zones>
+      <junos:comment>/* zone note */</junos:comment>
+      <security-zone>
+        <name>trust</name>
+        <description>Inside ‮LAN</description>
+        <screen inactive="inactive">trust-screen</screen>
+        <tcp-rst/>
+        <host-inbound-traffic junos:group="mgmt-baseline">
+          <system-services><name>all</name></system-services>
+          <system-services><name>telnet</name><except/></system-services>
+          <system-services inactive="inactive"><name>ftp</name></system-services>
+          <protocols><name>all</name></protocols>
+          <protocols><name>bgp</name><except/></protocols>
+          <protocols inactive="inactive"><name>ospf</name></protocols>
+        </host-inbound-traffic>
+        <junos:comment>/* uplink */</junos:comment>
+        <interfaces>
+          <name>ge-0/0/1.0</name>
+        </interfaces>
+        <interfaces inactive="inactive"><name>ge-0/0/3.0</name></interfaces>
+        <interfaces>
+          <name>ge-0/0/4.0</name>
+          <host-inbound-traffic>
+            <system-services><name>all</name></system-services>
+            <system-services><name>ssh</name><except/></system-services>
+          </host-inbound-traffic>
+        </interfaces>
+        <interfaces>
+          <name>ge-0/0/5.0</name>
+          <host-inbound-traffic>
+            <system-services inactive="inactive"><name>ping</name></system-services>
+          </host-inbound-traffic>
+        </interfaces>
+        <interfaces><name>ge-0/0/6.0‮1.0</name></interfaces>
+      </security-zone>
+      <security-zone>
+        <name>untrust</name>
+        <screen>untrust-screen</screen>
+        <interfaces>
+          <name>ge-0/0/0.0</name>
+          <host-inbound-traffic>
+            <system-services><name>ike</name></system-services>
+            <system-services><name>dhcp</name></system-services>
+          </host-inbound-traffic>
+        </interfaces>
+      </security-zone>
+      <security-zone>
+        <name>dmz</name>
+        <interfaces>
+          <name>ge-0/0/2.0</name>
+        </interfaces>
+      </security-zone>
+      <security-zone inactive="inactive">
+        <name>old-lab</name>
+        <interfaces><name>ge-0/0/9.0</name></interfaces>
+      </security-zone>
+      <functional-zone>
+        <management/>
+      </functional-zone>
+    </zones>
+    <policies>
+      <junos:comment>/* CHG-1234 internet edge */</junos:comment>
+      <policy>
+        <from-zone-name>trust</from-zone-name>
+        <to-zone-name>untrust</to-zone-name>
+        <policy junos:group="corp-baseline">
+          <name>baseline-dns</name>
+          <description>Inherited from the corporate baseline group</description>
+          <match>
+            <source-address>corp-lan</source-address>
+            <destination-address>any</destination-address>
+            <application>junos-dns-udp</application>
+          </match>
+          <then>
+            <permit/>
+          </then>
+        </policy>
+        <junos:comment>/* owner: web team ‮evil‬ ticket CHG-42 */</junos:comment>
+        <junos:comment># second line</junos:comment>
+        <policy>
+          <name>allow-web</name>
+          <match>
+            <source-address>corp-lan</source-address>
+            <destination-address>any</destination-address>
+            <application>web-apps</application>
+          </match>
+          <junos:comment># temporary, remove after migration</junos:comment>
+          <then>
+            <permit/>
+            <log><session-close/></log>
+            <count/>
+          </then>
+        </policy>
+        <policy inactive="inactive">
+          <name>block-telnet</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>junos-telnet</application>
+          </match>
+          <then>
+            <deny/>
+          </then>
+        </policy>
+        <policy>
+          <name>uni-web</name>
+          <description>Unified​ policy C1 and ‮RLO‬</description>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <dynamic-application>junos:HTTP</dynamic-application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>uni-any</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <dynamic-application>any</dynamic-application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>web​proxy</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>junos-http</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>use-mixed</name>
+          <match>
+            <source-address>s-mixed</source-address>
+            <destination-address>any</destination-address>
+            <application>app-set</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>use-outer</name>
+          <match>
+            <source-address>s-outer</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy inactive="inactive">
+          <name>old-rule</name>
+          <match>
+            <source-address>h9</source-address>
+            <destination-address>bidi‮name</destination-address>
+            <application>tcp-old</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+        <policy>
+          <name>part-off</name>
+          <match>
+            <source-address>h1</source-address>
+            <source-address inactive="inactive">cafe.de</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then><permit/></then>
+        </policy>
+      </policy>
+      <policy>
+        <from-zone-name>trust</from-zone-name>
+        <to-zone-name>dmz</to-zone-name>
+        <policy>
+          <name>admin-to-dmz</name>
+          <match>
+            <source-address>corp-lan</source-address>
+            <destination-address>dmz-all</destination-address>
+            <destination-address>dmz-jump</destination-address>
+            <application>junos-ssh</application>
+            <application>junos-https</application>
+          </match>
+          <then>
+            <permit/>
+            <log><session-init/><session-close/></log>
+          </then>
+        </policy>
+      </policy>
+      <policy>
+        <from-zone-name>untrust</from-zone-name>
+        <to-zone-name>dmz</to-zone-name>
+        <policy>
+          <name>publish-web</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>web-servers</destination-address>
+            <application>web-apps</application>
+          </match>
+          <then>
+            <permit>
+              <application-services>
+                <idp-policy>recommended</idp-policy>
+              </application-services>
+            </permit>
+            <log><session-close/></log>
+          </then>
+        </policy>
+        <policy>
+          <name>publish-mail</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>mail</destination-address>
+            <application>junos-smtp</application>
+          </match>
+          <then>
+            <permit/>
+          </then>
+          <scheduler-name>business-hours</scheduler-name>
+        </policy>
+      </policy>
+      <policy>
+        <from-zone-name>untrust</from-zone-name>
+        <to-zone-name>trust</to-zone-name>
+        <policy>
+          <name>deny-inbound</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>tcp-8443</application>
+          </match>
+          <then>
+            <deny/>
+            <log><session-init/></log>
+          </then>
+        </policy>
+      </policy>
+      <policy>
+        <from-zone-name>dmz</from-zone-name>
+        <to-zone-name>untrust</to-zone-name>
+        <policy>
+          <name>dmz-updates</name>
+          <match>
+            <source-address>web-servers</source-address>
+            <destination-address>partner-portal</destination-address>
+            <application>junos-https</application>
+          </match>
+          <then>
+            <permit>
+              <firewall-authentication>
+                <pass-through/>
+              </firewall-authentication>
+            </permit>
+          </then>
+        </policy>
+      </policy>
+      <junos:comment>/* global section note */</junos:comment>
+      <global>
+        <junos:comment>/* blocklist owner SOC */</junos:comment>
+        <policy>
+          <name>global-blocklist</name>
+          <match>
+            <source-address>blocklist</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then>
+            <deny/>
+            <log><session-init/></log>
+          </then>
+        </policy>
+        <policy junos:group="corp-baseline">
+          <name>global-printers</name>
+          <match>
+            <source-address>branch-printers</source-address>
+            <destination-address>any</destination-address>
+            <application>junos-ipp</application>
+            <from-zone>trust</from-zone>
+            <to-zone>dmz</to-zone>
+          </match>
+          <then>
+            <permit/>
+          </then>
+        </policy>
+      </global>
+      <junos:comment>/* default reviewed in CHG-7 */</junos:comment>
+      <default-policy inactive="inactive">
+        <permit-all/>
+      </default-policy>
+      <policy-rematch inactive="inactive"/>
+      <pre-id-default-policy inactive="inactive"><then><log><session-close/></log></then></pre-id-default-policy>
+    </policies>
+  </security>
+  <applications>
+    <application inactive="inactive">
+      <name>tcp-8443</name>
+      <protocol>tcp</protocol>
+      <destination-port>8443</destination-port>
+      <application-protocol>ftp</application-protocol>
+      <inactivity-timeout>30</inactivity-timeout>
+    </application>
+    <junos:comment>/* app note */</junos:comment>
+    <application><name>tcp-old</name><protocol>tcp</protocol><destination-port>9000</destination-port></application>
+    <application><name>icmp-echo</name><protocol>icmp</protocol><icmp-type>8</icmp-type><inactivity-timeout>5</inactivity-timeout></application>
+    <application><name>ftp-alg</name><application-protocol>ftp</application-protocol><protocol>tcp</protocol><destination-port inactive="inactive">2121</destination-port></application>
+    <application inactive="inactive"><name>app-off</name><protocol>udp</protocol><destination-port>7000</destination-port></application>
+    <application-set><name>app-inner</name><application><name>app-off</name></application></application-set>
+    <application-set inactive="inactive"><name>app-inner-off</name><application><name>tcp-old</name></application></application-set>
+    <application-set>
+      <name>app-set</name>
+      <application><name>junos-https</name></application>
+      <application inactive="inactive"><name>icmp-echo</name></application>
+      <application-set><name>app-inner-off</name></application-set>
+      <application-set><name>app-inner</name></application-set>
+    </application-set>
+    <application-set>
+      <name>web-apps</name>
+      <application><name>junos-http</name></application>
+      <application><name>junos-https</name></application>
+      <application><name>tcp-8443</name></application>
+    </application-set>
+  </applications>
+  <logical-systems>
+    <name>LS-OFF</name>
+    <security>
+      <zones>
+        <security-zone><name>off-in</name><interfaces><name>lt-0/0/0.11</name></interfaces></security-zone>
+        <security-zone><name>off-out</name><interfaces><name>lt-0/0/0.13</name></interfaces></security-zone>
+      </zones>
+      <policies inactive="inactive">
+        <policy>
+          <from-zone-name>off-in</from-zone-name>
+          <to-zone-name>off-out</to-zone-name>
+          <policy>
+            <name>off-allow</name>
+            <match>
+              <source-address>any</source-address>
+              <destination-address>any</destination-address>
+              <application>junos-https</application>
+            </match>
+            <then><permit/></then>
+          </policy>
+        </policy>
+        <default-policy><permit-all/></default-policy>
+      </policies>
+    </security>
+  </logical-systems>
+  <logical-systems>
+    <name>LS-EMPTY</name>
+  </logical-systems>
+</configuration>

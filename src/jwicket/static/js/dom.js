@@ -3,6 +3,12 @@
 // Strict CSP with Trusted Types: text goes in through text nodes, SVG through createElementNS,
 // nothing is ever parsed from a string, and styles are set through CSSOM (style: {prop: value}).
 // Safe to import from node tests: nothing here touches document or window at import time.
+//
+// Device text is untrusted: render it with vis() (visSvg() inside SVG), which shows each hidden or
+// direction-changing character as a visible badge instead of applying it; titles and labels take
+// format.plain().
+
+import { controlParts, hasControls, plain, stamp, time, toDate } from './format.js';
 
 export const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -133,6 +139,74 @@ export function marked(text, indices, cls) {
   return out;
 }
 
+// ---- device text, visibly -------------------------------------------------------------------------
+
+const isHigh = (c) => c >= 0xd800 && c <= 0xdbff;
+const isLow = (c) => c >= 0xdc00 && c <= 0xdfff;
+
+/** [start, end) UTF-16 ranges clamped to the string, sorted and merged; never inside a surrogate pair. */
+function normMarks(str, marks) {
+  const len = str.length;
+  if (!Array.isArray(marks) || !marks.length || !len) return [];
+  const inPair = (i) => i > 0 && i < len && isHigh(str.charCodeAt(i - 1)) && isLow(str.charCodeAt(i));
+  const list = [];
+  for (const m of marks) {
+    if (!Array.isArray(m) || m.length < 2) continue;
+    let a = Math.max(0, Math.min(len, Math.floor(Number(m[0]))));
+    let b = Math.max(0, Math.min(len, Math.floor(Number(m[1]))));
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) continue;
+    if (inPair(a)) a -= 1;
+    if (inPair(b)) b += 1;
+    list.push([a, b]);
+  }
+  list.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const out = [];
+  for (const m of list) {
+    const last = out[out.length - 1];
+    if (last && m[0] <= last[1]) last[1] = Math.max(last[1], m[1]);
+    else out.push(m);
+  }
+  return out;
+}
+
+function ctlBadge(name) {
+  return h('span', { class: 'ctl-badge', title: `A hidden ${name} character is here (shown, not applied)` }, name);
+}
+
+/**
+ * Device text as nodes to append, with every control or format character shown as a badge
+ * (`<span class="ctl-badge">U+202E</span>`) instead of being applied: vis(name, { all: true }) for
+ * names (tab and line feed badged too), vis(description) for text that may span lines. Plain runs are
+ * strings (they become text nodes when appended). `marks`: [start, end) UTF-16 offsets into the
+ * original string, merged and sorted here; marked runs become <mark class={markClass}>, and a badge
+ * inside a mark goes inside it. No control and no mark: [String(value ?? '')].
+ */
+export function vis(value, { all = false, marks = null, markClass = 'hit' } = {}) {
+  const str = String(value ?? '');
+  const ms = normMarks(str, marks);
+  if (!ms.length && !hasControls(str, { all })) return [str];
+  const pieces = (s) => controlParts(s, { all }).map((p) => (p.ctl ? ctlBadge(p.ctl) : p.text));
+  const out = [];
+  let pos = 0;
+  for (const [a, b] of ms) {
+    if (a > pos) out.push(...pieces(str.slice(pos, a)));
+    out.push(h('mark', { class: markClass }, pieces(str.slice(a, b))));
+    pos = b;
+  }
+  if (pos < str.length) out.push(...pieces(str.slice(pos)));
+  return out;
+}
+
+/**
+ * vis() for SVG text: plain runs are strings and each control is <tspan class="ctl-badge">U+202E</tspan>.
+ * The caller sets the element's aria-label with format.plain().
+ */
+export function visSvg(value, { all = false } = {}) {
+  const str = String(value ?? '');
+  if (!hasControls(str, { all })) return [str];
+  return controlParts(str, { all }).map((p) => (p.ctl ? svg('tspan', { class: 'ctl-badge' }, p.ctl) : p.text));
+}
+
 // ---- timing helpers ------------------------------------------------------------------------------
 
 export function debounce(fn, ms) {
@@ -187,188 +261,6 @@ export function rafBatch(fn) {
     }
   };
   return wrapped;
-}
-
-// ---- virtual list --------------------------------------------------------------------------------
-
-/**
- * A fixed-row-height virtual list. `container` is the scrolling element; the list adds a body element
- * (`.body`, class vlist-body) sized to count * rowHeight and keeps only the visible rows (plus overscan)
- * in the DOM, in index order. Content placed in the container before the list (a sticky header) is
- * allowed: positions are measured from the body's offset.
- *
- *   const list = new VirtualList({ container, rowHeight: 26, count: rows.length, render: (i) => node,
- *                                  onRangeChange: ({ start, end, first, last }) => {} });
- *   list.setCount(n); list.refresh(); list.refresh(i); list.scrollToIndex(i, 'center'); list.destroy();
- */
-export class VirtualList {
-  constructor({ container, rowHeight, count = 0, render, onRangeChange, overscan = 8 }) {
-    if (!container || typeof render !== 'function') throw new TypeError('VirtualList needs a container and render(i)');
-    this.container = container;
-    this.rowHeight = Math.max(1, Number(rowHeight) || 24);
-    this.count = Math.max(0, count | 0);
-    this.renderRow = render;
-    this.onRangeChange = typeof onRangeChange === 'function' ? onRangeChange : null;
-    this.overscan = overscan;
-    this.rows = new Map();
-    this.range = { start: 0, end: -1, first: 0, last: -1 };
-    container.classList.add('vlist');
-    this.body = document.createElement('div');
-    this.body.className = 'vlist-body';
-    container.append(this.body);
-    this._schedule = rafBatch(() => this._reconcile(false));
-    this._onScroll = () => this._schedule();
-    container.addEventListener('scroll', this._onScroll, { passive: true });
-    this._ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => this._schedule()) : null;
-    if (this._ro) this._ro.observe(container);
-    this._size();
-    this._reconcile(false);
-  }
-
-  _size() {
-    this.body.style.height = `${this.count * this.rowHeight}px`;
-  }
-
-  _offset() {
-    // Distance from the top of the scroll content to the list body (a sticky header above it, say).
-    return this.body.offsetTop;
-  }
-
-  _window() {
-    const rh = this.rowHeight;
-    const top = Math.max(0, this.container.scrollTop - this._offset());
-    const height = this.container.clientHeight || 0;
-    const first = Math.min(this.count - 1, Math.floor(top / rh));
-    const last = Math.min(this.count - 1, Math.ceil((top + height) / rh) - 1);
-    return {
-      first: Math.max(0, first),
-      last: Math.max(-1, last),
-      start: Math.max(0, first - this.overscan),
-      end: Math.min(this.count - 1, last + this.overscan),
-    };
-  }
-
-  _place(node, i) {
-    node.classList.add('vlist-row');
-    node.dataset.index = String(i);
-    node.style.top = `${i * this.rowHeight}px`;
-    node.style.height = `${this.rowHeight}px`;
-  }
-
-  _reconcile(rerender) {
-    if (!this.body) return;
-    const win = this._window();
-    for (const [i, node] of this.rows) {
-      if (i < win.start || i > win.end || i >= this.count) {
-        node.remove();
-        this.rows.delete(i);
-      }
-    }
-    let prev = null;
-    for (let i = win.start; i <= win.end; i += 1) {
-      const existing = this.rows.get(i);
-      if (existing && !rerender) {
-        prev = existing;
-        continue;
-      }
-      const node = this.renderRow(i);
-      if (!node) continue;
-      this._place(node, i);
-      if (existing) {
-        const hadFocus = existing.contains(document.activeElement);
-        existing.replaceWith(node);
-        if (hadFocus && typeof node.focus === 'function') node.focus({ preventScroll: true });
-      } else if (prev) {
-        prev.after(node);
-      } else {
-        this.body.prepend(node);
-      }
-      this.rows.set(i, node);
-      prev = node;
-    }
-    const changed =
-      win.start !== this.range.start ||
-      win.end !== this.range.end ||
-      win.first !== this.range.first ||
-      win.last !== this.range.last;
-    this.range = win;
-    if (changed && this.onRangeChange) this.onRangeChange({ ...win });
-  }
-
-  setCount(n) {
-    this.count = Math.max(0, n | 0);
-    this._size();
-    this._reconcile(false);
-  }
-
-  setRowHeight(px) {
-    const next = Math.max(1, Number(px) || this.rowHeight);
-    if (next === this.rowHeight) return;
-    const firstVisible = this.range.first;
-    this.rowHeight = next;
-    this._size();
-    this._reconcile(true);
-    this.scrollToIndex(firstVisible, 'start');
-  }
-
-  /** Re-render every row in the window, or only row `i` when given. */
-  refresh(i) {
-    if (i === undefined) {
-      this._reconcile(true);
-      return;
-    }
-    const existing = this.rows.get(i);
-    if (!existing) return;
-    const node = this.renderRow(i);
-    if (!node) return;
-    this._place(node, i);
-    const hadFocus = existing.contains(document.activeElement);
-    existing.replaceWith(node);
-    this.rows.set(i, node);
-    if (hadFocus && typeof node.focus === 'function') node.focus({ preventScroll: true });
-  }
-
-  /** align: 'nearest' (default), 'start', 'center' or 'end'. */
-  scrollToIndex(i, align = 'nearest') {
-    if (!this.count) return;
-    const idx = Math.max(0, Math.min(this.count - 1, i | 0));
-    const rh = this.rowHeight;
-    const off = this._offset();
-    const view = this.container.clientHeight || 0;
-    const top = off + idx * rh;
-    const cur = this.container.scrollTop;
-    let next = cur;
-    if (align === 'start') next = top;
-    else if (align === 'center') next = top - (view - rh) / 2;
-    else if (align === 'end') next = top - view + rh;
-    else if (top < cur + off) next = top - off;
-    else if (top + rh > cur + view) next = top + rh - view;
-    this.container.scrollTop = Math.max(0, next);
-    this._reconcile(false);
-  }
-
-  scrollToEnd() {
-    this.container.scrollTop = this.container.scrollHeight;
-    this._reconcile(false);
-  }
-
-  atEnd(slack = this.rowHeight) {
-    const c = this.container;
-    return c.scrollTop + c.clientHeight >= c.scrollHeight - slack;
-  }
-
-  rowAt(i) {
-    return this.rows.get(i) || null;
-  }
-
-  destroy() {
-    this._schedule.cancel();
-    this.container.removeEventListener('scroll', this._onScroll);
-    if (this._ro) this._ro.disconnect();
-    this.rows.clear();
-    if (this.body) this.body.remove();
-    this.body = null;
-  }
 }
 
 // ---- icons ---------------------------------------------------------------------------------------
@@ -467,6 +359,11 @@ export const STATE_TITLES = {
   failed: 'The device could not complete this read',
   'session-lost': 'Your device session ended',
   refused: 'Too much to read in one go',
+  'count-unknown': 'Not listed: how many sessions match is not known',
+  'filter-rejected': 'The device did not accept this filter',
+  waiting: 'Waiting for another read',
+  busy: 'Other reads for your session kept J-Wicket busy',
+  internal: 'J-Wicket could not complete this request',
   offline: 'J-Wicket did not answer',
   empty: 'Nothing to show',
   loading: 'Reading the device',
@@ -479,7 +376,24 @@ export const STATE_HINTS = {
   failed: 'Refresh to try again. If it keeps failing, check the J-Wicket log on the device.',
   'session-lost': 'Sign in again. J-Wicket keeps no password, so it cannot reconnect for you.',
   offline: 'Check that J-Wicket is running and, through an SSH tunnel, that the tunnel is open.',
+  'count-unknown': 'J-Wicket lists sessions only when it knows the count is small enough; nothing failed on the device.',
+  'filter-rejected': 'Remove the device filters, or filter in the browser instead.',
+  waiting: 'Another read for your session is running (another tab or window of this session?). J-Wicket tries again by itself.',
+  busy: 'J-Wicket tries again in 30 s, or read again now.',
+  internal: 'This is a J-Wicket fault, not a device failure. Refresh to try again; the J-Wicket log on the device has the details.',
 };
+
+/** The state-code chip text where it differs from the status itself. */
+export const STATE_CODES = {
+  'count-unknown': 'count unknown',
+  'filter-rejected': 'filter rejected',
+  waiting: 'waiting',
+  busy: 'busy',
+  internal: 'internal',
+};
+
+// Only these interrupt a screen reader (role="alert"); the others are states, not faults.
+const ALERT_STATES = new Set(['failed', 'internal']);
 
 // The API's default operator-safe texts (src/jwicket/junos/errors.py); the state title already says them.
 const GENERIC_MESSAGES = new Set(
@@ -496,6 +410,11 @@ const STATE_ICONS = {
   failed: 'alert',
   'session-lost': 'signout',
   refused: 'filter',
+  'count-unknown': 'help',
+  'filter-rejected': 'filter',
+  waiting: 'clock',
+  busy: 'clock',
+  internal: 'alert',
   offline: 'wifi',
   empty: 'info',
   info: 'info',
@@ -514,41 +433,91 @@ export function stateCard({ status = 'failed', message, title, hint, actions, co
   if (message && (norm(message) === norm(title || STATE_TITLES[key]) || (!title && GENERIC_MESSAGES.has(norm(message))))) message = null;
   return h(
     'div',
-    { class: ['state', compact && 'compact'], dataset: { state: key }, role: key === 'failed' ? 'alert' : null },
+    { class: ['state', compact && 'compact'], dataset: { state: key }, role: ALERT_STATES.has(key) ? 'alert' : null },
     h('span', { class: 'state-icon' }, icon(STATE_ICONS[key] || 'info')),
     h(
       'div',
       { class: 'state-text' },
-      code && key !== 'empty' && key !== 'info' && key !== 'loading' ? h('span', { class: 'state-code' }, status) : null,
-      h('span', { class: 'state-title' }, title || STATE_TITLES[key]),
-      message ? h('span', { class: 'state-msg' }, message) : null,
+      code && key !== 'empty' && key !== 'info' && key !== 'loading' ? h('span', { class: 'state-code' }, STATE_CODES[status] || status) : null,
+      h('span', { class: 'state-title' }, vis(title || STATE_TITLES[key])),
+      message ? h('span', { class: 'state-msg' }, vis(message)) : null,
       hintText ? h('span', { class: 'state-hint' }, hintText) : null,
       actions && actions.length ? h('div', { class: 'state-actions' }, actions) : null,
     ),
   );
 }
 
-function pad2(n) {
-  return String(n).padStart(2, '0');
+const CONFIG_NOT_READ = {
+  denied: 'configuration not read (your login class does not allow it)',
+  failed: 'configuration read failed',
+  unsupported: 'configuration read not supported',
+};
+
+/**
+ * The parts of the line under a view title, in order (pure: no DOM):
+ *   1. `host` (mono), then `scope`;
+ *   2. when `config` is given and its status is not "ok", a muted part saying the configuration was not
+ *      read (titled with `config.message`), and the time part then reads "checked HH:MM:SS UTC";
+ *   3. otherwise, with `source.database === 'committed'`, "committed config" (", inheritance expanded"
+ *      when `source.inheritance`), and the time part reads "read HH:MM:SS UTC";
+ *   4. the user: "as <user>", or "lab token: as <user>" when `backend === 'lab-token'`; the user name is
+ *      mono, so this part carries `head` (the leading text that is not mono);
+ *   5. `extra`: strings become parts; a DOM node is passed through as `{text, node}`.
+ * Returns `[{ text, mono?, muted?, title?, head?, node? }]`. Titles are already format.plain().
+ */
+export function subParts({ host, scope, readAt, user, backend, config, source, extra } = {}) {
+  const parts = [];
+  if (host) parts.push({ text: String(host), mono: true });
+  if (scope) parts.push({ text: String(scope) });
+  let timeWord = 'read';
+  if (config && typeof config === 'object' && config.status !== 'ok') {
+    const status = String(config.status ?? 'unknown');
+    const part = { text: CONFIG_NOT_READ[status] || `configuration not read (${status})`, muted: true };
+    if (config.message) part.title = plain(config.message);
+    parts.push(part);
+    timeWord = 'checked';
+  } else if (source && typeof source === 'object' && source.database === 'committed') {
+    parts.push({
+      text: source.inheritance ? 'committed config, inheritance expanded' : 'committed config',
+      title: `committed configuration database; group inheritance ${source.inheritance ? 'expanded' : 'not expanded'}`,
+    });
+  }
+  const at = toDate(readAt);
+  if (at) parts.push({ text: `${timeWord} ${time(at)} UTC`, title: stamp(at) });
+  if (user) {
+    const head = backend === 'lab-token' ? 'lab token: as ' : 'as ';
+    parts.push({ text: `${head}${user}`, mono: true, head });
+  }
+  for (const x of [].concat(extra ?? [])) {
+    if (x === null || x === undefined || x === '' || x === false) continue;
+    if (typeof x === 'object' && typeof x.nodeType === 'number') parts.push({ text: String(x.textContent || ''), node: x });
+    else parts.push({ text: String(x) });
+  }
+  return parts;
 }
 
 /**
- * The line under a view title, built the same way in every view:
- * "host · Scope label · read HH:MM:SS UTC · as user", host and user in mono. Missing parts are left
- * out; `extra` (strings or nodes) is appended. Fills `el` when given, and returns the nodes.
- *   viewSub(el, { host, scope: ctx.ui.scopeLabel(id), readAt, user, extra: ['12 policies'] })
+ * The line under a view title, built the same way in every view from subParts():
+ * "host · Scope label · committed config · read HH:MM:SS UTC · as user", device strings through vis().
+ * Missing parts are left out; `extra` (strings or nodes) is appended. Fills `el` when given, and
+ * returns the nodes.
+ *   viewSub(el, { host, scope: ctx.ui.scopeLabel(id), readAt, user, backend, config, source, extra })
  */
-export function viewSub(el, { host, scope, readAt, user, extra } = {}) {
-  const parts = [];
-  if (host) parts.push(h('span', { class: 'mono' }, host));
-  if (scope) parts.push(h('span', null, scope));
-  if (readAt) {
-    const d = readAt instanceof Date ? readAt : new Date(readAt);
-    if (!Number.isNaN(d.getTime())) parts.push(h('span', null, `read ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())} UTC`));
-  }
-  if (user) parts.push(h('span', null, 'as ', h('span', { class: 'mono' }, user)));
-  for (const x of [].concat(extra || [])) if (x !== null && x !== undefined && x !== '') parts.push(typeof x === 'object' ? x : h('span', null, String(x)));
-  const nodes = parts.flatMap((p, i) => (i ? [h('span', { class: 'sub-sep', 'aria-hidden': 'true' }, ' · '), p] : [p]));
+export function viewSub(el, opts = {}) {
+  const nodes = [];
+  subParts(opts || {}).forEach((p, i) => {
+    if (i) nodes.push(h('span', { class: 'sub-sep', 'aria-hidden': 'true' }, ' · '));
+    if (p.node) {
+      nodes.push(p.node);
+      return;
+    }
+    const title = p.title || null;
+    if (p.mono && p.head !== undefined) {
+      nodes.push(h('span', { title }, p.head, h('span', { class: 'mono' }, vis(p.text.slice(p.head.length), { all: true }))));
+    } else {
+      nodes.push(h('span', { class: [p.mono && 'mono', p.muted && 'muted'], title }, vis(p.text, { all: true })));
+    }
+  });
   if (el) put(el, nodes);
   return nodes;
 }

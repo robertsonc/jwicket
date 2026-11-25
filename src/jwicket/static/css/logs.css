@@ -98,8 +98,56 @@
   border-color: var(--amber);
 }
 
+/* LG-02: show times in the device's configured zone (offered only when the browser can convert to it). */
+.lg-zone-btn {
+  flex: none;
+  padding: 3px 9px;
+  min-height: 24px;
+  white-space: nowrap;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: 600 11px/1.3 var(--font-ui);
+  text-align: left;
+}
+
+.lg-zone-btn[aria-pressed="true"]::before {
+  content: "\2713  ";
+}
+
+.lg-zone-btn:hover {
+  border-color: var(--sky);
+  color: var(--text);
+}
+
+.lg-zone-btn[aria-pressed="true"] {
+  border-color: var(--sky-line);
+  background: var(--sky-soft);
+  color: var(--text);
+}
+
 .lg-actions {
   flex: none;
+}
+
+/* The shell's idle pause (SL-08): reads wait for activity. Muted like a pause, but a round, still dot
+   (the operator's own pause is the square one). */
+.live-pill.lg-idle .dot {
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+/* Device text containers: isolated, so a direction mark in one value cannot reorder its neighbours
+   (control characters themselves are shown as badges, never applied). */
+.lg-src-txt,
+.lg-stream-host,
+.lg-where-text,
+.lg-tl-what,
+.lg-d-tag,
+.lg-d-fields th,
+.lg-d-fields td {
+  unicode-bidi: isolate;
 }
 
 .lg-iv > button {
@@ -272,6 +320,13 @@
 .lg-src-name {
   font: 600 12.5px/1.1 var(--font-mono);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A source with a state badge (note, logging disabled) or a longer label gets more room. */
+.lg-src.has-badges {
+  max-width: 400px;
 }
 
 .lg-src-meta {
@@ -282,6 +337,39 @@
   color: var(--faint);
   font-size: 10.5px;
   line-height: 1.2;
+}
+
+/* LOG-10: source states. A deactivated file is still offered (older lines may be there), muted. */
+.lg-src.is-inactive .lg-src-name {
+  color: var(--muted);
+}
+
+.lg-src-meta.is-off {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.lg-src-badge {
+  align-self: center;
+  flex: none;
+  padding: 2px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  font: 700 9px/1 var(--font-ui);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.lg-src-badge.is-note {
+  border-color: var(--amber-line);
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.lg-src-badge.is-off {
+  background: var(--muted-soft);
 }
 
 .lg-src-flow {
@@ -444,6 +532,16 @@
   color: var(--amber);
 }
 
+.lg-stream-host.is-inactive > b {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
+}
+
+.lg-stream-host.is-inactive svg {
+  color: var(--faint);
+}
+
 .lg-where-jump {
   display: flex;
   flex-wrap: wrap;
@@ -546,6 +644,11 @@
   font-size: 11px;
 }
 
+.lg-menu-note.is-cut {
+  max-width: 300px;
+  color: var(--amber);
+}
+
 /* ---- timeline: family toggles and histogram --------------------------------------------------- */
 
 .lg-timeline {
@@ -574,19 +677,39 @@
   font-size: 11.5px;
 }
 
-/* Bucket size, clock and brush hint: above the plot, right-aligned, never over the newest bars. */
+/* Above the plot, never over the bars: the earlier-lines note (left, amber) and the bucket size, clock
+   and brush hint (right). */
 .lg-tl-legend {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 8px;
   min-height: 14px;
   margin-top: 4px;
   padding-right: 8px;
 }
 
 .hg-legend {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
   color: var(--faint);
   font: 10px/14px var(--font-mono);
   white-space: nowrap;
+  overflow: hidden;
+}
+
+.hg-earlier {
+  flex: none;
+  color: var(--amber);
+  font: 10px/14px var(--font-ui);
+}
+
+.hg-scale {
+  min-width: 0;
+  margin-left: auto;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -760,7 +883,7 @@
   opacity: .8;
 }
 
-.hg-earlier {
+.hg-earlier-note {
   fill: var(--amber);
   font: 10px var(--font-ui);
 }
@@ -1007,8 +1130,27 @@
   pointer-events: none;
 }
 
+/* Reasons: the bar is neutral and a dot carries J-Wicket's close-reason group (LOG-06); only the error
+   group is red. */
+.lg-fc-item.fc-reason {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .lg-fc-item.fc-reason .lg-fc-bar {
-  background: var(--deny-soft);
+  background: var(--muted-soft);
+}
+
+.lg-fc-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cr, var(--muted));
+}
+
+.lg-fc-dot.cr-undoc {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--cr, var(--muted));
 }
 
 .lg-fc-item.fc-policy .lg-fc-bar {
@@ -1479,7 +1621,8 @@
   white-space: nowrap;
 }
 
-.lg-marker.is-gap {
+.lg-marker.is-gap,
+.lg-marker.is-cut {
   color: var(--amber);
 }
 
@@ -1928,6 +2071,27 @@
   font-size: 11.5px;
 }
 
+/* Close-reason groups (J-Wicket's grouping of Junos's documented reasons): the colour of the facet
+   dot; the pills use the shared .pill colours. Deny reasons keep the deny colour. */
+.cr-normal { --cr: var(--teal); }
+.cr-reset { --cr: var(--amber); }
+.cr-timeout { --cr: var(--muted); }
+.cr-error { --cr: var(--deny); }
+.cr-admin { --cr: var(--sky); }
+.cr-other { --cr: var(--muted); }
+.cr-deny { --cr: var(--deny); }
+
+.pill.lg-cr-sm {
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  vertical-align: 1px;
+}
+
+.pill.cr-undoc {
+  border-style: dashed;
+}
+
 .lg-d-missing {
   display: flex;
   flex-direction: column;
@@ -2176,7 +2340,14 @@
     max-height: none;
   }
   .lg-tl-side {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
     margin-left: 0;
+  }
+  .lg-zone-btn {
+    flex: 0 1 auto;
+    min-width: 0;
+    white-space: normal;
   }
   .lg-tl-head {
     flex-wrap: wrap;

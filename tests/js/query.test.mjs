@@ -514,8 +514,9 @@ test('logs fields over parsed lines: severity order, NAT, time and age', () => {
 // --- planner --------------------------------------------------------------------------------------
 
 test('sessions pushdown: positive top-level AND-ed ":"/"=" terms on device keys', () => {
-  const p = q.plan(ok('dport:443 src=10.10.0.0/16 proto:TCP app:junos-https iface:ge-0/0/1.0 sport:40001 dst:198.51.100.20 policy:allow-web bytes>1M'), 'sessions');
-  assert.deepEqual(p.device, { dport: '443', src: '10.10.0.0/16', proto: 'tcp', app: 'junos-https', iface: 'ge-0/0/1.0', sport: '40001', dst: '198.51.100.20' });
+  // app: only an application-protocol type of the RPC's application enumeration goes to the device (S-7), lower-cased.
+  const p = q.plan(ok('dport:443 src=10.10.0.0/16 proto:TCP app:HTTPS iface:ge-0/0/1.0 sport:40001 dst:198.51.100.20 policy:allow-web bytes>1M'), 'sessions');
+  assert.deepEqual(p.device, { dport: '443', src: '10.10.0.0/16', proto: 'tcp', app: 'https', iface: 'ge-0/0/1.0', sport: '40001', dst: '198.51.100.20' });
   assert.equal(q.toQueryString(p.browser), 'policy:allow-web bytes>1M');
   assert.deepEqual(p.explain.map((e) => e.where), ['device', 'device', 'device', 'device', 'device', 'device', 'device', 'browser', 'browser']);
   assert.equal(q.explainText(q.plan(ok('dport:443 policy:allow-web bytes>1M'), 'sessions')), 'Device filtered: dport:443 · Browser filtered: policy:allow-web, bytes>1M');
@@ -523,7 +524,7 @@ test('sessions pushdown: positive top-level AND-ed ":"/"=" terms on device keys'
 
 test('sessions pushdown keeps negations, ORs, alternatives, wildcards, ranges and bad values in the browser', () => {
   const cases = ['-dport:443', 'dport!=443', 'dport:443 OR dport:80', 'dport:443|80', 'src:10.10.*', 'dport:1-1024', 'dport>1024',
-    'iface:GE-0/0/1.0', 'app:"two words"', 'app:/re/', 'NOT (dport:22)', 'src:10.0.0.1-10.0.0.9'];
+    'iface:GE-0/0/1.0', 'app:"two words"', 'app:/re/', 'NOT (dport:22)', 'src:10.0.0.1-10.0.0.9', 'app:junos-https', 'dport:0'];
   for (const s of cases) {
     const p = q.plan(ok(s), 'sessions');
     assert.deepEqual(p.device, {}, s);
@@ -690,4 +691,343 @@ test('FIELDS cover each view with typed keys and getters', () => {
   for (const k of ['name', 'from', 'to', 'zone', 'src', 'dst', 'app', 'action', 'group', 'inactive', 'addr', 'log', 'count']) assert.ok(q.FIELDS.policies[k], `policies.${k}`);
   assert.ok(q.parse('event:X', { view: 'logs' }).ast, 'tag alias "event"');
   assert.ok(q.describe('sessions').find((d) => d.key === 'dport').device);
+});
+
+// --- UI-19 SHARED: session planner, cluster copies, policy keys, regex refusal (S-6 to S-11) ---------
+
+test('sessions planner: the 14 protocol keywords, icmpv6, and numbers 0..255 go to the device', () => {
+  assert.deepEqual([...q.SESSION_PROTOCOLS], ['ah', 'egp', 'esp', 'gre', 'icmp', 'icmp6', 'igmp', 'ipip', 'ospf', 'pim', 'rsvp', 'sctp', 'tcp', 'udp']);
+  assert.ok(Object.isFrozen(q.SESSION_PROTOCOLS));
+  for (const p of q.SESSION_PROTOCOLS) {
+    assert.deepEqual(q.plan(ok(`proto:${p}`, 'sessions'), 'sessions').device, { proto: p }, p);
+    assert.deepEqual(q.plan(ok(`proto:${p.toUpperCase()}`, 'sessions'), 'sessions').device, { proto: p }, p.toUpperCase());
+  }
+  assert.deepEqual(q.plan(ok('proto:ICMPV6', 'sessions'), 'sessions').device, { proto: 'icmp6' });
+  assert.deepEqual(q.plan(ok('proto:17', 'sessions'), 'sessions').device, { proto: '17' });
+  assert.deepEqual(q.plan(ok('proto:255', 'sessions'), 'sessions').device, { proto: '255' });
+  assert.deepEqual(q.plan(ok('proto:017', 'sessions'), 'sessions').device, { proto: '17' }, 'normalised');
+  for (const s of ['proto:256', 'proto:foo', 'proto:1000']) {
+    const p = q.plan(ok(s), 'sessions');
+    assert.deepEqual(p.device, {}, s);
+    assert.equal(p.explain[0].where, 'browser', s);
+  }
+  assert.deepEqual(q.FIELDS.sessions.proto.values([]).slice().sort(), [...q.SESSION_PROTOCOLS].sort());
+});
+
+test('sessions planner: app only for application-protocol types, ports 1..65535', () => {
+  assert.equal(q.SESSION_APPS.length, 24);
+  assert.ok(Object.isFrozen(q.SESSION_APPS));
+  for (const a of ['dns', 'ftp', 'ignore', 'mgcp-ca', 'mgcp-ua', 'ms-rpc', 'pptp', 'sun-rpc', 'q931', 'ras', 'realaudio', 'rsh', 'rtsp', 'sccp', 'sip', 'sqlnet-v2', 'talk', 'tftp', 'http', 'https', 'smtp', 'imap', 'ssh', 'telnet']) {
+    assert.ok(q.SESSION_APPS.includes(a), a);
+  }
+  assert.deepEqual(q.plan(ok('app:https'), 'sessions').device, { app: 'https' });
+  assert.deepEqual(q.plan(ok('app:DNS'), 'sessions').device, { app: 'dns' }, 'sent lower-case');
+  for (const s of ['app:junos-https', 'app:HTTP2', 'app:junos-dns-udp', 'dport:0', 'sport:0', 'dport:65536', 'dport:00000']) {
+    const p = q.plan(ok(s), 'sessions');
+    assert.deepEqual(p.device, {}, s);
+    assert.equal(p.explain[0].where, 'browser', s);
+  }
+  assert.deepEqual(q.plan(ok('dport:1 sport:65535'), 'sessions').device, { dport: '1', sport: '65535' });
+  // JUNOS-03: the sources call these application protocol types, not ALG types.
+  assert.equal(q.FIELDS.sessions.app.label, 'application (device filter: application protocol types such as https, ftp, dns, the RPC\u2019s own list; other names filter in the browser)');
+});
+
+test('protoNames: IANA numbers for egp and rsvp; ipip has none', () => {
+  assert.ok(q.protoNames('rsvp').includes('46'));
+  assert.ok(q.protoNames('8').includes('egp'));
+  assert.deepEqual(q.protoNames('egp'), ['egp', '8']);
+  assert.deepEqual(q.protoNames('46'), ['rsvp', '46']);
+  assert.deepEqual(q.protoNames('ipip'), ['ipip']);
+  assert.deepEqual(q.protoNames('4'), ['4']);
+  assert.deepEqual(q.protoNames('TCP'), ['tcp', '6']);
+  assert.deepEqual(q.protoNames('icmpv6'), ['icmpv6', '58', 'icmp6']);
+  assert.deepEqual(q.protoNames(''), []);
+  assert.deepEqual(q.protoNames(null), []);
+});
+
+test('plan browserOnly: listed keys stay in the browser, and the explain sentence says why', () => {
+  const p = q.plan(ok('app:https dport:443 policy:allow-web'), 'sessions', { browserOnly: ['app'] });
+  assert.deepEqual(p.device, { dport: '443' });
+  assert.equal(q.toQueryString(p.browser), 'app:https policy:allow-web');
+  assert.deepEqual(p.explain.map((e) => e.where), ['browser', 'device', 'browser']);
+  assert.equal(p.explain[0].note, 'app:https is kept in the browser: the device did not accept it as a filter');
+  assert.equal(p.explain[2].note, undefined, 'only terms the device would have taken');
+  assert.equal(q.explainText(p), 'Device filtered: dport:443 · Browser filtered: app:https, policy:allow-web · app:https is kept in the browser: the device did not accept it as a filter');
+  // Aliases name the same key; several keys at once.
+  const all = q.plan(ok('application:dns src:10.0.0.0/8 dport:53'), 'sessions', { browserOnly: ['application', 'src', 'dport'] });
+  assert.deepEqual(all.device, {});
+  assert.equal(all.explain.filter((e) => e.note).length, 3);
+  // Without browserOnly, unchanged.
+  assert.deepEqual(q.plan(ok('app:https'), 'sessions').device, { app: 'https' });
+});
+
+const node0 = (id, extra = {}) => ({ id: `node0:${id}`, session_id: String(id), location: 'node0', state: null, status: null, extra: {}, in: { bytes: 100, packets: 2 }, out: { bytes: 900, packets: 3 }, ...extra });
+const node1 = (id, extra = {}) => ({ ...node0(id, extra), id: `node1:${id}`, location: 'node1', in: { bytes: 0, packets: 0 }, out: { bytes: 0, packets: 0 }, ...extra });
+
+test('sessionRole: state, status, then role-like extra keys', () => {
+  assert.equal(q.sessionRole({ state: 'Backup' }), 'backup');
+  assert.equal(q.sessionRole({ status: ' Active ' }), 'active');
+  assert.equal(q.sessionRole({ state: 'Valid', extra: { 'ha-state': 'Stand-alone' } }), 'standalone');
+  assert.equal(q.sessionRole({ extra: { role: 'warm' } }), 'warm');
+  assert.equal(q.sessionRole({ state: 'Valid', status: 'Normal', extra: { 'session-flag': '0x40' } }), null);
+  assert.equal(q.sessionRole({ extra: { colour: 'backup' } }), null, 'only state, role, ha or status keys');
+  assert.equal(q.sessionRole(null), null);
+});
+
+test('sessionCopies: the device marks Backup, or zero counters beside traffic (inferred)', () => {
+  // A pair without roles: node1 has zero counters.
+  let c = q.sessionCopies([node0(1), node1(1)]);
+  assert.deepEqual([...c.backups], ['node1:1']);
+  assert.equal(c.why.get('node1:1'), 'inferred: the same session on another node, with zero counters');
+  assert.equal(c.groups, 1);
+  // A pair with roles: the device decides, counters do not.
+  c = q.sessionCopies([node0(2, { state: 'Active' }), { ...node1(2), state: 'Backup', in: { bytes: 5, packets: 1 } }]);
+  assert.deepEqual([...c.backups], ['node1:2']);
+  assert.equal(c.why.get('node1:2'), 'the device marks this copy Backup');
+  // A role on one row of the group: no inference for that group.
+  c = q.sessionCopies([node0(3, { state: 'Active' }), node1(3)]);
+  assert.deepEqual([...c.backups], []);
+  // Both zero, or both with traffic: nothing inferred.
+  c = q.sessionCopies([node1(4), { ...node1(4), id: 'node0:4', location: 'node0' }]);
+  assert.equal(c.backups.size, 0);
+  c = q.sessionCopies([node0(5), { ...node0(5), id: 'node1:5', location: 'node1' }]);
+  assert.equal(c.backups.size, 0);
+  assert.equal(c.groups, 1);
+  // A single node (no location): never inferred.
+  const solo = (id, bytes) => ({ id: String(id), session_id: '9', location: null, extra: {}, in: { bytes, packets: bytes ? 1 : 0 }, out: { bytes: 0, packets: 0 } });
+  c = q.sessionCopies([solo(1, 100), solo(2, 0)]);
+  assert.equal(c.backups.size, 0);
+  assert.equal(c.groups, 0);
+  // Three rows of one id: every zero row beside one with traffic.
+  c = q.sessionCopies([node0(6), node1(6), { ...node1(6), id: 'node2:6', location: 'node2' }]);
+  assert.deepEqual([...c.backups].sort(), ['node1:6', 'node2:6']);
+  assert.equal(c.groups, 1);
+  // Counters as strings, nulls and missing wings.
+  c = q.sessionCopies([{ ...node0(7), in: { bytes: '10', packets: null }, out: null }, { ...node1(7), in: null, out: null }]);
+  assert.deepEqual([...c.backups], ['node1:7']);
+  assert.deepEqual(q.sessionCopies(null), { backups: new Set(), why: new Map(), groups: 0 });
+});
+
+test('policies: comment, dynapp, url, identity and profile keys; comments in free text', () => {
+  const rows = [
+    POLICY('web-proxy', 'trust', 'untrust', { comment: '/* CHG-42 proxy */', part_comments: [{ before: 'then', text: '# temporary' }], pair_comment: null,
+      match: { source: ['any'], destination: ['any'], application: ['any'], dynamic_application: ['junos:HTTP'], url_category: ['Enhanced_News'], source_identity: ['role-a'], source_end_user_profile: ['eup-1'] } }),
+    POLICY('plain', 'trust', 'dmz', { pair_comment: '/* pair CHG-7 */' }),
+    POLICY('quiet', 'trust', 'dmz', { inactive: true, inactive_reason: 'zone-pair' }),
+    POLICY('lsys-off', 'trust', 'dmz', { inactive: true, inactive_reason: 'scope' }),
+  ];
+  const names = (s) => ids(s, 'policies', rows, {});
+  assert.deepEqual(names('comment:CHG'), ['web-proxy', 'plain']);
+  assert.deepEqual(names('note:temporary'), ['web-proxy']);
+  assert.deepEqual(names('annotation:"pair chg"'), ['plain']);
+  assert.deepEqual(names('dynapp:junos:HTTP'), ['web-proxy']);
+  assert.deepEqual(names('l7:junos*'), ['web-proxy']);
+  assert.deepEqual(names('url-category:enhanced_news'), ['web-proxy']);
+  assert.deepEqual(names('identity:role-a'), ['web-proxy']);
+  assert.deepEqual(names('user:role-a'), ['web-proxy']);
+  assert.deepEqual(names('profile:eup-1'), ['web-proxy']);
+  assert.deepEqual(names('CHG-42'), ['web-proxy'], 'free text searches comments');
+  assert.deepEqual(names('Enhanced_News'), ['web-proxy'], 'free text searches the four lists');
+  assert.deepEqual(names('desc:CHG'), [], 'desc stays the description statement only');
+  assert.deepEqual(names('inactive:zone-pair'), ['quiet']);
+  assert.deepEqual(names('inactive:scope'), ['lsys-off']);
+  assert.deepEqual(names('inactive:yes'), ['quiet', 'lsys-off']);
+  assert.deepEqual(q.FIELDS.policies.inactive.values(), ['yes', 'no', 'policy', 'zone-pair', 'policies', 'security', 'scope']);
+  assert.equal(q.FIELDS.policies.inactive.label, 'yes, no, or why: policy, zone-pair, policies, security, scope');
+  assert.equal(q.FIELDS.policies.comment.label, 'configuration comment (annotate), substring');
+  for (const k of ['comment', 'dynapp', 'url', 'identity', 'profile']) assert.equal(q.FIELDS.policies[k].type, 'text', k);
+  assert.ok(q.examples('policies').includes('comment:CHG'));
+});
+
+test('policies: deactivated references read "deactivated", not "not found"', () => {
+  const DEACT = 'deactivated in the configuration (not in effect)';
+  const row = {
+    resolved: {
+      application: [
+        { name: 'tcp-8443', kind: 'unresolved', leaves: [], unresolved: ['tcp-8443'], inactive_skipped: ['tcp-8443'] },
+        { name: 'web-apps', kind: 'set', leaves: [{ name: 'junos-https', predefined: true }], unresolved: ['gone'], inactive_skipped: ['old-app'] },
+        { name: 'missing', kind: 'unresolved', leaves: [], unresolved: [], inactive_skipped: [] },
+      ],
+      source: [
+        { name: 'corp-lan', kind: 'unresolved', leaves: [], unresolved: ['corp-lan'], inactive_skipped: ['global:corp-lan'] },
+        { name: 'branch-set', kind: 'set', leaves: [{ name: 'h1', kind: 'prefix', value: '10.0.0.1/32' }], unresolved: ['nowhere'], inactive_skipped: ['global:h2'] },
+      ],
+      destination: [{ name: 'lost', kind: 'unresolved', leaves: [], unresolved: ['lost'], inactive_skipped: [] }],
+    },
+  };
+  const ports = q.policyPorts(row).unknown.map((u) => `${u.name}: ${u.why}`);
+  assert.deepEqual(ports, [`tcp-8443: ${DEACT}`, 'gone: not found in the configuration', `old-app: ${DEACT}`, 'missing: not found in the configuration']);
+  const src = q.policyAddrUnknown(row, 'source').map((u) => `${u.name}: ${u.why}`);
+  assert.deepEqual(src, [`corp-lan: ${DEACT}`, 'nowhere: not found in an address book', `h2: ${DEACT}`]);
+  assert.deepEqual(q.policyAddrUnknown(row, 'destination').map((u) => u.why), ['not found in an address book']);
+  // An older reply listed a deactivated member in unresolved too: it is reported once, as deactivated.
+  const old = { resolved: { source: [{ name: 's', kind: 'set', leaves: [], unresolved: ['h3'], inactive_skipped: ['global:h3'] }] } };
+  assert.deepEqual(q.policyAddrUnknown(old, 'source'), [{ name: 'h3', why: DEACT }]);
+});
+
+test('PREDEFINED_SOURCE says where the catalog comes from', () => {
+  assert.equal(q.PREDEFINED_SOURCE, 'J-Wicket’s own table of junos-defaults applications (protocol and destination port), not read from this device and not checked against a Juniper document');
+  assert.equal(q.PREDEFINED_APPS['junos-https'].port, '443');
+});
+
+test('regexRisk refuses nested, back-to-back and back-referenced repeats', () => {
+  const refused = { '(a+)+$': '(a+)+', '(\\w+\\s?)+$': '(\\w+\\s?)+', '(.+)+=': '(.+)+', '.*.*=.*zzz': '.*.*', '(\\d+)*x': '(\\d+)*', '(.*a){12}': '(.*a){12}' };
+  for (const [src, piece] of Object.entries(refused)) {
+    const r = q.regexRisk(src);
+    assert.ok(r, src);
+    assert.equal(r.piece, piece, src);
+    assert.equal(src.slice(r.at, r.at + r.length), piece);
+    assert.equal(r.message, `This pattern can take seconds on one long line: '${piece}' ${r.why}. Write it without nested or back-to-back repeats (for example a+ instead of (a+)+).`);
+  }
+  assert.equal(q.regexRisk('(a+)+$').why, 'repeats a repeat');
+  assert.equal(q.regexRisk('.*.*=.*zzz').why, 'has two repeats in a row that can match the same text');
+  assert.equal(q.regexRisk('((a)\\2)+').why, 'repeats a back-reference');
+  for (const src of ['\\w*\\w+', '.+\\S*', 'a*a?a*', '(?:x|.*)\\d+', '[a-c]+[c-f]+']) assert.ok(q.regexRisk(src), src);
+  // S-9 listed /.*=.*zzz/ as accepted, but it is cubic on a line of '=' (2.4 s on 2048 of them): two
+  // repeats around one character both can match. It is refused now; =.*zzz finds the same lines.
+  for (const src of ['RT_FLOW_SESSION_(CLOSE|DENY)', '10\\.10\\.\\d+\\.\\d+', '=.*zzz', '[^=]*=.*zzz', '^Nov 24', '\\s*\\S+', 'a*b*', '(ab){3}', 'x{', '', '(?<n>a)\\k<n>', '[']) {
+    assert.equal(q.regexRisk(src), null, src);
+  }
+});
+
+test('regexRisk fails closed and reads modifier groups, whatever this engine compiles (SEC-1)', () => {
+  // Chromium compiles (?i:...) groups; node 22 does not, so the shape check is tested directly.
+  for (const [src, piece] of [['(a+)+$|(?i:x)', '(a+)+'], ['(?i:(a+)+)$', '(a+)+'], ['(?-i:a)(a|a)+$', '(a|a)+'], ['(.*)*zzz9|(?i:y)', '(.*)*'], ['(?i-m:.*.*)', '.*.*']]) {
+    const r = q.regexShapeRisk(src);
+    assert.ok(r, src);
+    assert.equal(r.piece, piece, src);
+  }
+  for (const src of ['(?i:close)', '(?-i:RT_FLOW)_SESSION', '(?ims-:x)y']) assert.equal(q.regexShapeRisk(src), null, src);
+  // Syntax the check does not read is refused, not waved through.
+  const unread = q.regexShapeRisk('(?z:x)');
+  assert.equal(unread.why, 'cannot be checked');
+  assert.match(unread.message, /^J-Wicket cannot check this pattern for slow repeats, so it does not run it/);
+  // The validity probe uses the flags the pattern runs with: '.' matches a line break only with s.
+  assert.equal(q.regexRisk('(.|\\n)+$', 'i'), null);
+  assert.equal(q.regexRisk('(.|\\n)+$', 'is').why, 'repeats a choice whose branches can match the same text');
+  assert.equal(q.regexRisk('(?s:.|\\n)+', ''), null, 'not a valid pattern in this engine, or else refused');
+  assert.ok(q.regexShapeRisk('(?s:.|\\n)+', { dotAll: false }), 'a (?s:) group turns dotAll on');
+});
+
+test('regexRisk refuses ambiguous choices, shared separators, wide ranges and long optional runs (SEC-2)', () => {
+  const refused = {
+    '(a|a)+$': ['(a|a)+', 'repeats a choice whose branches can match the same text'],
+    '(\\w|\\d)+$': ['(\\w|\\d)+', 'repeats a choice whose branches can match the same text'],
+    '(a|aa)+$': ['(a|aa)+', 'repeats a choice whose branches can match the same text'],
+    '.*a.*a.*zzz': ['.*a.*', 'has two repeats that can both match what is between them'],
+    '\\w*a\\w*b': ['\\w*a\\w*', 'has two repeats that can both match what is between them'],
+    '.+=.+=.+=zzz': ['.+=.+', 'has two repeats that can both match what is between them'],
+    '.*=.*zzz': ['.*=.*', 'has two repeats that can both match what is between them'],
+    '.*\\d\\d.*zzz': ['.*\\d\\d.*', 'has two repeats that can both match what is between them'],
+    '.*==.*zzz': ['.*==.*', 'has two repeats that can both match what is between them'],
+    'a{0,2000}a{0,2000}zzz': ['a{0,2000}a{0,2000}', 'has two repeats in a row that can match the same text'],
+    '(a?){24}a{24}': ['(a?){24}', 'repeats a repeat'],
+    '(\\s?\\s)+$': ['(\\s?\\s)+', 'repeats a repeat'],
+    '(a{1,3}a)+$': ['(a{1,3}a)+', 'repeats a repeat'],
+    '(\\w+)\\1!': ['\\w+)\\1', 'has two repeats in a row that can match the same text'],
+  };
+  for (const [src, [piece, why]] of Object.entries(refused)) {
+    const r = q.regexRisk(src, 'i');
+    assert.ok(r, src);
+    assert.equal(r.piece, piece, src);
+    assert.equal(r.why, why, src);
+  }
+  const run = q.regexRisk(`${'a?'.repeat(20)}${'a'.repeat(20)}`, 'i');
+  assert.equal(run.why, 'can split the same text in too many ways');
+  assert.equal(q.regexRisk(`${'(a|a)'.repeat(18)}z`, 'i').why, 'can split the same text in too many ways');
+  assert.match(q.regexRisk('.*=.*zzz', 'i').message, /Drop a leading or trailing \.\*/);
+  assert.match(q.regexRisk('(a|aa)+$', 'i').message, /Write the branches so that they start differently/);
+  // Kept: deterministic choices and separators, and two different plain characters between repeats.
+  for (const src of ['(\\d{1,3}\\.){3}\\d{1,3}', '([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}', '(TCP|UDP|ICMP) .{0,20}', 'src=\\S+ dst=\\S+', '.*error.*', 'RT_FLOW.*CLOSE', '(\\w+)=(\\S+)', '(foo|bar)+', '(a|b)'.repeat(200), '(.|\\n)+$', '^\\w{3} +\\d+ \\d\\d:\\d\\d', '\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}']) {
+    assert.equal(q.regexRisk(src, 'i'), null, src);
+  }
+  // The check itself stays quick on a long pattern.
+  const t0 = performance.now();
+  q.regexRisk('(?:x|y|z|w)+'.repeat(60), 'i');
+  q.regexRisk('[a-z]'.repeat(400), 'i');
+  assert.ok(performance.now() - t0 < 500);
+});
+
+test('regexRisk: escapes it cannot read exactly, deep nesting and long patterns are refused, quickly (recheck residuals)', () => {
+  const slow = (fn) => {
+    const t0 = performance.now();
+    const r = fn();
+    return { r, ms: performance.now() - t0 };
+  };
+  // Under the u flag, \u{..} is the character it names: these are the same choice twice.
+  for (const src of ['(=|\\u{3d})+$', '( |\\u{20})+$', '(\\s|\\u{20})+$', '(\\d|\\u{30})+$']) {
+    const r = q.regexRisk(src, 'u');
+    assert.ok(r, src);
+    assert.equal(r.why, 'repeats a choice whose branches can match the same text', src);
+  }
+  assert.equal(q.regexRisk('.*\\u{3d}.*zzz', 'u').why, 'has two repeats that can both match what is between them');
+  assert.equal(q.regexRisk('\\u{61}*\\u{61}*zzz', 'u').why, 'has two repeats in a row that can match the same text');
+  // The same character written two ways counts once between two repeats.
+  assert.ok(q.regexRisk('.*=\\x3d.*zzz', 'i'));
+  // Without the u flag the engine reads \u{1,3} and \p{1,9} as a letter and a quantifier: refused.
+  for (const src of ['(?:\\u{1,3})+$', '\\p{1,9}x', '\\P{2}']) {
+    const r = q.regexRisk(src, 'i');
+    assert.equal(r && r.why, 'cannot be checked', src);
+    assert.match(r.message, /without the u flag/, src);
+  }
+  // Legacy octal: \075 is '='.
+  const oct = q.regexRisk('.*\\075.*zzz', 'i');
+  assert.equal(oct && oct.why, 'cannot be checked');
+  assert.match(oct.message, /octal escape/);
+  // Astral characters are compared whole, with or without u.
+  for (const f of ['', 'u']) assert.ok(q.regexRisk('(\u{1F600}|\u{1F600})+$', f), `astral, flags '${f}'`);
+  // Kept under u: property classes and named characters that do not overlap.
+  for (const src of ['\\p{L}+-\\d+', 'id=\\u{3d}?\\d+', '^\\u{41}BC']) assert.equal(q.regexRisk(src, 'u'), null, src);
+  // Deep nesting is refused at once; at the limit it is checked quickly.
+  const deep = `${'(?:'.repeat(200)}ab${'){1,2}'.repeat(200)}`; // 1,802 characters
+  const d = slow(() => q.regexRisk(deep, 'i'));
+  assert.equal(d.r && d.r.why, 'cannot be checked');
+  assert.match(d.r.message, /nested more than 16 deep/);
+  assert.ok(d.ms < 50, `deep pattern took ${d.ms} ms`);
+  const atLimit = `${'(?:'.repeat(16)}ab${'){1,2}'.repeat(16)}`;
+  const l = slow(() => q.regexShapeRisk(atLimit));
+  assert.ok(l.ms < 50, `16-deep pattern took ${l.ms} ms`);
+  // A long pattern: checked quickly up to the cap, refused above it.
+  const wideP = slow(() => q.regexRisk('(?:ab|cd){1,2}x'.repeat(130), 'i'));
+  assert.ok(wideP.ms < 200, `wide pattern took ${wideP.ms} ms`);
+  const long = q.regexRisk('x'.repeat(2049), 'i');
+  assert.equal(long && long.why, 'cannot be checked');
+  assert.match(long.message, /longer than 2048 characters/);
+});
+
+test('regexRisk: refused patterns are inline errors; accepted ones stay fast on long lines', () => {
+  const bad = q.parse('/.*.*=zzz/', { view: 'logs' });
+  assert.equal(bad.ast, null);
+  assert.match(bad.error.message, /^This pattern can take seconds on one long line: '\.\*\.\*' has two repeats in a row/);
+  assert.equal(bad.error.pos, 0);
+  const keyed = q.parse('msg:/(a+)+$/', { view: 'logs' });
+  assert.match(keyed.error.message, /^msg: This pattern can take seconds/);
+  assert.match(q.parse('msg~"(x+)+y"', { view: 'logs' }).error.message, /^msg: This pattern can take seconds.*repeats a repeat/);
+  assert.match(q.parse('/(/', { view: 'logs' }).error.message, /^Invalid regular expression/);
+  assert.doesNotThrow(() => q.compile(q.parse('/(a+)+$/').ast, q.FIELDS.logs, {}), 'compile never throws');
+  // '=' runs (banners), digit runs and spaces as well as the S-14 lines; /.*=.*zzz/ is refused now
+  // (see above), and /=.*zzz/ is what it finds.
+  const texts = ['a'.repeat(2047) + '!', 'y'.repeat(2048), '='.repeat(2048), '1'.repeat(2048), ' '.repeat(2048)];
+  for (const src of ['RT_FLOW_SESSION_(CLOSE|DENY)', '10\\.10\\.\\d+\\.\\d+', '=.*zzz', '^Nov 24', '.*error.*', '(\\d{1,3}\\.){3}\\d{1,3}']) {
+    const r = q.parse(`/${src}/`, { view: 'logs' });
+    assert.equal(r.error, null, src);
+    const f = q.compile(r.ast, q.FIELDS.logs, {});
+    for (const line of texts) {
+      const t0 = performance.now();
+      f({ line, fields: {} });
+      assert.ok(performance.now() - t0 < 50, `${src} took ${performance.now() - t0} ms`);
+    }
+  }
+});
+
+test('logs reason: the 28 documented close reasons are offered', () => {
+  const labels = q.suggest('reason:', 7, { view: 'logs' }).map((x) => x.label);
+  assert.ok(labels.includes('TCP CLIENT RST'), labels.join(', '));
+  assert.ok(q.suggest('reason:', 7, { view: 'logs' }).some((x) => x.insert === 'reason:"TCP CLIENT RST"'));
+  const values = q.FIELDS.logs.reason.values([]);
+  for (const r of lp.CLOSE_REASONS) assert.ok(values.includes(r.text), r.text);
+  assert.equal(q.FIELDS.logs.reason.label, 'close or deny reason ("TCP FIN", "TCP CLIENT RST")');
+  assert.ok(q.examples('logs').includes('reason:*RST'));
+  const close = lp.parse('Jan 12 13:53:44 fw RT_FLOW: RT_FLOW_SESSION_CLOSE: session closed TCP CLIENT RST: 30.0.0.2/46488->50.0.0.2/23 junos-telnet 30.0.0.2/46488->50.0.0.2/23 None None None None 6 p1 green red 240003072 2(100) 1(60) 2 UNKNOWN UNKNOWN N/A(N/A) ge-11/0/0.0 UNKNOWN');
+  assert.equal(q.compile(ok('reason:*RST', 'logs'), q.FIELDS.logs, {})(close), true);
 });

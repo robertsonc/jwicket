@@ -10,9 +10,14 @@
 //   parent.append(fd.el); fd.update(flowModel(row, { from, to }));
 //
 // Two layouts: horizontal when there is room (>= 600 px), vertical otherwise (phones). Strict CSP:
-// every node is built with createElementNS and text goes in through textContent.
+// every node is built with createElementNS and text goes in through text nodes.
+//
+// Device text is untrusted: every text run goes through dom.visSvg(), which shows a hidden or
+// direction-changing character as a visible <tspan class="ctl-badge">U+202E</tspan> instead of
+// applying it, and titles and aria-labels go through format.plain() ("<U+202E>").
 
-import { svg } from '../dom.js';
+import { svg, visSvg } from '../dom.js';
+import { plain } from '../format.js';
 
 const H_MIN_WIDTH = 600;
 
@@ -90,14 +95,19 @@ function clip(text, max) {
   return s.length > max ? `${s.slice(0, Math.max(1, max - 1))}…` : s;
 }
 
+/** Text for a <title> or an aria-label: hidden characters written as "<U+XXXX>". */
+function said(value) {
+  return plain(String(value ?? ''), { all: true });
+}
+
 function text(x, y, value, cls, attrs = {}) {
-  return svg('text', { x, y, class: cls, ...attrs }, String(value ?? ''));
+  return svg('text', { x, y, class: cls, ...attrs }, visSvg(String(value ?? ''), { all: true }));
 }
 
 /** A <text> made of coloured runs: [[text, cls], ...]. */
 function runs(x, y, parts, cls, attrs = {}) {
   const t = svg('text', { x, y, class: cls, ...attrs });
-  for (const [value, c] of parts) t.append(svg('tspan', c ? { class: c } : null, String(value)));
+  for (const [value, c] of parts) t.append(svg('tspan', c ? { class: c } : null, visSvg(String(value ?? ''), { all: true })));
   return t;
 }
 
@@ -145,6 +155,7 @@ export class FlowDiagram {
     ]);
     if (key === this._key) {
       const [fwd, rev] = this._counters;
+      // Counters are numbers J-Wicket formats: plain text is safe here.
       if (fwd) fwd.textContent = fmtCount(model.fwd.packets, model.fwd.bytes);
       if (rev) rev.textContent = model.oneWing ? 'no reverse wing' : fmtCount(model.rev.packets, model.rev.bytes);
       return;
@@ -171,10 +182,10 @@ export class FlowDiagram {
     if (!act) return node;
     node.setAttribute('tabindex', '0');
     node.setAttribute('role', 'button');
-    node.setAttribute('aria-label', label);
+    node.setAttribute('aria-label', said(label));
     node.setAttribute('data-fk', label);
     node.classList.add('fd-hit');
-    node.append(svg('title', null, label));
+    node.append(svg('title', null, said(label)));
     node.addEventListener('click', (e) => act(Boolean(e.altKey)));
     node.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -250,10 +261,10 @@ export class FlowDiagram {
     if (this.onPolicy) {
       node.setAttribute('tabindex', '0');
       node.setAttribute('role', 'link');
-      node.setAttribute('aria-label', `Open policy ${m.policy}`);
+      node.setAttribute('aria-label', said(`Open policy ${m.policy}`));
       node.setAttribute('data-fk', 'policy');
       node.classList.add('fd-hit');
-      node.append(svg('title', null, `Open policy ${m.policy} in Policies. Alt: filter sessions by it.`));
+      node.append(svg('title', null, said(`Open policy ${m.policy} in Policies. Alt: filter sessions by it.`)));
       const go = (alt) => (alt && this.onFilter ? this.onFilter('policy', m.policy, false) : this.onPolicy(m.policy));
       node.addEventListener('click', (e) => go(Boolean(e.altKey)));
       node.addEventListener('keydown', (e) => {
@@ -275,7 +286,7 @@ export class FlowDiagram {
     const pos = m.policyPos;
     const t = text(x, y, `${word} ${m.policyIndex}${withPos && pos ? ` · rule ${pos.n} of ${pos.of}` : ''}`, 'fd-sub fd-pid', { 'text-anchor': 'end' });
     const where = pos ? `: ${m.policy || 'this policy'} is ${pos.n} of ${pos.of} in ${pos.where}` : '';
-    t.append(svg('title', null, `Junos policy index ${m.policyIndex}, an internal ID, not the rule position${where}.`));
+    t.append(svg('title', null, said(`Junos policy index ${m.policyIndex}, an internal ID, not the rule position${where}.`)));
     return t;
   }
 
@@ -321,7 +332,7 @@ export class FlowDiagram {
       'fd-hdr',
       { 'text-anchor': anchor },
     );
-    t.append(svg('title', null, `${s} → ${d}${changed.src || changed.dst ? ' (violet: changed by NAT)' : ''}`));
+    t.append(svg('title', null, said(`${s} → ${d}${changed.src || changed.dst ? ' (violet: changed by NAT)' : ''}`)));
     return t;
   }
 
@@ -356,9 +367,9 @@ export class FlowDiagram {
   _label(m) {
     const proto = m.proto ? ` ${m.proto}` : '';
     const nat = [m.snat && 'source NAT', m.dnat && 'destination NAT'].filter(Boolean).join(' and ') || 'no NAT';
-    return `Session ${m.id}${proto}: client ${hp(m.client.ip, m.client.port)} through ${m.ingress.iface || 'an unknown interface'}` +
+    return said(`Session ${m.id}${proto}: client ${hp(m.client.ip, m.client.port)} through ${m.ingress.iface || 'an unknown interface'}` +
       ` (zone ${m.ingress.zone || 'unknown'}), policy ${m.policy || 'unknown'}, ${nat}, out of ${m.egress.iface || 'an unknown interface'}` +
-      ` (zone ${m.egress.zone || 'unknown'}) to server ${hp(m.server.ip, m.server.port)}.`;
+      ` (zone ${m.egress.zone || 'unknown'}) to server ${hp(m.server.ip, m.server.port)}.`);
   }
 
   // ---- horizontal: five boxes in a row, the translation band below ---------------------------------

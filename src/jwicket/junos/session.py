@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import TYPE_CHECKING, Any, Dict, FrozenSet
+from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List, Optional
 
 from jwicket.junos.errors import (
     JunosError,
@@ -74,7 +74,10 @@ CONFIG_OPTIONS: Dict[str, str] = {"database": "committed", "inherit": "inherit",
 # the same subtrees, because each one is a whole configuration of its own (protocols, system...).
 # That a subtree filter returns "the key plus these children" of every list entry, with the entry's
 # inactive attribute, is J-Wicket's reading of RFC 6241 subtree filtering as Junos implements it,
-# confirmed per release by qualification Q-REL-01.
+# confirmed per release by qualification Q-REL-01. From [edit system] only two leaves are read: the
+# configured time zone (one leaf, owner decision OD-05) and the outbound-ssh clients (central
+# management). Reading time-zone uses the same RPC and, inferred, the same system view permission the
+# outbound-ssh part already needs; no new RPC.
 _SCOPE_SECURITY = "<security><policies/><zones/><address-book/></security>"
 INVENTORY_FILTER = (
     "<configuration>"
@@ -82,7 +85,7 @@ INVENTORY_FILTER = (
     "<applications/>"
     f"<logical-systems><name/>{_SCOPE_SECURITY}<applications/></logical-systems>"
     f"<tenants><name/>{_SCOPE_SECURITY}<applications/></tenants>"
-    "<system><services><outbound-ssh/></services></system>"
+    "<system><time-zone/><services><outbound-ssh/></services></system>"
     "<chassis><high-availability/></chassis>"
     "</configuration>"
 )
@@ -236,14 +239,24 @@ class PyEzLocalSession:
         return None
 
 
-def open_config(session: DeviceSession, warnings: list[str]) -> Element:
-    """Read the inventory subtree; fall back to the minimal filter if the device rejects the full one."""
+def open_config(
+    session: DeviceSession, warnings: List[str], *, report: Optional[Dict[str, str]] = None
+) -> Element:
+    """Read the inventory subtree; fall back to the minimal filter if the device rejects the full one.
+    When ``report`` is given, ``report["filter"]`` is set to the filter that was used: "full" or
+    "minimal" (the minimal one reads no system or chassis settings)."""
     try:
-        return session.get_configuration(INVENTORY_FILTER)
+        found = session.get_configuration(INVENTORY_FILTER)
     except RpcUnsupported as exc:
         LOG.warning("full inventory filter rejected (%s); retrying with security and applications only", exc)
         warnings.append(
             "The device rejected J-Wicket's full configuration filter, so logical systems, tenant systems, "
-            "central-management connections and Multinode HA settings are not shown."
+            "central-management connections, Multinode HA settings and the time zone are not shown."
         )
-        return session.get_configuration(INVENTORY_FILTER_MINIMAL)
+        found = session.get_configuration(INVENTORY_FILTER_MINIMAL)
+        if report is not None:
+            report["filter"] = "minimal"
+        return found
+    if report is not None:
+        report["filter"] = "full"
+    return found

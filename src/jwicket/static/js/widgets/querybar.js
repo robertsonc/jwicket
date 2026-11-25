@@ -8,8 +8,15 @@
 // with a caret under the position; device (gold) and browser (sky) chips come from setPlan(); the
 // autocomplete list is a WAI-ARIA combobox (aria-activedescendant). Strict CSP: DOM built with
 // createElement / createElementNS and textContent only.
+//
+// Suggested values come from what the device returned (policy, zone, interface names): in the list,
+// the chips and the explain line every hidden or direction-changing character is shown as a
+// <span class="ctl-badge">U+202E</span> (format.controlParts, as dom.vis does), never applied, and
+// aria labels use format.plain(). The input and its colouring mirror keep the exact characters, so
+// the caret and the colours stay aligned with what was typed.
 
 import * as query from '../query.js';
+import { controlParts, plain } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CHANGE_MS = 160;
@@ -41,6 +48,15 @@ function text(tag, cls, value, attrs) {
   const e = el(tag, cls, attrs);
   e.textContent = value;
   return e;
+}
+
+/** Append `value` to `parent` as text, each control or format character as a visible badge. */
+function appendVisible(parent, value) {
+  for (const p of controlParts(String(value ?? ''), { all: true })) {
+    if (p.ctl) parent.append(text('span', 'ctl-badge', p.ctl, { title: `A hidden ${p.ctl} character is here (shown, not applied)` }));
+    else parent.append(document.createTextNode(p.text));
+  }
+  return parent;
 }
 
 function icon(name) {
@@ -513,14 +529,15 @@ export class QueryBar {
       const l = String(item.label);
       const at = typed ? l.toLowerCase().indexOf(typed.toLowerCase()) : -1;
       if (at >= 0 && typed) {
-        if (at > 0) lab.append(document.createTextNode(l.slice(0, at)));
-        lab.append(text('mark', 'qb-opt-hit', l.slice(at, at + typed.length)));
-        lab.append(document.createTextNode(l.slice(at + typed.length)));
+        if (at > 0) appendVisible(lab, l.slice(0, at));
+        lab.append(appendVisible(el('mark', 'qb-opt-hit'), l.slice(at, at + typed.length)));
+        appendVisible(lab, l.slice(at + typed.length));
       } else {
-        lab.textContent = l;
+        appendVisible(lab, l);
       }
+      li.setAttribute('aria-label', item.detail ? `${plain(l, { all: true })}, ${plain(item.detail, { all: true })}` : plain(l, { all: true }));
       li.append(lab);
-      li.append(text('span', 'qb-opt-detail', item.detail || ''));
+      li.append(appendVisible(el('span', 'qb-opt-detail'), item.detail || ''));
       if (item.kind === 'saved') {
         li.dataset.remove = '1';
         const del = el('span', 'qb-opt-del', { title: 'Remove from saved queries (Delete)', 'aria-hidden': 'true' });
@@ -737,9 +754,9 @@ export class QueryBar {
         ? (e.refine ? 'Narrowed on the device, then checked exactly in this browser' : 'Filtered by the device before data is sent')
         : 'Filtered in this browser over what the device returned';
       li.append(text('span', 'qb-chip-where', dev ? 'device' : 'browser'));
-      li.append(text('span', 'qb-chip-text', e.text));
+      li.append(appendVisible(el('span', 'qb-chip-text'), e.text));
       if (Number.isInteger(e.pos) && Number.isInteger(e.end) && e.end <= this._text.length) {
-        const x = el('button', 'qb-chip-x', { type: 'button', 'aria-label': `Remove ${e.text}` });
+        const x = el('button', 'qb-chip-x', { type: 'button', 'aria-label': `Remove ${plain(e.text, { all: true })}` });
         x.appendChild(icon('remove'));
         x.addEventListener('click', () => this._removeTerm(e));
         li.append(x);
@@ -747,7 +764,7 @@ export class QueryBar {
       this.chips.append(li);
     }
     const sentence = query.explainText(p);
-    this.explainEl.append(document.createTextNode(sentence));
+    appendVisible(this.explainEl, sentence);
     if (p.expression) {
       this.explainEl.append(document.createTextNode(' · report expression '));
       this.explainEl.append(text('code', 'qb-expr', p.expression));

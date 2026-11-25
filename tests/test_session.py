@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import types
@@ -85,7 +86,11 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(child_tags(root),
                          ["security", "applications", "logical-systems", "tenants", "system", "chassis"])
         system = kid(root, "system")
-        self.assertEqual(child_tags(system), ["services"])  # never the whole system tree (login, passwords)
+        # Never the whole system tree (login, passwords): the time zone leaf and outbound-ssh only.
+        self.assertEqual(child_tags(system), ["time-zone", "services"])
+        self.assertEqual(child_tags(kid(system, "time-zone")), [])
+        self.assertIn("<time-zone/>", S.INVENTORY_FILTER)
+        self.assertNotIn("<system/>", S.INVENTORY_FILTER)
         self.assertEqual(child_tags(path(system, "services")), ["outbound-ssh"])
         self.assertEqual(child_tags(kid(root, "chassis")), ["high-availability"])
         # Never the whole [edit security] (IKE pre-shared keys) or a whole logical/tenant system (SECU-12).
@@ -284,6 +289,14 @@ class OpenConfigTests(unittest.TestCase):
         S.open_config(sess, warnings)  # type: ignore[arg-type]
         self.assertEqual(sess.filters, [S.INVENTORY_FILTER])
         self.assertEqual(warnings, [])
+
+    def test_report_says_which_filter_was_used(self) -> None:
+        for full, expected in ((None, "full"), (RpcUnsupported("syntax error: tenants"), "minimal")):
+            with self.subTest(expected=expected):
+                report: Dict[str, str] = {}
+                with self.assertLogs("jwicket.junos", level="DEBUG") if full else contextlib.nullcontext():
+                    S.open_config(FakeConfigSession(full), [], report=report)  # type: ignore[arg-type]
+                self.assertEqual(report, {"filter": expected})
 
     def test_falls_back_to_minimal_filter_with_a_warning(self) -> None:
         sess = FakeConfigSession(RpcUnsupported("syntax error: tenants"))

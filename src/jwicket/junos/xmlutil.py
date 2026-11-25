@@ -159,6 +159,20 @@ def active_path(node: Optional[Element], *names: str) -> Optional[Element]:
     return node
 
 
+def deactivated_parts(node: Optional[Element], skip: Tuple[str, ...] = ("name",)) -> List[str]:
+    """Deactivated statements directly under ``node``, written as in the CLI: ``<tag> <value>`` for a
+    leaf (``screen trust-screen``, ``destination-port 2121``), ``<tag> <name>`` for a keyed entry, else
+    ``<tag>``. Children named in ``skip`` (keys, members reported elsewhere) are left out."""
+    out: List[str] = []
+    for child in kids(node):
+        tag = local(child.tag)
+        if tag == COMMENT or tag in skip or not is_inactive(child):
+            continue
+        value = text(child, "name") if len(child) else text_of(child)
+        out.append(f"{tag} {value}" if value else tag)
+    return out
+
+
 def split_names(node: Optional[Element], name: str) -> Tuple[List[str], List[str]]:
     """A keyed list split into (active keys, deactivated keys)."""
     active: List[str] = []
@@ -198,6 +212,20 @@ def comments_before(node: Optional[Element]) -> Dict[int, str]:
             found[id(child)] = "\n".join(pending)
             pending = []
     return found
+
+
+def trailing_comment(node: Optional[Element]) -> Optional[str]:
+    """Comments after the last statement in ``node`` (they annotate nothing that follows), joined by a
+    line break; None when there are none."""
+    pending: List[str] = []
+    for child in kids(node):
+        if local(child.tag) == COMMENT:
+            value = text_of(child)
+            if value is not None:
+                pending.append(value)
+        else:
+            pending = []
+    return "\n".join(pending) or None
 
 
 def inner_comments(node: Optional[Element]) -> List[Dict[str, Optional[str]]]:
