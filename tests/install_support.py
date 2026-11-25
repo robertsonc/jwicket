@@ -192,11 +192,12 @@ def plan_for(
     *,
     method: plan.Method = plan.Method.WORKSTATION,
     overrides: Sequence[str] = (),
+    bundle_id: Optional[plan.BundleId] = None,
     **option_overrides: Any,
 ) -> plan.InstallPlan:
     facts, prior = prepared(name, method)
     return plan.build_install_plan(
-        bundle(),
+        bundle() if bundle_id is None else bundle_id,
         provenance(),
         options(**option_overrides),
         facts,
