@@ -53,6 +53,9 @@ ALLOWED_RPCS: FrozenSet[str] = frozenset(
         "get-flow-session-information",  # show security flow session [filters] / summary
         "get-log",  # show log <file>
         "get-security-log-information",  # show security log (event-mode RE buffer)
+        # Overview health, recorded on SRX4100 25.2R1-S1.4.
+        "get-route-engine-information",  # show chassis routing-engine
+        "get-performance-summary-information",  # show security monitoring
     }
     | {f"get-sec-log-report-detail-{t}" for t in (
         # show security log report in-detail <type> (on-box reporting database)

@@ -527,6 +527,7 @@ reset, trace, view; `read-only` = view; `unauthorized` = none. Permission flags 
 | --- | --- | --- | --- |
 | Any sign-in | NETCONF over SSH | `system services netconf ssh` must be configured; "If you do not include the netconf statement, NETCONF connections are not permitted." A class restricted with allow/deny-commands must also allow `xml-mode`, `netconf` and `need-trailer`. | Verified ([netconf-stmt], [access-priv]) |
 | Device facts | `get-software-information` | Not researched | Unknown (inferred `view`) |
+| Overview health | `get-route-engine-information`, `get-performance-summary-information` | Not researched | Unknown (inferred `view`); replies recorded on SRX4100 25.2R1-S1.4 |
 | HA status | `get-chassis-cluster-status` | Not researched | Unknown |
 | Policy inventory | `get-configuration` of `security`, `applications`, `logical-systems`, `tenants`, `system services outbound-ssh`, `chassis high-availability` | Viewing `[edit security policies]` needs `security` ([policies-stmt]). `view-configuration` "can view all of the configuration excluding secrets, system scripts, and event options" ([access-priv]). Which bit shows `system services outbound-ssh` and `chassis high-availability` is not documented in the pages read. | Verified for `security`; the minimum set is unknown (Q-AUTH-03) |
 | Flow sessions | `get-flow-session-information` | `view` ("Required Privilege Level: view") | Verified ([sfs]) |

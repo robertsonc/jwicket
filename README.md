@@ -249,19 +249,19 @@ Zones, address books and applications, each with where it is used, detail panels
 
 *The Overview: session gauge and 10-minute trend, top policies, recent denies folded by flow, zone pairs, jump-to links built from the data. Synthetic fixture data.*
 
-An Overview, a command palette, keyboard-first navigation, cross-links between every view, shareable URLs, day and night themes and a phone layout.
+An Overview with system health charts, a command palette, keyboard-first navigation, cross-links between every view, shareable URLs, three colour schemes in day and night, and a phone layout.
 
 <details>
 <summary>All 11 console features, and two more screenshots</summary>
 
-- `built` **Overview** with a LIVE, PAUSED or RETRYING pill: flow-session gauge and trend, recent denies (repeats folded into one row with ×N), top policies by live sessions, a zone-pair mini-matrix, warnings word for word, the device card and "jump to" links computed from what was read.
+- `built` **Overview** with a LIVE, PAUSED or RETRYING pill: system health (routing-engine and data-plane CPU and memory charted over 10 minutes, with load, temperature and uptime, from `show chassis routing-engine` and `show security monitoring`, read on a lab SRX4100), flow-session gauge and trend, recent denies (repeats folded into one row with ×N), top policies by live sessions, a zone-pair mini-matrix, warnings word for word, the device card and "jump to" links computed from what was read.
 - `built` **Command palette** (Ctrl+K or Cmd+K): views, actions, incident presets, scopes, every policy and zone; paste an address, port or session ID to get the matching look-ups. Its footer says "Nothing here is sent anywhere."
 - `built` **Keyboard first:** `g` then `o`, `p`, `s`, `l` or `b` for each view, `/` for the query bar, `j`/`k` and Enter, Space to pause live reads, `r` to refresh, `t` for the theme, `?` for the list.
 - `built` **Query bar** coloured as you type, with autocomplete from the current rows and the inventory, errors that point at the column, built-in help, and up to 20 saved queries per view (query text only, never device data).
 - `built` **Cross-links everywhere:** from a session to its policy and its logs, from a log line to the live session, from a policy or object to Sessions and Logs.
 - `built` **Copyable read-only show commands** for policies, objects, sessions and logs, built from the Junos hierarchy for you to paste; J-Wicket never runs them.
 - `built` **Shareable URLs** that keep view, query, selection and scope, so Back, Forward and copy-link land on the same view.
-- `built` **Day and night themes** that follow the operating system until you pick one, dense or comfortable rows, and reduced motion honoured.
+- `built` **Colour schemes:** HPE (the default), Obsidian & Phosphor for NOC screens, and Nordic Steel, colourblind-safe (allow is ice blue and deny magenta, never green against red); each in day and night, which follow the operating system until you pick one; every text colour measured at 4.5:1 or better. Dense or comfortable rows, and reduced motion honoured.
 - `built` **Phone layout:** bottom tab bar, session and log cards, full-screen detail sheet. Checked in emulated Chrome only, not on a real phone.
 - `built` **Accessibility aids:** skip link, throttled live announcements, ARIA listbox, combobox and grid roles, visible focus. Not tested with a screen reader and AA contrast not measured (UI-001-17 open), so no compliance is claimed.
 - `built` **Quiet when unattended:** live reads pause on a hidden tab and before the idle timeout, so an unattended console stops polling and its session can end.

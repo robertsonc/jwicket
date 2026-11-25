@@ -18,4 +18,5 @@ build/
 !tests/fixtures/*/logs/*.log
 *.jsonl
 .playwright/
+.playwright-mcp/
 screenshots/
