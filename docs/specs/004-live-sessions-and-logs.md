@@ -855,7 +855,7 @@ against AC-004-20 yet.
 
 | ID | Requirement | Status |
 | --- | --- | --- |
-| UI-004-01 | One query language for Sessions, Logs and Policies: `OR`/`or`/`\|\|`, `AND`/`and`/`&&` or juxtaposition, `NOT`/`not`/`-`/`!`, parentheses, `key op value` with `= != >= <= > < ~` (`~` regex, browser only), `key:value`, bare text, quoted strings, `/regex/flags`, `v1\|v2` alternatives, CIDR-aware addresses, sizes with k/M/G, durations with s/m/h, `*` wildcards. Parse errors inline with position, never thrown | Engine |
+| UI-004-01 | One query language for Sessions, Logs and Policies: `OR`/`or`/`\|\|`, `AND`/`and`/`&&` or juxtaposition, `NOT`/`not`/`-`/`!`, parentheses, `key op value` with `= != >= <= > < ~` (`~` regex, browser only), `key:value`, bare text, quoted strings, `/regex/flags` (run in J-Wicket's linear-time matcher; lookaround and back-references refused, section 9), `v1\|v2` alternatives, CIDR-aware addresses, sizes with k/M/G, durations with s/m/h, `*` wildcards. Parse errors inline with position, never thrown | Engine |
 | UI-004-02 | Pushdown planner: only positive, top-level AND-ed `=`/`:` terms on device-capable keys go to the device (Sessions: `src dst sport dport proto app iface`; log files: up to 4 plain words to `contains`, negated words to `exclude`; reports: an `expression`). Everything else filters in the browser. Each term is a chip, "device" in the colour scheme's accent (green in the default HPE scheme) or sky "browser", and one sentence explains the split | Engine; chips open |
 | UI-004-03 | Autocomplete for keys, operators and known values (zones, policies, applications, interfaces from the inventory and current data), keyboard navigable | Engine (`suggest`); widget open |
 | UI-004-04 | Live is incremental polling: default 5 s, choices 2, 5, 10, 30 s, never faster than `meta.min_interval_s`; pause and resume; polling stops while the tab is hidden; 429 `Retry-After` is honoured; a LIVE/PAUSED pill and the last read time are always visible | Shell API module; views open |
@@ -946,32 +946,44 @@ per poll under about 8 ms for 2,000 rows on a laptop.
 - **Hiding is display only.** Hiding the user's own `UI_NETCONF_CMD` lines is a browser filter with
   a visible counter; it never hides another user's lines and never removes anything server-side.
 - **Regex in the browser.** `~` and `/regex/` run in the operator's own tab, never on the device.
-  Three things keep a slow pattern from stalling it
-  ([`query.regexRisk`](../../src/jwicket/static/js/query.js), [`views/logs.js`](../../src/jwicket/static/js/views/logs.js)):
-  - **A static check refuses** patterns whose shape backtracks badly before they run, with an
-    inline error at the term naming the piece and a rewrite: a repeated group holding a repeat
-    (`(a+)+`), two repeats that can match the same text with only optional parts, or a separator
-    both can match, between them (`.*.*`, `\w*\w+`, and `.*=.*`, which is cubic on a run of `=`), a
-    back-reference inside a repeated group, a repeated choice whose branches can start alike
-    (`(a|aa)+`), and runs of optional parts that can split one text in more than 1,024 ways. The
-    check is J-Wicket's heuristic, not a proof.
-  - **It fails closed** on what it cannot read exactly: a legacy octal escape such as `\075`,
-    `\u{...}`, `\p{...}` or `\P{...}` without the `u` flag (the engine reads them as a letter and a repeat),
-    groups nested more than 16 deep, and patterns longer than 2,048 characters (the last two also
-    bound the cost of the check itself). With the `u` flag, single characters are compared the way
-    the `u` flag reads them.
+  A slow pattern can only stall that tab: it is a self-inflicted denial of service, typed into a
+  filter or arriving in a crafted link, not a risk to the device or the daemon. Three things keep it
+  from happening ([ADR 0013](../adr/0013-user-regexes-run-in-a-linear-time-matcher.md);
+  [`regexvm.js`](../../src/jwicket/static/js/regexvm.js), [`query.js`](../../src/jwicket/static/js/query.js),
+  [`views/logs.js`](../../src/jwicket/static/js/views/logs.js)):
+  - **A linear-time matcher runs every user pattern.** The browser's backtracking engine never runs
+    one. J-Wicket reads the pattern and runs it in its own NFA (a Pike VM), so testing one line costs
+    at most (line length + 1) times the pattern's NFA states: no pattern can backtrack exponentially
+    or polynomially. Which characters a literal, class, escape or `.` matches is still decided by the
+    browser (each such atom is a native `^(?:atom)$` tested on one character with the flags in effect),
+    so case folding under `i` and `iu`, `\p{...}` under `u`, `s`, `m` and `\b` give exactly the
+    browser's answers, and a filter keeps exactly the lines the browser's own `RegExp` would. Flags
+    `i`, `m`, `s` and `u` apply; `g` and `y` are dropped, because a filter only tests.
+  - **It refuses what it cannot run linearly or read exactly,** with an inline error at the term in
+    the UI's usual style, saying what was refused and what to write instead: lookahead and
+    lookbehind, back-references (numbered and named), patterns longer than 2,048 characters, patterns
+    that need more than 768 NFA states (`MAX_STATES`, which bounds one 2,048-character line to tens of
+    milliseconds), more than 32 different classes and escapes, more than 16 `\p{...}`, groups nested
+    more than 128 deep, and syntax it does not read exactly (it fails closed). Two places where the
+    engine itself departs from the standard are refused rather than imitated: `\B` matching inside a
+    surrogate pair under `u`, and V8 merging case-insensitive branches that start with letters such
+    as `K` and the Kelvin sign. An invalid pattern gets the browser's own syntax error.
   - **The text is capped and Logs keeps a time budget.** A pattern runs over at most the first
     2,048 characters of each text. In Logs a refilter checks lines newest first for at most 150 ms,
     and the new lines of one read for at most 50 ms (the clock is looked at every 64 lines). When
     it stops early the lines it did not reach are not shown and not counted, and the view says so
     (a notice, a marker row, the count, the empty state and the export menu); a slow live append
-    pauses live and asks the operator to change the query before resuming. Sessions, Policies and Objects filter short texts and have
-    no time budget, so they rely on the check and the cap.
+    pauses live and asks the operator to change the query before resuming. This is the second line
+    of defence: a pattern near the state budget costs milliseconds per line, and a window holds
+    thousands of lines. Sessions, Policies and Objects filter at most a few thousand short texts and
+    have no time budget; with the matcher, a filter there costs at most the number of rows times one
+    line's bound.
 
-  A pattern that gets past all three can still stall the operator's tab, never the device. A
-  terminable Web Worker would need a Trusted Types policy for `new Worker(url)`; it is not proposed
-  (owner decision OD-11, whose default is the check plus the time budget, and which the owner may
-  veto).
+  The static check this replaces, a heuristic that refused shapes it believed were slow, was found
+  to let through, or to take seconds itself on, 97 patterns that froze a tab for 0.2 to 12 s each (an adversarial hunt).
+  A terminable Web Worker would need a Trusted Types policy for `new Worker(url)`; it is not
+  proposed. Owner decision OD-11, whose default was the check plus the time budget, was decided on
+  2026-11-25: the linear-time matcher plus the time budget (ADR 0013).
 
 ## 10. Acceptance tests
 
@@ -995,7 +1007,7 @@ in [`test_live.py`](../../tests/test_live.py) unless another file is named.
 | AC-004-12 | `contains` filters on the server side of the wire | `LiveHttpTests.test_log_contains_filter_pushdown` | Met (fixtures) |
 | AC-004-13 | Report read; type, expression length and characters, times and count validated; a first read sends `descending` and returns the lines oldest first; on a release before 23.1R1 the answer is `unsupported` without an RPC | `ReportHttpTests.test_report_read_and_validation`, `.test_first_report_read_asks_for_the_newest_records`, `ReportReleaseTests.test_old_release_report_read_is_unsupported_without_an_rpc`, `ModeAndExpressionTests.test_expression_validation` | Met (fixtures). Reply wrapper: Q-REL-01. Default order: Q-LOG-01 |
 | AC-004-14 | Buffer events and rendered lines; `since` format enforced; `self_noise` present | `ModeAndExpressionTests.test_buffer_events_shape`, `LiveHttpTests.test_event_mode_buffer_source` | Met (fixtures) |
-| AC-004-15 | Query language, typed comparisons, CIDR matching, sessions/logs/policies fields | [`query.test.mjs`](../../tests/js/query.test.mjs): "terms: key:value, key=value, comparisons, bare values", "CIDR-aware address matching (IPv4 and IPv6)", "sizes, durations and integer comparisons", "logs fields over parsed lines: severity order, NAT, time and age", "FIELDS cover each view with typed keys and getters", and the rest of the file | Met (unit) |
+| AC-004-15 | Query language, typed comparisons, CIDR matching, sessions/logs/policies fields; user regular expressions run in the linear-time matcher with the browser's answers (section 9) | [`regexvm.test.mjs`](../../tests/js/regexvm.test.mjs) (differential against the engine, the 97 hunt patterns, linear time at 512 to 2,048 characters, refusals); [`query.test.mjs`](../../tests/js/query.test.mjs): the "regular expressions: ..." tests, "terms: key:value, key=value, comparisons, bare values", "CIDR-aware address matching (IPv4 and IPv6)", "sizes, durations and integer comparisons", "logs fields over parsed lines: severity order, NAT, time and age", "FIELDS cover each view with typed keys and getters", and the rest of the file | Met (unit) |
 | AC-004-16 | Pushdown planner for sessions, log files and reports, with the 256-byte AND-prefix fallback | `query.test.mjs`: "sessions pushdown: positive top-level AND-ed ":"/"=" terms on device keys", "sessions pushdown keeps negations, ORs, alternatives, wildcards, ranges and bad values in the browser", "logs file pushdown: contains / exclude, at most 4 terms of 120 characters", "logs report pushdown: the J-Web expression syntax", "logs report pushdown falls back to the largest AND-prefix within 256 bytes", "time terms set report start/stop and the buffer "since", and stay in the browser" | Met (unit) |
 | AC-004-17 | Every corpus line tokenises back to exactly itself | [`logparse.test.mjs`](../../tests/js/logparse.test.mjs): "every corpus line tokenises back to exactly itself", "tokenisation stays lossless on every prefix of every corpus line, and with hints" | Met (unit) on 46 documentation lines and the development-server corpus |
 | AC-004-18 | RT_FLOW decoding (structured data, BSD text across releases, buffer), other families, formats | `logparse.test.mjs`: "every documented RT_FLOW line decodes with the right session id, 5-tuple, policy, zones and NAT", "every dev-server RT_FLOW line decodes correctly (structured data, BSD text and buffer)", "RT_FLOW BSD positional bodies across releases (24.4 template, NAT rule types, LSYS)", "RFC 5424: PRI severity and facility, SD-ID, no SD-ID, bracketless, no PRI", "BSD: default, explicit-priority, year and millisecond time formats, year inference", "decode: screen, IDP, commit, configuration mode, login, VPN, link" | Met (unit) |

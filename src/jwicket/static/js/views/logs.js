@@ -29,8 +29,10 @@ const REPORT_COUNT = 1000;
 const FAIL_BACKOFF_S = 10;
 const SOURCES_RETRY_S = 30; // the log configuration stayed busy (429s): read it again by itself
 // A refilter checks lines newest first for at most this long; the new lines of one read for at most
-// APPEND_BUDGET_MS. A slow pattern then leaves older lines unchecked (and says so) instead of freezing
-// the tab (LOG-02; query.regexRisk refuses the worst patterns first).
+// APPEND_BUDGET_MS. A slow query then leaves older lines unchecked (and says so) instead of freezing
+// the tab (LOG-02). It is the second line of defence: a /regex/ runs in J-Wicket's linear-time matcher
+// (regexvm.js, ADR 0013), so one line costs at most milliseconds, but a pattern near the matcher's
+// state budget over a window of thousands of long lines still adds up.
 const FILTER_BUDGET_MS = 150;
 const APPEND_BUDGET_MS = 50;
 const PREF = {
@@ -2088,9 +2090,9 @@ class LogsView {
 
   /**
    * Filters the whole window again. Candidate lines (not markers, not your own hidden reads) are
-   * checked newest first within FILTER_BUDGET_MS: a slow pattern (a /regex/ that backtracks on long
-   * lines) stops early instead of freezing the tab, and the lines it did not reach are neither shown
-   * nor counted; the notice, a marker, the count, the empty state and the export menu say so.
+   * checked newest first within FILTER_BUDGET_MS: a slow query (a large /regex/ over a big window of
+   * long lines) stops early instead of freezing the tab, and the lines it did not reach are neither
+   * shown nor counted; the notice, a marker, the count, the empty state and the export menu say so.
    */
   refilter() {
     this.filterGen += 1;

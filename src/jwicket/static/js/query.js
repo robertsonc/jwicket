@@ -21,6 +21,7 @@
 // DNS name) is unknown, so the view keeps the policy and says why instead of hiding it.
 
 import { CLOSE_REASONS } from './logparse.js';
+import { compileUserRegex, RegexUnsupported, MAX_STATES, MAX_CLASS_ATOMS } from './regexvm.js';
 
 // --- errors -----------------------------------------------------------------------------------------
 
@@ -1295,632 +1296,132 @@ function makeIpv4Glob(pat) {
   return (lo, hi) => within(Number(lo), Number(hi), 0, start, 0);
 }
 
-// --- regular expressions that can take seconds ----------------------------------------------------------
+// --- regular expressions --------------------------------------------------------------------------------
 //
-// A backtracking pattern such as (a+)+$ takes seconds on one long line. regexRisk() reads the pattern
-// with a small tokenizer (escapes, classes, groups including (?i:...) modifier groups, quantifiers) and
-// refuses these shapes. It is J-Wicket's heuristic, not a proof:
-//   1. a group holding a repeat that is itself repeated (* + {n,} or {n,m} with m > 1): the inner repeat
-//      is unbounded (* + {n,}) or a wide range such as {0,2000}; or the group can match nothing and
-//      holds any repeat, as in (a?){24}; or a part with a choice of length is followed by text it can
-//      also match, as in (\s?\s)+;
-//   2. two unbounded (or wide) repeats whose characters can be the same, with only optional parts
-//      between them (.*.*, \w*\w+, .+\S*) or required parts both can match, holding at most one
-//      different plain character (.*=.*, .*==.*, .*\d\d.*, \w*a\w*; S-9 listed .*=.*zzz as safe, but it is
-//      cubic on a run of '=', 2.4 s on 2048 of them);
-//      a back-reference counts as a repeat of anything; overlap is decided by testing sample
-//      characters, so two classes count as overlapping unless no sample matches both;
-//   3. a back-reference inside a repeated group;
-//   4. a repeated group holding a choice whose branches can start with the same character, as in
-//      (a|aa)+ or (\w|\d)+;
-//   5. a run of bounded optional parts that can match the same text in more than PATH_LIMIT ways, as
-//      in .?.?.?.?.?.?.?.?.?.?.?
-// A pattern the tokenizer cannot read exactly is refused as well: the check fails closed. That covers
-// groups nested deeper than MAX_GROUP_DEPTH, patterns longer than REGEX_SOURCE_MAX (both bound the
-// cost of the check itself), legacy octal escapes such as \075, and \u{...} or \p{...} without the u
-// flag (the engine reads them as a letter and a quantifier). With the u flag, single characters are
-// compared the way the u flag reads them. Patterns with nothing after the second repeat (\S+@\S+,
-// .*:.*) are refused under rule 2 too, although they are at worst quadratic on a capped line: the
-// rule does not look at what follows, and the hint gives the rewrite ([^@\s]+@\S+). Logs also time-boxes
-// a refilter (LOG-02), the second line of defence; Policies, Objects and Sessions filter short texts
-// and have no time box, so they rely on this check and on REGEX_INPUT_MAX.
+// Regular expressions are user input: typed into a filter, or arriving in a link. The browser's own
+// RegExp backtracks, so a pattern such as (a+)+$ or .*=.*=.*! can take seconds on one long line and
+// freeze the operator's tab. No user pattern runs in it. compileUserRegex() (regexvm.js) runs the
+// pattern in J-Wicket's own NFA, a Pike VM whose time per line grows linearly with the length of the
+// line and the size of the pattern, so no pattern can backtrack (ADR 0013). Which characters a
+// literal, class, escape or '.' matches is still decided by the browser, so .test() gives the
+// browser's answer for every pattern the matcher accepts. It refuses lookaround and back-references,
+// which an NFA cannot run, patterns larger than its state budget (MAX_STATES), and anything it does
+// not read exactly, each with a plain message (RegexUnsupported). A pattern that is not a valid
+// regular expression gets the browser's own syntax error.
+//
+// Three bounds stay. A pattern runs over at most the first REGEX_INPUT_MAX characters of a text, so
+// one term cannot run over a whole huge line. A query's regular expressions together get the budget
+// of one pattern (QUERY_REGEX_STATES, QUERY_REGEX_CLASSES) and there are at most QUERY_REGEX_MAX of
+// them, so a row costs what one pattern near the state budget costs, however many /.../ values the
+// query holds, and the compiled patterns of a query always fit in REGEX_CACHE. And Logs time-boxes a
+// whole refilter (LOG-02, filterTimed), the second line of defence: a pattern near the state budget
+// costs milliseconds per line, and a window holds thousands of lines.
+export const REGEX_INPUT_MAX = 2048;
 
-const RISK_WHY = {
-  nested: 'repeats a repeat',
-  adjacent: 'has two repeats in a row that can match the same text',
-  backref: 'repeats a back-reference',
-  choice: 'repeats a choice whose branches can match the same text',
-  split: 'has two repeats that can both match what is between them',
-  paths: 'can split the same text in too many ways',
-};
-const RISK_HINT = {
-  choice: 'Write the branches so that they start differently (for example a+ instead of (a|aa)+).',
-  split: 'Drop a leading or trailing .* (a match is found anywhere in the text without it), or keep the separator out of the first repeat (for example [^=]*=.* instead of .*=.*).',
-  paths: 'Use fewer optional parts in a row, or smaller {n,m} ranges.',
-};
-const RISK_HINT_DEFAULT = 'Write it without nested or back-to-back repeats (for example a+ instead of (a+)+).';
+/** The NFA states of all the regular expressions of one query together (regexvm.js MAX_STATES each). */
+export const QUERY_REGEX_STATES = MAX_STATES;
+/** The different classes and escapes of all the regular expressions of one query together. */
+export const QUERY_REGEX_CLASSES = MAX_CLASS_ATOMS;
+/** The most regular expressions one query holds (each /.../ or key~"..." value counts). */
+export const QUERY_REGEX_MAX = 32;
+const capped = (s) => (s.length > REGEX_INPUT_MAX ? s.slice(0, REGEX_INPUT_MAX) : s);
 
-// A bounded repeat with more choices than this ({0,20}, {0,2000}) counts as unbounded: an unbounded
-// repeat next to it costs (text length x span) per start.
-const WIDE_SPAN = 4;
-// The most ways a run of bounded optional parts may split one piece of text (rule 5).
-const PATH_LIMIT = 1024;
-// Deeper nesting, or a longer pattern, is refused as 'cannot be checked': the walk below revisits
-// nested parts, so these two bound the time the check itself takes.
-const MAX_GROUP_DEPTH = 16;
-const REGEX_SOURCE_MAX = 2048;
+/** The regular expression rows of the query bar's help panel: [syntax, what it means]. */
+export const REGEX_HELP = Object.freeze([
+  ['/re/i  key~re', 'regular expression; case-insensitive unless it has a capital letter or flags (i m s u)'],
+  ['a|b  [a-z]  \\d+  x{2,5}', 'choices, classes, escapes, groups, the repeats * + ? {n,m}, anchors ^ $ and word boundaries \\b \\B'],
+  ['(?=x)  (?<!x)  \\1', 'not supported: lookahead, lookbehind and back-references'],
+]);
 
-class RegexRiskError extends Error {}
+// Compiled patterns (and their errors), most recently used last: validate() and compile() read the same
+// query on every keystroke.
+const REGEX_CACHE = new Map();
+const REGEX_CACHE_MAX = 2 * QUERY_REGEX_MAX; // a whole query, and the value being edited, stay cached
 
-/** Thrown by regexTree for syntax it does not read; `at` is the offset of the part it stopped at. */
-class RegexTreeError extends Error {
-  constructor(message, at) {
-    super(message);
-    this.at = at;
-  }
-}
-
-function classEnd(src, i) {
-  let j = i + 1;
-  if (src[j] === '^') j += 1;
-  while (j < src.length) {
-    if (src[j] === '\\') j += 2;
-    else if (src[j] === ']') return j + 1;
-    else j += 1;
-  }
-  throw new RegexTreeError('unclosed class', i);
-}
-
-/** The pattern as a tree; throws RegexTreeError on anything it does not read (regexRisk then refuses). */
-function regexTree(src, { unicode = false } = {}) {
-  const n = src.length;
-  let i = 0;
-  const quant = () => {
-    const c = src[i];
-    let q = null;
-    if (c === '*') q = { min: 0, max: Infinity, len: 1 };
-    else if (c === '+') q = { min: 1, max: Infinity, len: 1 };
-    else if (c === '?') q = { min: 0, max: 1, len: 1 };
-    else if (c === '{') {
-      const m = /^\{(\d+)(,(\d*))?\}/.exec(src.slice(i, i + 24));
-      if (m) {
-        const min = Number(m[1]);
-        const max = m[2] === undefined ? min : m[3] === '' ? Infinity : Number(m[3]);
-        q = { min, max, len: m[0].length };
-      }
-    }
-    if (!q) return null;
-    i += q.len;
-    if (src[i] === '?') i += 1; // lazy
-    return { min: q.min, max: q.max };
-  };
-  const alt = (depth) => {
-    const start = i;
-    const alts = [seq(depth)];
-    while (i < n && src[i] === '|') {
-      i += 1;
-      alts.push(seq(depth));
-    }
-    return { type: 'alt', alts, start, end: i };
-  };
-  const seq = (depth) => {
-    const start = i;
-    const items = [];
-    while (i < n && src[i] !== '|' && !(src[i] === ')' && depth > 0)) items.push(term(depth));
-    return { type: 'seq', items, start, end: i };
-  };
-  const term = (depth) => {
-    const start = i;
-    const c = src[i];
-    let node;
-    if (c === '(') {
-      if (depth >= MAX_GROUP_DEPTH) throw new RegexTreeError('groups nested too deeply', start);
-      i += 1;
-      let look = false;
-      if (src[i] === '?') {
-        const a = src[i + 1];
-        const b = src[i + 2];
-        // Modifier groups (?i:...) (?-i:...) (?i-m:...): a non-capturing group with its own flags.
-        const mod = /^\?[ims]*(?:-[ims]*)?:/.exec(src.slice(i, i + 12));
-        if (a === ':') i += 2;
-        else if (a === '=' || a === '!') { i += 2; look = true; }
-        else if (a === '<' && (b === '=' || b === '!')) { i += 3; look = true; }
-        else if (a === '<') {
-          const close = src.indexOf('>', i + 2);
-          if (close < 0) throw new RegexTreeError('bad group name', start);
-          i = close + 1;
-        } else if (mod) i += mod[0].length;
-        else throw new RegexTreeError('unknown group', start);
-      }
-      const body = alt(depth + 1);
-      if (src[i] !== ')') throw new RegexTreeError('unclosed group', start);
-      i += 1;
-      node = { type: 'group', body, look, start };
-    } else if (c === ')') {
-      throw new RegexTreeError('unbalanced )', start);
-    } else if (c === '[') {
-      i = classEnd(src, i);
-      node = { type: 'atom', src: src.slice(start, i), start };
-    } else if (c === '\\') {
-      const e = src[i + 1];
-      if (e === undefined) throw new RegexTreeError('trailing backslash', start);
-      // \0 followed by a digit is a legacy octal escape (\075 is '='): not read, so refused.
-      if (e === '0' && /\d/.test(src[i + 2] || '')) throw new RegexTreeError('octal escape', start);
-      // Without the u flag the engine reads \u{3} and \p{1,9} as a letter and a quantifier.
-      if (!unicode && (e === 'u' || e === 'p' || e === 'P') && src[i + 2] === '{') throw new RegexTreeError('escape needs the u flag', start);
-      if (/[1-9]/.test(e)) {
-        i += 2;
-        while (/\d/.test(src[i] || '')) i += 1;
-        node = { type: 'backref', start };
-      } else if (e === 'k' && src[i + 2] === '<') {
-        const close = src.indexOf('>', i + 3);
-        if (close < 0) throw new RegexTreeError('bad back-reference', start);
-        i = close + 1;
-        node = { type: 'backref', start };
-      } else if (e === 'b' || e === 'B') {
-        i += 2;
-        node = { type: 'assert', start };
-      } else {
-        if (e === 'x' && /^[0-9a-fA-F]{2}$/.test(src.slice(i + 2, i + 4))) i += 4;
-        else if (e === 'u' && src[i + 2] === '{' && src.indexOf('}', i + 3) > 0) i = src.indexOf('}', i + 3) + 1;
-        else if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(src.slice(i + 2, i + 6))) i += 6;
-        else if ((e === 'p' || e === 'P') && src[i + 2] === '{' && src.indexOf('}', i + 3) > 0) i = src.indexOf('}', i + 3) + 1;
-        else if (e === 'c' && /[A-Za-z]/.test(src[i + 2] || '')) i += 3;
-        else i += 2;
-        node = { type: 'atom', src: src.slice(start, i), start };
-      }
-    } else if (c === '^' || c === '$') {
-      i += 1;
-      node = { type: 'assert', start };
-    } else {
-      const cp = src.codePointAt(i);
-      i += cp > 0xffff ? 2 : 1;
-      node = { type: 'atom', src: src.slice(start, i), start };
-    }
-    const q = quant();
-    if (q) node.q = q;
-    node.end = i;
-    return node;
-  };
-  const tree = alt(0);
-  if (i < n) throw new RegexTreeError('unbalanced )', i);
-  return tree;
-}
-
-// Characters tried when deciding whether two single-character matchers overlap: ASCII, a few common
-// non-ASCII letters and spaces, plus every character written in either matcher (range ends included).
-const SAMPLE_CODES = [...Array.from({ length: 128 }, (_, k) => k), 0xa0, 0xdf, 0xe9, 0x130, 0x17f, 0x2028, 0x212a, 0x3000, 0x4e2d, 0xfeff];
-const SAMPLE = SAMPLE_CODES.map((k) => String.fromCharCode(k));
-const ESCAPED = { t: '\t', n: '\n', r: '\r', v: '\v', f: '\f', 0: '\0' };
-
-function writtenChars(src, unicode = false) {
-  const out = [];
-  for (let k = 0; k < src.length; k += 1) {
-    const c = src[k];
-    if (c !== '\\') {
-      const cp = src.codePointAt(k);
-      if (cp > 0xffff) {
-        // An astral character: the whole character and each half, since without the u flag a class
-        // matches the halves one by one.
-        out.push(String.fromCodePoint(cp), src[k], src[k + 1]);
-        k += 1;
-      } else out.push(c);
-      continue;
-    }
-    const e = src[k + 1];
-    const hex = (len) => {
-      const t = src.slice(k + 2, k + 2 + len);
-      return /^[0-9a-fA-F]+$/.test(t) && t.length === len ? String.fromCharCode(parseInt(t, 16)) : null;
-    };
-    if (e === 'x' && hex(2)) { out.push(hex(2)); k += 3; continue; }
-    if (unicode && e === 'u' && src[k + 2] === '{') {
-      const close = src.indexOf('}', k + 3);
-      const t = close > 0 ? src.slice(k + 3, close) : '';
-      if (/^[0-9a-fA-F]{1,6}$/.test(t) && parseInt(t, 16) <= 0x10ffff) {
-        out.push(String.fromCodePoint(parseInt(t, 16)));
-        k = close;
-        continue;
-      }
-    }
-    if (e === 'u' && hex(4)) { out.push(hex(4)); k += 5; continue; }
-    if (e !== undefined && Object.prototype.hasOwnProperty.call(ESCAPED, e)) out.push(ESCAPED[e]);
-    else if (e !== undefined && !/[dDwWsSbBpPkcux]/.test(e)) out.push(e);
-    k += 1;
-  }
-  return out;
-}
-
-// Overlap is tested case-insensitively always (modifier groups can switch case folding on), and with
-// '.' matching line breaks unless the pattern's own flags say otherwise.
-const ATOM_RE = new Map();
-function atomMatcher(src, dotAll, unicode = false) {
-  const key = `${dotAll ? 's' : '-'}${unicode ? 'u' : '-'}${src}`;
-  if (ATOM_RE.has(key)) return ATOM_RE.get(key);
-  let re = null;
-  // \p{...} means something else without the u flag: treat it as matching anything (regexTree
-  // refuses it there anyway). With the u flag the atom is compiled the way the pattern runs.
-  if (unicode || !/\\[pP]\{/.test(src)) {
+function compiledRegex(source, flags) {
+  const key = `${flags}/${source}`;
+  let hit = REGEX_CACHE.get(key);
+  if (hit) {
+    REGEX_CACHE.delete(key);
+  } else {
     try {
-      re = new RegExp(`^(?:${src})$`, `i${dotAll ? 's' : ''}${unicode ? 'u' : ''}`);
-    } catch (_e) {
-      re = null;
+      hit = { re: compileUserRegex(source, flags) };
+    } catch (e) {
+      hit = { err: e };
     }
+    if (REGEX_CACHE.size >= REGEX_CACHE_MAX) REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
   }
-  if (ATOM_RE.size > 500) ATOM_RE.clear();
-  ATOM_RE.set(key, re);
-  return re;
+  REGEX_CACHE.set(key, hit);
+  if (hit.err) throw hit.err;
+  return hit.re;
 }
 
-const ANY_ATOM = '[\\s\\S]';
-
-/** Whether two atoms can match the same character; `dotAll` as for atomMatcher. Memoised per call. */
-function overlapTester(dotAll, unicode = false) {
-  const memo = new Map();
-  const one = (a, b) => {
-    const key = a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
-    if (memo.has(key)) return memo.get(key);
-    const ra = atomMatcher(a, dotAll, unicode);
-    const rb = atomMatcher(b, dotAll, unicode);
-    let hit = !ra || !rb; // not sure: assume they overlap
-    if (!hit) for (const ch of new Set([...SAMPLE, ...writtenChars(a, unicode), ...writtenChars(b, unicode)])) if (ra.test(ch) && rb.test(ch)) { hit = true; break; }
-    memo.set(key, hit);
-    return hit;
-  };
-  return (as, bs) => as.some((a) => bs.some((b) => one(a, b)));
-}
-
-/** Every single-character matcher inside a node. */
-function atomsIn(node) {
-  if (!node) return [];
-  if (node.type === 'atom') return [node.src];
-  if (node.type === 'backref') return [ANY_ATOM];
-  if (node.type === 'group') return node.look ? [] : atomsIn(node.body);
-  if (node.type === 'alt') return node.alts.flatMap(atomsIn);
-  if (node.type === 'seq') return node.items.flatMap(atomsIn);
-  return [];
-}
-
-const span = (q) => (q ? (q.max === Infinity ? Infinity : q.max - q.min) : 0);
-const wide = (q) => span(q) > WIDE_SPAN;
-const repeated = (q) => Boolean(q) && (q.max === Infinity || q.max > 1);
-
-/** Whether a node can match the empty string. */
-// Memoised per node: the walk asks the same parts again at every level of nesting.
-const NULLABLE = new WeakMap();
-const FIRST = new WeakMap();
-const LAST = new WeakMap();
-
-function nullableOf(node) {
-  if (NULLABLE.has(node)) return NULLABLE.get(node);
-  const v = nullableRaw(node);
-  NULLABLE.set(node, v);
-  return v;
-}
-
-function nullableRaw(node) {
-  if (node.q && node.q.min === 0) return true;
-  if (node.type === 'atom') return false;
-  if (node.type === 'assert' || node.type === 'backref') return true;
-  if (node.type === 'group') return node.look || nullableOf(node.body);
-  if (node.type === 'alt') return node.alts.some(nullableOf);
-  return node.items.every(nullableOf);
-}
-
-/** The atoms a node can start with (through parts that may match nothing). */
-function firstAtoms(node) {
-  if (FIRST.has(node)) return FIRST.get(node);
-  const v = firstRaw(node);
-  FIRST.set(node, v);
-  return v;
-}
-
-function firstRaw(node) {
-  if (node.type === 'atom') return [node.src];
-  if (node.type === 'backref') return [ANY_ATOM];
-  if (node.type === 'assert') return [];
-  if (node.type === 'group') return node.look ? [] : firstAtoms(node.body);
-  if (node.type === 'alt') return node.alts.flatMap(firstAtoms);
-  const out = [];
-  for (const it of node.items) {
-    out.push(...firstAtoms(it));
-    if (!nullableOf(it)) break;
-  }
-  return out;
-}
-
-function some(node, pred) {
-  if (!node) return false;
-  if (pred(node)) return true;
-  if (node.type === 'group') return some(node.body, pred);
-  if (node.type === 'alt') return node.alts.some((x) => some(x, pred));
-  if (node.type === 'seq') return node.items.some((x) => some(x, pred));
-  return false;
-}
-
-// A plain character ('=', 'a', '\.') as opposed to a class ('.', '\w', '[^=]'). Text has fewer
-// places where two or more different plain characters match in a row than places where one does, so
-// only such a run ('key', not '==') keeps two repeats on either side from sharing the text (rule 2).
-const isLiteral = (src) => !/^(?:\[|\.$|\\[dDwWsSpP])/.test(src);
-
-/** The different plain characters a part must match (lower-cased; none for classes and optional parts). */
-function literalChars(node, unicode = false) {
-  if (node.q && node.q.min === 0) return [];
-  if (node.type === 'atom') {
-    if (!isLiteral(node.src)) return [];
-    // The character itself, so '=', '\x3d' and '\u{3d}' count as one.
-    const written = writtenChars(node.src, unicode);
-    return [(written.length ? written[0] : node.src).toLowerCase()];
-  }
-  if (node.type !== 'group' || node.look) return [];
-  // A choice: the branch with the fewest.
-  let best = null;
-  for (const a of node.body.alts) {
-    const chars = [...new Set(a.items.flatMap((x) => literalChars(x, unicode)))];
-    if (!best || chars.length < best.length) best = chars;
-  }
-  return best || [];
-}
-
-const distinct = (a, b) => new Set([...a, ...b]).size;
-
-/**
- * Walks the tree; returns the first risky piece as {start, end, why}, or null. Each node also yields
- * `{nullable, heads, tails}`: the unbounded repeats it can start or end with (reachable through parts
- * that may match nothing, or across one required character they can both match), so repeats that
- * meet across a group boundary are found too.
- */
-function riskOf(tree, { dotAll = true, unicode = false } = {}) {
-  let found = null;
-  const overlap = overlapTester(dotAll, unicode);
-  // Rule 4: a choice inside a repeated group whose branches can start with the same character.
-  const ambiguousChoice = (node) => node.type === 'alt' && node.alts.length > 1 && node.alts.some((a, k) => {
-    const fa = firstAtoms(a);
-    return fa.length > 0 && node.alts.slice(k + 1).some((b) => overlap(fa, firstAtoms(b)));
-  });
-  // Rule 1, bounded repeats: inside a repeated group, a part with a choice of length (a? a{1,3})
-  // whose characters can also be matched by what follows it (the rest of the body, or the next
-  // round of the group) lets the rounds split the same text in many ways, as in (\s?\s)+.
-  const lastAtoms = (node) => {
-    if (LAST.has(node)) return LAST.get(node);
-    const v = lastRaw(node);
-    LAST.set(node, v);
-    return v;
-  };
-  const lastRaw = (node) => {
-    if (node.type === 'atom') return [node.src];
-    if (node.type === 'backref') return [ANY_ATOM];
-    if (node.type === 'assert') return [];
-    if (node.type === 'group') return node.look ? [] : lastAtoms(node.body);
-    if (node.type === 'alt') return node.alts.flatMap(lastAtoms);
-    const out = [];
-    for (let k = node.items.length - 1; k >= 0; k -= 1) {
-      out.push(...lastAtoms(node.items[k]));
-      if (!nullableOf(node.items[k])) break;
-    }
-    return out;
-  };
-  const choiceMeetsFollow = (node, follow) => {
-    if (node.type === 'seq') {
-      return node.items.some((it, k) => {
-        let next = [];
-        let open = true;
-        for (const later of node.items.slice(k + 1)) {
-          next = next.concat(firstAtoms(later));
-          if (!nullableOf(later)) {
-            open = false;
-            break;
-          }
-        }
-        return choiceMeetsFollow(it, open ? next.concat(follow) : next);
-      });
-    }
-    if (node.type === 'alt') return node.alts.some((a) => choiceMeetsFollow(a, follow));
-    if (node.q && node.q.max > node.q.min && overlap(lastAtoms(node), follow)) return true;
-    if (node.type === 'group' && !node.look) return choiceMeetsFollow(node.body, repeated(node.q) ? follow.concat(firstAtoms(node.body)) : follow);
-    return false;
-  };
-  // Rule 2: a repeat before (p) and a repeat after (hd) can share text when their characters overlap
-  // and each can match every part between them, with at most one plain character between them.
-  const meet = (p, hd) => overlap(p.atoms, hd.atoms) && distinct(p.lits, hd.lits) <= 1 && p.seps.every((sp) => overlap(sp, hd.atoms)) && hd.seps.every((sp) => overlap(sp, p.atoms));
-  // Rule 5: how many ways a bounded optional part can match (1 for a part with no choice).
-  const choices = (node) => {
-    const q = node.q;
-    if (q && q.max > q.min && !wide(q)) return q.max - q.min + 1; // wide ones are rules 1 and 2
-    if (!q && node.type === 'group' && !node.look && ambiguousChoice(node.body)) return node.body.alts.length;
-    return 1;
-  };
-  const visit = (node) => {
-    if (found) return { nullable: true, heads: [], tails: [] };
-    if (node.type === 'alt') {
-      const parts = node.alts.map(visit);
-      return { nullable: parts.some((p) => p.nullable), heads: parts.flatMap((p) => p.heads), tails: parts.flatMap((p) => p.tails) };
-    }
-    if (node.type === 'seq') {
-      let pending = [];
-      const heads = [];
-      // The path from the start of this sequence to the current part: open while every part so far
-      // can match nothing, or is a part the repeats around it could share (see `share` below).
-      let prefix = { lits: [], seps: [] };
-      let nullable = true;
-      let run = null; // rule 5: {start, atoms, ways}
-      for (const it of node.items) {
-        const s = visit(it);
-        if (found) break;
-        for (const hd of s.heads) {
-          const hit = pending.find((p) => meet(p, hd));
-          if (hit) {
-            found = { start: hit.start, end: hd.end, why: hit.seps.length || hd.seps.length ? RISK_WHY.split : RISK_WHY.adjacent };
-            break;
-          }
-        }
-        if (found) break;
-        if (it.type !== 'assert') {
-          // A run goes on through optional parts and parts that can match a character the run can;
-          // a required part that cannot ends it.
-          const atoms = atomsIn(it);
-          const ways = choices(it);
-          if (run && (s.nullable || overlap(run.atoms, atoms))) {
-            run.ways *= ways;
-            run.atoms = run.atoms.concat(atoms);
-          } else run = { start: it.start, atoms, ways };
-          if (run.ways > PATH_LIMIT) {
-            found = { start: run.start, end: it.end, why: RISK_WHY.paths };
-            break;
-          }
-        }
-        if (prefix) {
-          for (const hd of s.heads) {
-            if (distinct(prefix.lits, hd.lits) <= 1) heads.push({ ...hd, lits: [...new Set([...prefix.lits, ...hd.lits])], seps: prefix.seps.concat(hd.seps) });
-          }
-        }
-        nullable = nullable && s.nullable;
-        // Required parts between two repeats that can all be matched by both (X*=X*, .*\d\d.*) still
-        // let the repeats share the text, unless the parts hold two or more plain characters
-        // (.*key.* is kept; .*==.* is not): such a part is a `share`, kept on the repeats on either side.
-        const share = !s.nullable && !s.tails.length && !s.heads.length ? { atoms: atomsIn(it), lits: literalChars(it, unicode) } : null;
-        if (s.nullable) {
-          pending = pending.concat(s.tails);
-        } else if (share && share.atoms.length) {
-          const join = (x) => [...new Set([...x, ...share.lits])];
-          pending = pending.filter((p) => join(p.lits).length <= 1 && overlap(p.atoms, share.atoms)).map((p) => ({ ...p, lits: join(p.lits), seps: p.seps.concat([share.atoms]) }));
-          if (prefix) prefix = join(prefix.lits).length <= 1 ? { lits: join(prefix.lits), seps: prefix.seps.concat([share.atoms]) } : null;
-        } else {
-          pending = s.tails.slice();
-          prefix = null;
-        }
-      }
-      return { nullable, heads, tails: pending };
-    }
-    const q = node.q || null;
-    const optional = Boolean(q && q.min === 0);
-    if (node.type === 'assert') return { nullable: true, heads: [], tails: [] };
-    if (node.type === 'backref') {
-      // A back-reference matches text as long as its group's, so it counts as a repeat of anything.
-      const rep = { start: node.start, end: node.end, atoms: [ANY_ATOM], lits: [], seps: [] };
-      return { nullable: true, heads: [rep], tails: [rep] };
-    }
-    if (node.type === 'atom') {
-      if (wide(q)) {
-        const rep = { start: node.start, end: node.end, atoms: [node.src], lits: [], seps: [] };
-        return { nullable: optional, heads: [rep], tails: [rep] };
-      }
-      return { nullable: optional, heads: [], tails: [] };
-    }
-    // group
-    if (repeated(q) && !node.look) {
-      const inner = node.body;
-      if (some(inner, (x) => wide(x.q)) || (nullableOf(inner) && some(inner, (x) => Boolean(x.q))) || choiceMeetsFollow(inner, firstAtoms(inner))) {
-        found = { start: node.start, end: node.end, why: RISK_WHY.nested };
-        return { nullable: true, heads: [], tails: [] };
-      }
-      if (some(inner, (x) => x.type === 'backref')) {
-        found = { start: node.start, end: node.end, why: RISK_WHY.backref };
-        return { nullable: true, heads: [], tails: [] };
-      }
-      if (some(inner, (x) => !(x.type === 'group' && x.look) && ambiguousChoice(x))) {
-        found = { start: node.start, end: node.end, why: RISK_WHY.choice };
-        return { nullable: true, heads: [], tails: [] };
-      }
-    }
-    const body = visit(node.body);
-    if (node.look) return { nullable: true, heads: [], tails: [] };
-    if (wide(q)) {
-      const rep = { start: node.start, end: node.end, atoms: atomsIn(node.body), lits: [], seps: [] };
-      return { nullable: optional || body.nullable, heads: [rep], tails: [rep] };
-    }
-    if (repeated(q)) return { nullable: optional || body.nullable, heads: [], tails: [] };
-    return { nullable: optional || body.nullable, heads: body.heads, tails: body.tails };
-  };
-  visit(tree);
-  return found;
+/** The flags a filter runs a pattern with: smart case, and g and y dropped (a filter only tests). */
+function regexFlags(v) {
+  let flags = v.flags || '';
+  // Smart case: case-insensitive unless the pattern has capitals or flags were given.
+  if (!flags && !/[A-Z]/.test(v.text.replace(/\\[A-Z]/g, ''))) flags = 'i';
+  return flags.replace(/[gy]/g, '');
 }
 
 /**
- * Whether a regular expression can take seconds on one long line (catastrophic backtracking):
- * null when it looks safe, else `{ at, length, piece, why, message }` with the offending piece. A
- * pattern that is not a valid regular expression with `flags` (by default: neither without flags nor
- * with 'u') gives null, and its syntax error is reported instead. A valid pattern the check cannot
- * read is refused (why 'cannot be checked'): the check fails closed.
+ * Whether J-Wicket's matcher refuses a pattern with these flags (g and y are dropped, as a filter
+ * does): null when it runs the pattern, and null when the pattern is not a valid regular expression
+ * (its syntax error is reported instead); else `{ at, length, piece, why, message }`, where `why` is
+ * RegexUnsupported's code ('lookaround', 'backreference', 'too-large', 'flags' or 'unreadable') and
+ * `piece` the part of the pattern it names.
  */
-export function regexRisk(source, flags) {
+export function regexRisk(source, flags = '') {
   const src = String(source ?? '');
-  if (!src) return null;
-  const tries = typeof flags === 'string' ? [flags] : ['', 'u'];
-  let valid = false;
-  for (const f of tries) {
-    try {
-      new RegExp(src, f); // eslint-disable-line no-new
-    } catch (_e) {
-      continue; // not valid with these flags
-    }
-    valid = true;
-    // Checked the way it would run with these flags; without explicit flags, every way it compiles.
-    const risk = regexShapeRisk(src, { dotAll: typeof flags !== 'string' || f.includes('s'), unicode: f.includes('u') });
-    if (risk) return risk;
+  try {
+    compiledRegex(src, String(flags ?? '').replace(/[gy]/g, ''));
+  } catch (e) {
+    if (!(e instanceof RegexUnsupported)) return null;
+    const at = Math.min(Math.max(Number.isInteger(e.at) ? e.at : 0, 0), src.length);
+    const length = Math.max(Math.min(Number.isInteger(e.length) ? e.length : 0, src.length - at), 0);
+    return { at, length, piece: src.slice(at, at + length), why: e.why, message: e.message };
   }
   return null;
 }
 
 /**
- * The shape check of regexRisk without its validity probe, for a pattern already known to compile.
- * Exported so that tests can check syntax the test engine does not compile yet (such as the
- * (?i:...) modifier groups that browsers accept). `dotAll`: whether '.' matches line breaks; a
- * (?s:...) group in the pattern turns it on.
+ * What one query's regular expressions have used so far (see QUERY_REGEX_STATES): validate() and
+ * compile() each start one and charge every regex value to it in the same order, so both refuse the
+ * same value.
  */
-export function regexShapeRisk(source, { dotAll = true, unicode = false } = {}) {
-  const src = String(source ?? '');
-  if (!src) return null;
-  let hit;
-  try {
-    if (src.length > REGEX_SOURCE_MAX) throw new RegexTreeError('pattern too long', REGEX_SOURCE_MAX);
-    hit = riskOf(regexTree(src, { unicode }), { dotAll: dotAll || /\(\?[ims]*s[ims]*[-:]/.test(src), unicode });
-  } catch (e) {
-    const at = e instanceof RegexTreeError && Number.isInteger(e.at) ? Math.min(Math.max(e.at, 0), src.length - 1) : 0;
-    const piece = src.slice(at, at + 12);
-    const reason = e instanceof RegexTreeError ? e.message : '';
-    let detail = `it does not read '${piece}'. Write it with plain groups, classes and the quantifiers * + ? {n,m}.`;
-    if (reason === 'pattern too long') detail = `it is longer than ${REGEX_SOURCE_MAX} characters.`;
-    else if (reason === 'groups nested too deeply') detail = `its groups are nested more than ${MAX_GROUP_DEPTH} deep, at '${piece}'.`;
-    else if (reason === 'octal escape') detail = `it does not read the octal escape '${piece}'. Write the character itself, or \\x followed by two hex digits.`;
-    else if (reason === 'escape needs the u flag') detail = `'${piece}' means a letter and a repeat without the u flag. Add the u flag (/.../u), or write the character itself.`;
-    return {
-      at,
-      length: piece.length,
-      piece,
-      why: 'cannot be checked',
-      message: `J-Wicket cannot check this pattern for slow repeats, so it does not run it: ${detail}`,
-    };
+function regexBudget() {
+  return { count: 0, states: 0, classes: new Set() };
+}
+
+/**
+ * A user pattern as a matcher with test(str), with the flags a filter runs it with, charged to the
+ * query's `budget` when one is given. Throws as compileUserRegex, and RegexUnsupported ('too-large')
+ * when the query's regular expressions together are over the budget.
+ */
+function userRegex(v, budget) {
+  if (budget && budget.count >= QUERY_REGEX_MAX) {
+    throw new RegexUnsupported('too-large', `This query has more than ${QUERY_REGEX_MAX} regular expressions, so J-Wicket does not run it. Use fewer, for example one /a|b/ instead of /a/|/b/.`, 0, 0);
   }
-  if (!hit) return null;
-  const piece = src.slice(hit.start, hit.end);
-  const hint = Object.keys(RISK_WHY).find((k) => RISK_WHY[k] === hit.why);
-  return {
-    at: hit.start,
-    length: hit.end - hit.start,
-    piece,
-    why: hit.why,
-    message: `This pattern can take seconds on one long line: '${piece}' ${hit.why}. ${RISK_HINT[hint] || RISK_HINT_DEFAULT}`,
-  };
+  const tooLarge = () => new RegexUnsupported('too-large', `The regular expressions of this query are too large together for J-Wicket's matcher: with this one they need more than ${QUERY_REGEX_STATES} parts. Use fewer or smaller regular expressions, or plain words where a word will do.`, 0, 0);
+  // every pattern has at least one state: once the budget is spent, the next one is not even compiled
+  if (budget && budget.states >= QUERY_REGEX_STATES) throw tooLarge();
+  const re = compiledRegex(v.text, regexFlags(v));
+  if (!budget) return re;
+  const classes = new Set(budget.classes);
+  for (const k of re.natives) classes.add(k);
+  if (budget.states + re.states > QUERY_REGEX_STATES) throw tooLarge();
+  if (classes.size > QUERY_REGEX_CLASSES) {
+    throw new RegexUnsupported('too-large', `The regular expressions of this query have more than ${QUERY_REGEX_CLASSES} different classes and escapes (such as [a-z], \\d, \\w or .) together, so J-Wicket does not run it. Use fewer different classes.`, 0, 0);
+  }
+  budget.count += 1;
+  budget.states += re.states;
+  budget.classes = classes;
+  return re;
 }
 
-// Regular expressions are user input. The text they run over is capped, so one term cannot run over a
-// whole huge line; patterns with nested, back-to-back or ambiguous repeats are refused up front
-// (regexRisk, checked with the flags the pattern will run with); and Logs time-boxes a whole refilter
-// (LOG-02).
-export const REGEX_INPUT_MAX = 2048;
-const capped = (s) => (s.length > REGEX_INPUT_MAX ? s.slice(0, REGEX_INPUT_MAX) : s);
+const REGEX_BUDGET = Symbol('regex budget'); // in the ctx that validate() and compile() pass down
 
-function userRegex(v) {
-  let flags = v.flags || '';
-  // Smart case: case-insensitive unless the pattern has capitals or flags were given.
-  if (!flags && !/[A-Z]/.test(v.text.replace(/\\[A-Z]/g, ''))) flags = 'i';
-  flags = flags.replace(/[gy]/g, '');
-  const risk = regexRisk(v.text, flags);
-  if (risk) throw new RegexRiskError(risk.message);
-  return new RegExp(v.text, flags);
-}
-
-const regexError = (e) => (e instanceof RegexRiskError ? e.message : `Invalid regular expression: ${String(e.message || e).replace(/^Invalid regular expression: /, '')}`);
+const regexError = (e) => (e instanceof RegexUnsupported ? e.message : `Invalid regular expression: ${String(e.message || e).replace(/^Invalid regular expression: /, '')}`);
 
 function parseIntValue(text) {
   const s = String(text).trim();
@@ -1936,7 +1437,7 @@ function valueMatcher(def, v, op, ctx) {
   if (op === '~' || v.kind === 'regex') {
     let re;
     try {
-      re = userRegex(v.kind === 'regex' ? v : { text: v.text, flags: '' });
+      re = userRegex(v.kind === 'regex' ? v : { text: v.text, flags: '' }, ctx && ctx[REGEX_BUDGET]);
     } catch (e) {
       throw new Error(regexError(e));
     }
@@ -2040,6 +1541,8 @@ function valueError(v, message) {
 /** Checks keys and typed values against a view's fields. Returns the first error, or null. */
 export function validate(ast, fields, ctx) {
   let err = null;
+  const budget = regexBudget();
+  const c = { ...ctx, [REGEX_BUDGET]: budget };
   const walk = (node) => {
     if (err || !node) return;
     if (node.type === 'and' || node.type === 'or') node.items.forEach(walk);
@@ -2056,7 +1559,7 @@ export function validate(ast, fields, ctx) {
         }
         for (const v of node.values) {
           try {
-            valueMatcher(hit.def, v, node.op, ctx);
+            valueMatcher(hit.def, v, node.op, c);
           } catch (e) {
             err = valueError(v, `${hit.name}: ${e.message}`);
             return;
@@ -2066,7 +1569,7 @@ export function validate(ast, fields, ctx) {
         for (const v of node.values) {
           if (v.kind === 'regex') {
             try {
-              userRegex(v);
+              userRegex(v, budget);
             } catch (e) {
               err = valueError(v, regexError(e));
               return;
@@ -2119,11 +1622,11 @@ function ipsOf(h) {
   return h.ips;
 }
 
-function freeMatcher(v, fields) {
+function freeMatcher(v, fields, ctx) {
   if (v.kind === 'regex') {
     let re;
     try {
-      re = userRegex(v);
+      re = userRegex(v, ctx && ctx[REGEX_BUDGET]);
     } catch (_e) {
       return () => false; // validate() reports it; compile() never throws
     }
@@ -2151,7 +1654,7 @@ function asItems(v) {
 
 function buildTerm(node, fields, ctx, tri) {
   if (!node.key) {
-    const ms = node.values.map((v) => freeMatcher(v, fields));
+    const ms = node.values.map((v) => freeMatcher(v, fields, ctx));
     return (row) => ms.some((m) => m(row));
   }
   const hit = resolveKey(fields, node.key);
@@ -2267,7 +1770,7 @@ function hasUnknown(fields) {
 export function compile(ast, fields, ctx = {}) {
   if (!ast) return () => true;
   const fs = (typeof fields === 'string' ? FIELDS[viewOf(fields).base] : fields) || {};
-  const c = { ...ctx, now: ctx.now ?? Date.now() };
+  const c = { ...ctx, now: ctx.now ?? Date.now(), [REGEX_BUDGET]: regexBudget() };
   if (!hasUnknown(fs)) return build(ast, fs, c, false);
   const f = build(ast, fs, c, true);
   return (row) => f(row) !== false;
@@ -2282,15 +1785,18 @@ export function compile(ast, fields, ctx = {}) {
 export function compileTri(ast, fields, ctx = {}) {
   if (!ast) return () => true;
   const fs = (typeof fields === 'string' ? FIELDS[viewOf(fields).base] : fields) || {};
-  const c = { ...ctx, now: ctx.now ?? Date.now() };
+  const c = { ...ctx, now: ctx.now ?? Date.now(), [REGEX_BUDGET]: regexBudget() };
   return build(ast, fs, c, hasUnknown(fs));
 }
 
 const clockNow = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
 /**
- * Filters `rows` with `pred` within a time budget (checked every 64 rows), so a slow pattern cannot
- * freeze the tab on a large window. Returns `{rows, complete, checked, ms}`; when `complete` is false
+ * Filters `rows` with `pred` within a time budget, so a slow pattern cannot freeze the tab on a large
+ * window. The clock is read before every row after the first: one row with a pattern near the state
+ * budget costs milliseconds, so checking every 64 rows let a refilter run for a second before it
+ * looked (round 3). The budget is therefore overrun by at most one row. Returns
+ * `{rows, complete, checked, ms}`; when `complete` is false
  * only the first `checked` rows were tested and the view should say the query is too slow for this
  * many rows (QueryBar.setNotice). `clock` is for tests.
  */
@@ -2300,7 +1806,7 @@ export function filterTimed(rows, pred, budgetMs = 200, clock = clockNow) {
   const t0 = clock();
   let i = 0;
   for (; i < list.length; i++) {
-    if ((i & 63) === 0 && i && clock() - t0 > budgetMs) break;
+    if (i && clock() - t0 > budgetMs) break;
     let keep = false;
     try {
       keep = pred(list[i]);
