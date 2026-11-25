@@ -345,15 +345,15 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | ID | Test | Gate | Status (all cells "not run" unless stated) |
 | --- | --- | --- | --- |
 | [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Pass** on SRX4100 25.2R1-S1.4 (Python 3.7.10, every module `ok`); **partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
-| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Partial** on SRX4100 25.2R1-S1.4 (bundle daemonized, digest matched, refused start recorded, restart after SIGTERM, memory with one operator); **spike-equivalent partial** on vSRX 24.4R2-S3.5 |
-| [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | Not run |
+| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **spike-equivalent partial** on vSRX 24.4R2-S3.5 |
+| [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | **Works** on SRX4100 25.2R1-S1.4 (`/var/db/scripts/jet` is first on `sys.path`) |
 | [Q-RT-04](#q-rt-04-survives-reboot) | Survives reboot | G2 (proposed) | Not run |
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
-| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Partial** on SRX4100 25.2R1-S1.4 (super-user sign-in and reads; wrong password refused; no read-only-class account) |
+| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Met except the SSH-key case** on SRX4100 25.2R1-S1.4 (read-only, operator and super-user accounts; RPCs attributed to the operator; sign-out, replacement and cap checked) |
 | [Q-AUTH-02](#q-auth-02-radius-and-tacacs-template-users) | RADIUS and TACACS+ template users | G1 | Not run |
-| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | Not run |
+| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Early observations** on SRX4100 25.2R1-S1.4 for `read-only` and `operator` (configuration denied; sessions and health allowed) |
 | [Q-AUTH-04](#q-auth-04-junos-lockout-and-j-wickets-throttle) | Junos lockout and J-Wicket's throttle | G2 (proposed) | Not run |
-| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Partial** on SRX4100 25.2R1-S1.4 (TLS 1.2 and 1.3 served; 1.0 and 1.1 refusal not tested) |
+| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Met except a provisioning path** on SRX4100 25.2R1-S1.4 (1.2 and 1.3 served, 1.0 and 1.1 refused, `__Host-` Secure cookie, HSTS, bad key mode refused) |
 | [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **fxp0 part met** on SRX4100 25.2R1-S1.4 (TLS, through `mgmt_junos`); **vSRX part spike-equivalent partial** (clear text, one port checked); revenue zone on hardware not run |
 | [Q-NET-02](#q-net-02-port-8443-collisions) | Port 8443 collisions | G2 (proposed) | Not run |
 | [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | **Fails** on SRX4100 25.2R1-S1.4 (`administratively prohibited`; the documented statement is a syntax error) |
@@ -361,7 +361,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
 | [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
 | [Q-LOAD-03](#q-load-03-log-volume-from-polling) | Log volume from polling | G1 | Not run |
-| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | Not run |
+| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies recorded on SRX4100 25.2R1-S1.4; three parser mismatches found and fixed |
 | [Q-HA-01](#q-ha-01-chassis-cluster) | Chassis cluster | G2 | Not run |
 | [Q-HA-02](#q-ha-02-identify-the-local-node) | Identify the local node | G2 | Not run |
 | [Q-HA-03](#q-ha-03-multinode-high-availability) | Multinode High Availability | G2 | Not run |
@@ -442,8 +442,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
     reason to `startup-refused.txt`, readable with `file show`, and Junos logged "jwicket.py is
     thrashing, not restarted"; after `kill` (SIGTERM) it restarted without operator action; with one
     signed-in operator it used 54 MB resident and 86 MB virtual.
-  - Not met: `kill -9` not tried; restart times not measured; idle memory without an operator not
-    recorded; where a daemonized app's standard error goes not recorded (the run set `[log] file`).
+  - Met on 25 November: after `kill -9` it answered again in 1.3 s; after SIGTERM, which shuts down
+    cleanly first, in 6.2 s.
+  - Not met: idle memory without an operator not recorded (one was signed in at every reading);
+    where a daemonized app's standard error goes not recorded (the run set `[log] file`).
     Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
 
 #### Q-RT-03 Sibling-module imports
@@ -466,7 +468,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   work" makes the bundle optional, not wrong ([ADR 0001](adr/0001-on-box-pure-python-single-file.md)).
   The self-test with a planted `json.py` reports no foreign module.
 - **Platforms:** lab vSRX on each release; one hardware platform.
-- **Status:** not run.
+- **Status:** **works** on SRX4100 25.2R1-S1.4 (25 November 2026). An unsigned JET app,
+  `jwsibtest.py`, imported `jwsibmod.py` from the same directory; `sys.path` began with
+  `/var/db/scripts/jet`, then `/var/run/scripts/jet/`. Per ADR 0001 the bundle becomes optional, not
+  wrong; it stays, because it is one file to checksum and the foreign-module refusal depends on
+  nothing else being importable from that directory. Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
 
 #### Q-RT-04 Survives reboot
 
@@ -528,9 +534,13 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   in through J-Wicket; the device logged `Accepted password for root from 127.0.0.1`, and J-Wicket
   read the policy inventory, the session table and the `messages` log as that account. A wrong
   password was refused by Junos (`SSHD_LOGIN_FAILED ... from host '127.0.0.1'`), shown as an
-  operator-safe message, and audited as `user_hash`. Not run: the read-only-class account,
-  `UI_NETCONF_CMD` attribution, the daemon-account SSH-key case, sign-out and timeout checks, and
-  the session caps. Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's reads ran as the daemon's
+  operator-safe message, and audited as `user_hash`. On 25 November, lab-only accounts in the
+  `read-only` and `operator` classes signed in too; the device attributed every RPC to the signed-in
+  user (`UI_NETCONF_CMD: User 'jw-op' used NETCONF client to run command
+  'get-route-engine-information'`), sign-out sent `close-session` (`UI_LOGOUT_EVENT`), a third
+  sign-in by one user closed that user's oldest session, and a fifth sign-in over the cap was
+  refused (503) with nobody signed out. Not run: the daemon-account SSH-key case, and an idle
+  timeout observed on the device. Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's reads ran as the daemon's
   account (`jcluser`, class `j-super-user`) through a no-argument local `Device()` session; that is
   not this test.
 
@@ -611,9 +621,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Status:** **partial** on SRX4100 25.2R1-S1.4. A self-signed RSA-2048 certificate generated on
   the box (`openssl req` in the shell, key `0600` owned by the daemon account) loaded; from a lab
   workstation TLS 1.2 (`ECDHE-RSA-AES256-GCM-SHA384`) and TLS 1.3 (`TLS_AES_256_GCM_SHA384`)
-  handshakes succeeded on fxp0, not through a tunnel (Q-NET-03 failed). Not done: TLS 1.0 and 1.1
-  refusal (the workstation's client could not offer them), compression, handshake time, the cookie
-  and HSTS checks, the settings refusals, and a provisioning path. Evidence:
+  handshakes succeeded on fxp0, not through a tunnel (Q-NET-03 failed). On 25 November, TLS 1.0 and
+  1.1 offered by a permissive client were refused by the server (alert 70); the cookie was
+  `__Host-jwicket-<8 hex>` with `Secure`, `HttpOnly` and `SameSite=Strict`; HSTS was
+  `max-age=31536000`; and a key at mode 0644 refused the start with a message naming the file.
+  Not done: compression, handshake time, a directory-owner refusal, and a provisioning path. Evidence:
   [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's T8 (TLS) was not run.
 
 #### Q-NET-01 Reachability through fxp0 and a revenue zone
@@ -956,7 +968,7 @@ platform and release, and is "qualified" only as [3.2](#32-what-qualified-platfo
 | vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5 only**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). Every other test, and J-Wicket's own bundle: not run. Not qualified |
 | SRX300 class | not run | not run | not run | not run |
 | SRX1500 | not run | not run | not run | not run |
-| SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02, Q-AUTH-01, Q-TLS-01 partial; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). Not qualified |
+| SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01, Q-REL-01 partial; Q-AUTH-03 early; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). Not qualified |
 | SRX4600 | not run | not run | not run | not run |
 | SRX5000 line | not run | not run | not run | not run |
 

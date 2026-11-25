@@ -1,41 +1,41 @@
-<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1-S1.4/junos">
-    <route-engine-information xmlns="http://xml.juniper.net/junos/25.2R0/junos-chassis">
-        <route-engine>
-            <status>OK</status>
-            <temperature junos:celsius="29">29 degrees C / 84 degrees F</temperature>
-            <cpu-temperature junos:celsius="29">29 degrees C / 84 degrees F</cpu-temperature>
-            <memory-system-total>3119</memory-system-total>
-            <memory-system-total-used>1497</memory-system-total-used>
-            <memory-system-total-util>48</memory-system-total-util>
-            <memory-buffer-utilization>27</memory-buffer-utilization>
-            <cpu-user>14</cpu-user>
-            <cpu-background>0</cpu-background>
-            <cpu-system>12</cpu-system>
-            <cpu-interrupt>2</cpu-interrupt>
-            <cpu-idle>72</cpu-idle>
-            <cpu-user1>12</cpu-user1>
-            <cpu-background1>0</cpu-background1>
-            <cpu-system1>12</cpu-system1>
-            <cpu-interrupt1>3</cpu-interrupt1>
-            <cpu-idle1>73</cpu-idle1>
-            <cpu-user2>13</cpu-user2>
-            <cpu-background2>0</cpu-background2>
-            <cpu-system2>12</cpu-system2>
-            <cpu-interrupt2>3</cpu-interrupt2>
-            <cpu-idle2>72</cpu-idle2>
-            <cpu-user3>13</cpu-user3>
-            <cpu-background3>0</cpu-background3>
-            <cpu-system3>13</cpu-system3>
-            <cpu-interrupt3>3</cpu-interrupt3>
-            <cpu-idle3>71</cpu-idle3>
-            <model>SRX Routing Engine</model>
-            <serial-number>BUILTIN</serial-number>
-            <start-time junos:seconds="1767391423">2026-01-02 16:03:43 CST</start-time>
-            <up-time junos:seconds="28175225">326 days, 2 hours, 27 minutes, 5 seconds</up-time>
-            <last-reboot-reason>0x4000:VJUNOS reboot</last-reboot-reason>
-            <load-average-one>2.54</load-average-one>
-            <load-average-five>2.14</load-average-five>
-            <load-average-fifteen>2.09</load-average-fifteen>
-        </route-engine>
-    </route-engine-information>
-</rpc-reply>
+<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:junos="http://xml.juniper.net/junos/25.2R1-S1.4/junos" message-id="5">
+<route-engine-information xmlns="http://xml.juniper.net/junos/25.2R0/junos-chassis">
+<route-engine>
+<status>OK</status>
+<temperature junos:celsius="30">30 degrees C / 86 degrees F</temperature>
+<cpu-temperature junos:celsius="30">30 degrees C / 86 degrees F</cpu-temperature>
+<memory-system-total>3119</memory-system-total>
+<memory-system-total-used>1435</memory-system-total-used>
+<memory-system-total-util>46</memory-system-total-util>
+<memory-buffer-utilization>25</memory-buffer-utilization>
+<cpu-user>8</cpu-user>
+<cpu-background>0</cpu-background>
+<cpu-system>11</cpu-system>
+<cpu-interrupt>2</cpu-interrupt>
+<cpu-idle>78</cpu-idle>
+<cpu-user1>9</cpu-user1>
+<cpu-background1>0</cpu-background1>
+<cpu-system1>13</cpu-system1>
+<cpu-interrupt1>2</cpu-interrupt1>
+<cpu-idle1>76</cpu-idle1>
+<cpu-user2>14</cpu-user2>
+<cpu-background2>0</cpu-background2>
+<cpu-system2>14</cpu-system2>
+<cpu-interrupt2>3</cpu-interrupt2>
+<cpu-idle2>69</cpu-idle2>
+<cpu-user3>14</cpu-user3>
+<cpu-background3>0</cpu-background3>
+<cpu-system3>14</cpu-system3>
+<cpu-interrupt3>3</cpu-interrupt3>
+<cpu-idle3>69</cpu-idle3>
+<model>SRX Routing Engine</model>
+<serial-number>BUILTIN</serial-number>
+<start-time junos:seconds="1767391423">2026-01-02 16:03:43 CST</start-time>
+<up-time junos:seconds="28177151">326 days, 2 hours, 59 minutes, 11 seconds</up-time>
+<last-reboot-reason>0x4000:VJUNOS reboot</last-reboot-reason>
+<load-average-one>1.80</load-average-one>
+<load-average-five>2.14</load-average-five>
+<load-average-fifteen>2.11</load-average-fifteen>
+</route-engine>
+</route-engine-information>
+</nc:rpc-reply>

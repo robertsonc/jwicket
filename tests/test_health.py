@@ -31,18 +31,18 @@ class RecordedReplyTests(unittest.TestCase):
         got = H.route_engines(load(RECORDED / "get-route-engine-information.xml"))
         self.assertEqual(got["status"], "ok")
         (re_,) = got["engines"]
-        self.assertEqual(re_["cpu"], {"user": 14.0, "background": 0.0, "system": 12.0, "interrupt": 2.0,
-                                      "idle": 72.0, "busy": 28.0})
-        self.assertEqual(re_["memory"], {"total_mb": 3119, "used_mb": 1497, "util": 48.0, "buffer_util": 27.0})
-        self.assertEqual(re_["load"], [2.54, 2.14, 2.09])
-        self.assertEqual((re_["temperature_c"], re_["cpu_temperature_c"]), (29, 29))
-        self.assertEqual(re_["uptime_s"], 28175225)
+        self.assertEqual(re_["cpu"], {"user": 8.0, "background": 0.0, "system": 11.0, "interrupt": 2.0,
+                                      "idle": 78.0, "busy": 22.0})
+        self.assertEqual(re_["memory"], {"total_mb": 3119, "used_mb": 1435, "util": 46.0, "buffer_util": 25.0})
+        self.assertEqual(re_["load"], [1.80, 2.14, 2.11])
+        self.assertEqual((re_["temperature_c"], re_["cpu_temperature_c"]), (30, 30))
+        self.assertEqual(re_["uptime_s"], 28177151)
         self.assertEqual((re_["node"], re_["slot"], re_["status"]), (None, None, "OK"))
 
     def test_spu(self) -> None:
         got = H.spus(load(RECORDED / "get-performance-summary-information.xml"))
         self.assertEqual(got, {"status": "ok", "units": [{
-            "node": None, "fpc": 0, "pic": 0, "cpu": 0.0, "memory": 42.0, "flow_sessions": 76,
+            "node": None, "fpc": 0, "pic": 0, "cpu": 0.0, "memory": 42.0, "flow_sessions": 39,
             "flow_max": 10485760, "cp_sessions": 0, "cp_max": 0}]})
 
     def test_both_rpcs_are_allowlisted(self) -> None:

@@ -9,10 +9,10 @@
 ![device access: read-only](https://img.shields.io/badge/device%20access-read--only-2ea44f)
 
 <p align="center">
-  <img src="docs/images/readme/sessions-live-filter.gif" width="900" alt="J-Wicket Sessions view on fixture data: a live flow-session table narrows as the filter dport:443 nat:dst bytes>1M is typed, the first term marked as run on the device and the other two in the browser, then a session's flow drawer opens showing the DNAT path from untrust to dmz">
+  <img src="docs/images/readme/sessions-live-filter.gif" width="900" alt="J-Wicket Sessions view on a lab SRX4100: the live flow-session table narrows as dport:443 nat:src proto:tcp is typed, two terms marked as run on the device and one in the browser, then one session's flow drawer opens on its source-NAT path">
 </p>
 
-*The Sessions view on the development server, polling every 2 s. `dport:443` is sent with the session-table read as an RPC parameter (green DEVICE chip; here a fixture plays the device), `nat:dst bytes>1M` filters in the browser (sky BROWSER chips), and one session's flow drawer opens on its DNAT path. Synthetic fixture data, not read from a device.*
+*The Sessions view polling a real SRX every 5 s. `dport:443` and `proto:tcp` go into the session-table RPC (DEVICE chips), `nat:src` filters in the browser (BROWSER chip), then the drawer opens on a session that ended between polls, so it says ENDED and keeps the last values read. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids have a manual Refresh and no live tail, export at most 100 rows, and filter the system log on Event and Message with `=` only; security policies are inline grid rows with no policy wizard; and six paths commit at once with no review step ([catalog](docs/catalog.md#key-findings), [ledger](docs/parity/jweb-24.4.csv)). J-Wicket starts with the reads, each designed to run as your own Junos login and to make sense to someone who does not know Junos yet. Its configuration path (reviewed diffs, confirmed commits and a preview-only policy builder) is specified, not built ([Spec 002](docs/specs/002-change-protocol.md), [Spec 003](docs/specs/003-firewall-policy-builder.md)).
 
@@ -131,10 +131,10 @@ Reply formats are J-Wicket's reading of Juniper documentation until recorded rep
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/sessions-filter-dark.webp">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/readme/sessions-filter-light.webp">
-  <img src="docs/images/readme/sessions-filter-dark.webp" width="900" alt="J-Wicket Sessions view, fixture data: the query src:10.10.0.0/16 dport:443 nat:src bytes>1M split into device and browser filter chips, 57 of 58 sessions shown">
+  <img src="docs/images/readme/sessions-filter-dark.webp" width="900" alt="J-Wicket Sessions view on a lab SRX4100: the query dport:443 nat:src proto:tcp split into device and browser filter chips, 4 of 39 sessions shown, all source-NATed to 172.31.248.9">
 </picture>
 
-*`src:10.10.0.0/16 dport:443 nat:src bytes>1M`: green DEVICE chips went into the RPC, sky BROWSER chips filter what came back (57 of 58 listed); the gauge above is the table-wide count, read without your filters at most every 30 s and shown with its age between reads. The image follows your GitHub theme. Synthetic fixture data.*
+*`dport:443 nat:src proto:tcp`: DEVICE chips went into the RPC, the BROWSER chip filtered what came back (4 sessions, each source-NATed to the interface address); the gauge above is the table-wide count, read without your filters at most every 30 s and shown with its age between reads. The image follows your GitHub theme; HPE colour scheme. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 `show security flow session` as a polled live table, with device-side filters, a guard that refuses lists over 5,000 matches, live diff and rate, a live session drawer, cluster-aware rows and stamped export.
 
@@ -153,10 +153,10 @@ Reply formats are J-Wicket's reading of Juniper documentation until recorded rep
 - `built` **Export** the rows on screen as CSV or JSON, stamped with device, read time, user and query, with spreadsheet formula injection neutralised; **copy a link** that holds the view and its filters, never device data.
 
 <p align="center">
-  <img src="docs/images/readme/session-flow-nat.png" width="900" alt="J-Wicket session flow drawer on fixture data: client, trust zone, SRX policy allow-web, untrust zone and server, with both wings and the source-NAT translated address">
+  <img src="docs/images/readme/session-flow-nat.webp" width="900" alt="J-Wicket session flow drawer on a lab SRX4100: client 198.51.100.11 in zone inet-sim-1 on ae0.1985, policy INET_SIM1_to_INTERNET-1, zone internet on ae0.999, server 100.50.41.115:443, with both wings and the source-NAT address 172.31.248.9">
 </p>
 
-*The drawer for one source-NAT session: path, policy position, translated source in violet, live rate from 7 polls, both wings. Synthetic fixture data.*
+*The drawer for one source-NAT session: client, ingress zone and interface, the policy (rule 1 of 1), egress, server, both wings with the translated source in violet, and the idle timeout. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 </details>
 
@@ -166,7 +166,7 @@ Reply formats are J-Wicket's reading of Juniper documentation until recorded rep
   <img src="docs/images/readme/logs-traffic-filter.webp" width="900" alt="J-Wicket Logs view on fixture data: a syntax-highlighted traffic log filtered by ip:198.51.100.0/24 -dport:53, with an event-family histogram and top values">
 </p>
 
-*A traffic log filtered by `ip:198.51.100.0/24 -dport:53` (CIDR-aware, DNS excluded): CREATE, CLOSE and DENY lines highlighted, a per-5 s histogram stacked by family, top values on the right. Synthetic fixture data.*
+*A traffic log filtered by `ip:198.51.100.0/24 -dport:53` (CIDR-aware, DNS excluded): CREATE, CLOSE and DENY lines highlighted, a per-5 s histogram stacked by family, top values on the right. Synthetic fixture data. The lab SRX streams its traffic logs off the box (stream mode), so there is no on-box traffic log to show live.*
 
 Syslog files, the on-box reporting database and the security log buffer, tailed with a cursor and highlighted as log syntax; traffic lines decode into a session timeline, and every held line can be exported.
 
@@ -190,23 +190,23 @@ Syslog files, the on-box reporting database and the security log buffer, tailed 
   <img src="docs/images/readme/logs-decoded-timeline.png" width="900" alt="J-Wicket decoded log line on fixture data: a session-close event explained in plain words, with its NAT translation, flow, session timeline and a match-policies command to test on the device">
 </p>
 
-*One RT_FLOW_SESSION_CLOSE line decoded, with its session timeline and a command to test on the device. Synthetic fixture data.*
+*One RT_FLOW_SESSION_CLOSE line decoded, with its session timeline and a command to test on the device. Synthetic fixture data. Fixture data for the same reason: the lab SRX keeps no traffic log on the box.*
 
 <p align="center">
-  <img src="docs/images/readme/logs-messages.png" width="900" alt="J-Wicket Logs view on fixture data: syslog messages with session denies filtered out, showing screen, IDP, VPN, commit, auth, SNMP and chassis events each highlighted">
+  <img src="docs/images/readme/logs-messages.webp" width="900" alt="J-Wicket Logs view on a lab SRX4100: the messages file live-tailed and highlighted, event-family counts and histogram, and an explanation that traffic logs are streamed to Security Director Cloud rather than stored on the device">
 </p>
 
-*The `messages` file with `-family:deny`, each remaining family colour-coded. Synthetic fixture data.*
+*The `messages` file, live: families counted and charted, every line highlighted, and the device's own answer to "where are my traffic logs?" (stream mode, sent to Security Director Cloud). Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 </details>
 
 ### Policy inventory and explanation
 
 <p align="center">
-  <img src="docs/images/readme/policy-detail.png" width="900" alt="J-Wicket Policies view on fixture data: policies in evaluation order with the allow-web detail drawer showing resolved addresses, resolved applications and its live session count">
+  <img src="docs/images/readme/policy-detail.webp" width="900" alt="J-Wicket Policies view on a lab SRX4100: two zone-pair policies, one global deny-all and the default policy in evaluation order, with the INET_SIM1_to_INTERNET-1 drawer showing resolved addresses and applications and its live session count">
 </p>
 
-*Policies in evaluation order (8 zone-pair, then 2 global, then deny-all), an inactive rule struck through, and the drawer for `allow-web`: policy 2 of 3 in its zone pair, 105 live sessions in the last (unfiltered) Sessions poll, addresses and applications resolved. Synthetic fixture data.*
+*Policies in the order Junos checks them (2 zone-pair, then 1 global, then the default policy) and the drawer for `INET_SIM1_to_INTERNET-1`: policy 1 of 1 in its zone pair, live sessions, addresses and applications resolved. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 Each scope's policies from the committed configuration, in Junos evaluation order, with inactive and group-inherited rules marked, addresses and applications resolved, and a `match-policies` command built for the device to answer.
 
@@ -245,10 +245,10 @@ Zones, address books and applications, each with where it is used, detail panels
 ### Console UX
 
 <p align="center">
-  <img src="docs/images/readme/overview.png" width="900" alt="J-Wicket Overview on fixture data: system health figures with 10-minute CPU and memory charts for the routing engine and data plane, then the flow-session gauge and trend, recent denies, warnings, and the top of the top-policies and zone-pair tiles">
+  <img src="docs/images/readme/overview.webp" width="900" alt="J-Wicket Overview on a lab SRX4100: system health with routing-engine and data-plane CPU and memory charted over 10 minutes, then the flow-session gauge and trend, top policies, recent denies, warnings and zone pairs">
 </p>
 
-*The Overview: system health first (routing-engine and data-plane CPU and memory charted over 10 minutes, with load, temperature and uptime), then the session gauge and 10-minute trend, recent denies folded by flow, warnings, top policies and zone pairs; the device card and jump-to links are further down. Synthetic fixture data.*
+*The Overview after 10 minutes: system health (routing-engine CPU busy, memory, load, temperature, uptime, and the data plane) charted, then the session gauge and trend with valid and invalidated counts, top policies, recent denies, warnings and zone pairs. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 An Overview with system health charts, a command palette, keyboard-first navigation, cross-links between every view, shareable URLs, three colour schemes in day and night, and a phone layout.
 
@@ -268,26 +268,26 @@ An Overview with system health charts, a command palette, keyboard-first navigat
 - `built` **Quiet when unattended:** live reads pause on a hidden tab and after 10 min without key or pointer input (5 min before the default 15-min idle timeout), and the LIVE pills say PAUSED. The browser marks its own polls as background, and those never keep a session alive, so an unattended session ends about 15 min (the default) after the last activity.
 
 <p align="center">
-  <img src="docs/images/readme/command-palette.webp" width="900" alt="J-Wicket command palette on fixture data: typing deny puts the deny-inbound policy first under Best match, then actions, the other deny policies and preset filters">
+  <img src="docs/images/readme/command-palette.webp" width="900" alt="J-Wicket command palette on a lab SRX4100: typing inet lists the matching zones with their interfaces, policies, filters and actions">
 </p>
 
-*Ctrl+K with `deny` typed: the best match first, then actions, policies and filters. Synthetic fixture data.*
+*Ctrl+K with `inet` typed: zones with their interfaces, policies, saved filters and actions. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 <p align="center">
-  <img src="docs/images/readme/mobile-sessions-logs.png" width="640" alt="J-Wicket on a phone-sized screen with fixture data: live sessions filtered by nat:dst and a highlighted traffic log filtered by -dport:53">
+  <img src="docs/images/readme/mobile-sessions-logs.webp" width="640" alt="J-Wicket on a phone-sized screen with a lab SRX4100: live session cards and the highlighted messages log">
 </p>
 
-*Phone width (emulated iPhone 13): sessions filtered by `nat:dst` and a traffic log filtered by `-dport:53`. Synthetic fixture data.*
+*Phone width (emulated, 390 × 844): live session cards and the `messages` log. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 </details>
 
 ### Sign-in and security model
 
 <p align="center">
-  <img src="docs/images/readme/auditor-denied.png" width="900" alt="J-Wicket Overview as a restricted user on fixture data: configuration-based panels and the data-plane health figures show an explicit denied state while routing-engine health and live sessions still render">
+  <img src="docs/images/readme/auditor-denied.webp" width="900" alt="J-Wicket Overview on a lab SRX4100 signed in as a read-only-class account: configuration-based panels show an explicit denied state while system health and live sessions still render">
 </p>
 
-*Signed in as `auditor`, whose simulated login class is denied the configuration read and the data-plane monitoring read (`show security monitoring`): those panels say DENIED or "denied for your login class", while routing-engine health and sessions still render. Synthetic fixture data.*
+*Signed in as a lab account in Junos's predefined `read-only` class: Junos denies it the configuration, so those panels say DENIED; system health and live sessions still render, because `view` allows them. Live data from the project owner's lab SRX4100 (Junos 25.2R1-S1.4), 25 November 2026.*
 
 Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with a fixed CSP, and settings that refuse to start when anything is unsafe.
 
@@ -310,7 +310,7 @@ Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with
   <img src="docs/images/readme/cluster-scope.png" width="900" alt="J-Wicket on a chassis-cluster fixture: device chip showing the redundancy-group role and a scope picker listing the root system, a logical system and a tenant system">
 </p>
 
-*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. Its synthetic two-node session table feeds the session panels (backup copies not counted); it has no system-health replies, so that tile says unsupported. Synthetic fixture data.*
+*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. This capture predates the fixture's synthetic two-node session table and the system-health tile, so its session panels say unsupported; today the fixture feeds them (backup copies not counted). Synthetic fixture data: the lab SRX is standalone.*
 
 </details>
 

@@ -358,8 +358,9 @@ def parse_summary(reply: Element) -> Json:
     one node (a chassis cluster) the largest node's active, maximum and matching counts are used (each
     node holds a copy of every session), ``failed`` is null because J-Wicket never sums counts across
     nodes and whether each node counts its own failures is unknown, and ``nodes`` lists each node's
-    figures, failed included."""
-    tags = ("active-sessions", "max-sessions", "failed-sessions", "displayed-session-count")
+    figures, failed included. ``valid`` and ``invalidated`` split ``active`` where Junos reports them."""
+    tags = ("active-sessions", "max-sessions", "failed-sessions", "displayed-session-count",
+            "active-session-valid", "active-session-invalidated")
     per_node = _per_node(reply, tags)
 
     def largest(tag: str) -> Optional[int]:
@@ -375,6 +376,10 @@ def parse_summary(reply: Element) -> Json:
         "failed": (sum(failed) if failed else None) if len(per_node) <= 1 else None,
         # A summary request carrying filters reports how many sessions match them.
         "matching": largest("displayed-session-count"),
+        # "active" counts invalidated sessions too (recorded on SRX4100 25.2R1-S1.4: 63 active = 37
+        # valid + 26 invalidated, with 37 listed), so the list can be shorter than "active".
+        "valid": largest("active-session-valid"),
+        "invalidated": largest("active-session-invalidated"),
     }
     if len(per_node) > 1:
         out["nodes"] = [

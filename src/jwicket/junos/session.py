@@ -85,7 +85,11 @@ INVENTORY_FILTER = (
     "<applications/>"
     f"<logical-systems><name/>{_SCOPE_SECURITY}<applications/></logical-systems>"
     f"<tenants><name/>{_SCOPE_SECURITY}<applications/></tenants>"
-    "<system><time-zone/><services><outbound-ssh/></services></system>"
+    # Only the client fields the central-management card shows. Asking for the whole client would also
+    # fetch its $9$ secret (reversible) and device-id, which J-Wicket never needs (seen on SRX4100
+    # 25.2R1-S1.4; Junos honours the narrower filter there).
+    "<system><time-zone/>"
+    "<services><outbound-ssh><client><name/><services/><servers/></client></outbound-ssh></services></system>"
     "<chassis><high-availability/></chassis>"
     "</configuration>"
 )

@@ -60,6 +60,15 @@ def cluster(reply: Element) -> Json:
         (e for e in reply.iter() if local(e.tag) == "chassis-cluster-status"), None
     )
     if status is None:
+        # A standalone device answers with an error in the reply body, which PyEZ returns rather than
+        # raises (recorded on SRX4100 25.2R1-S1.4: <xnm:error> from jsrpd, "error: Chassis cluster is
+        # not enabled").
+        message = next((text_of(e) for e in reply.iter() if local(e.tag) == "message"), None)
+        is_error = local(reply.tag) == "error" or any(local(e.tag) == "error" for e in reply.iter())
+        if is_error and message and "not enabled" in message.lower():
+            return standalone()
+        if is_error:
+            return {"status": "ok", "mode": "unknown", "message": "The cluster status read returned an error."}
         return {"status": "ok", "mode": "unknown", "message": "Unrecognised cluster status reply."}
     groups: List[Json] = []
     for rg in kids(status, "redundancy-group"):
@@ -149,7 +158,12 @@ def central_management(config: Optional[Element]) -> Json:
             if address is not None:
                 port = text(child, "port")
                 targets.append(f"{address}:{port}" if port else address)
-        client_services = [local(s.tag) for s in kids(kid(client, "services"))]
+        # Recorded on 25.2R1-S1.4 as a leaf-list (<services>netconf</services>); older fixtures used
+        # child elements (<services><netconf/></services>). Both are read.
+        client_services: List[str] = []
+        for svc in kids(client, "services"):
+            value = text_of(svc)
+            client_services += [local(s.tag) for s in kids(svc)] or ([value] if value else [])
         clients.append({
             "client": name, "targets": targets, "services": client_services,
             "inactive": above_off or is_inactive(client),

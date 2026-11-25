@@ -1342,12 +1342,16 @@ class Overview {
     }
     this.sessBig.hidden = !ok || small || frac === null;
     if (!this.sessBig.hidden) setTicking(this.sessBig, fmt.num(active));
+    // "active" includes invalidated sessions (recorded on SRX4100 25.2R1-S1.4), so the list can be shorter.
+    const validNote = ok && Number.isFinite(summary.valid) && Number.isFinite(summary.invalidated) && summary.invalidated > 0
+      ? ` \u00b7 ${fmt.num(summary.valid)} valid, ${fmt.num(summary.invalidated)} invalidated`
+      : '';
     const sessOf = !ok
       ? `summary ${summary.status || 'failed'}${summary.message ? `: ${summary.message}` : ''}`
       : max
-        ? `${fmt.num(active)} active of ${fmt.num(max)} maximum (${fmt.pct(active, max)})`
+        ? `${fmt.num(active)} active of ${fmt.num(max)} maximum (${fmt.pct(active, max)})${validNote}`
         : active !== null
-          ? `${fmt.num(active)} active (maximum not reported)`
+          ? `${fmt.num(active)} active (maximum not reported)${validNote}`
           : 'active count not reported';
     put(this.sessOf, vis(sessOf));
     this.spark.update(this.history);
