@@ -4,7 +4,7 @@
  * (querybar, sessions, logs, policies) use var(--token) only:
  *   type     --fs-micro 10.5 (uppercase labels, badges: the floor) --fs-meta 11.5 --fs-data 12 (table
  *            and log mono; 13 in comfortable density) --fs-ui 13 --fs-lead 15 --fs-title 18
- *            --fs-view 24 --fs-kpi 30; weights 400, 600 and 700 only
+ *            --fs-view 24 --fs-kpi 30; weights 400, 600 and 700 only (800 for the wordmark alone)
  *   radii    --radius-xs 4 (chips, badges, in-table inputs) --radius-sm 8 (buttons, inputs)
  *            --radius 12 (cards) --radius-pill 999
  *   gold     --gold is gold TEXT (policy links, LIVE, provenance, search hits); --gold-fill with
@@ -80,7 +80,9 @@
 
 /* ---- colour schemes ---------------------------------------------------------------------------
  * Three schemes, each with a night (dark) and day (light) variant. The scheme is data-scheme on
- * <html> (absent means hpe); night or day is data-theme, or the system preference when absent.
+ * <html>: index.html sets the default, obsidian (js/brand.js), and main.js a stored choice. HPE's
+ * tokens are the bare :root rules, so data-scheme="hpe" (or none) gets them and the other schemes
+ * override them. Night or day is data-theme, or the system preference when absent.
  *   hpe       HPE brand: Green #00B388 for fills and accents, Slate, Dark Steel, Turquoise, Orange,
  *             Purple, Bronze. Green text on light surfaces is darkened to #00775A for contrast.
  *   obsidian  Obsidian & Phosphor, for 24/7 NOC use: void slate canvas, cyan telemetry accent, teal
@@ -954,8 +956,8 @@ pre {
 }
 
 .boot .logo-mark {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
 }
 
 /* Shown only when the app has not started after a while (a stylesheet or module failed to load): no
@@ -972,19 +974,59 @@ pre {
   }
 }
 
-/* ---- logo mark (inline SVG, themed) ----------------------------------------------------------- */
+/* ---- logo mark (inline SVG, themed) -----------------------------------------------------------
+ * The Sentinel Gate emblem (js/brand.js; docs/brand/ has the guide). Its colours are the brand's, not
+ * a scheme's, so they are the same in every scheme and only follow night or day, as the brand board
+ * draws them: at night the J and the wordmark #ecf2f6, the frame #475d68 and the mint #1ff3c3; by day
+ * the J, the wordmark and the frame #0c141d and the deeper mint #08d496 (docs/brand/README.md,
+ * "Colours"). The wordmark's hyphen is the mint. Logos are exempt from the contrast minimums; nothing
+ * else uses these.
+ */
 
-.logo-mark .lg-stump {
-  fill: var(--text);
+:root {
+  --logo-j: #ecf2f6;
+  --logo-frame: #475d68;
+  --logo-mint: #1ff3c3;
 }
 
-.logo-mark .lg-bail {
-  fill: var(--gold);
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --logo-j: #0c141d;
+    --logo-frame: #0c141d;
+    --logo-mint: #08d496;
+  }
 }
 
-.logo-mark .lg-ground {
-  fill: var(--gold);
-  opacity: .35;
+:root[data-theme="light"] {
+  --logo-j: #0c141d;
+  --logo-frame: #0c141d;
+  --logo-mint: #08d496;
+}
+
+.logo-mark {
+  flex: none;
+}
+
+.logo-mark .lg-j {
+  fill: var(--logo-j);
+}
+
+/* A 1 px outline at every size the UI draws the mark (18 to 80 px): the drawn 4 units would thin
+   below 1 px at the smaller sizes and fade (docs/brand/README.md, "Rules"). */
+.logo-mark .lg-frame {
+  fill: none;
+  stroke: var(--logo-frame);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.logo-mark .lg-acc {
+  fill: var(--logo-mint);
+}
+
+.logo-mark .lg-acc-stroke {
+  fill: none;
+  stroke: var(--logo-mint);
 }
 
 /* ---- sign-in ----------------------------------------------------------------------------------- */
@@ -1020,20 +1062,38 @@ pre {
   gap: var(--s3);
 }
 
+/* The horizontal lockup, as on the brand board's sign-in: emblem left, wordmark right. Sized to the
+   lockup's proportions (docs/brand/lockup-dark.svg): the wordmark's cap height is 0.6 of the
+   brackets' height, and the arrow tip is 0.4 of it from the J. */
+.signin-lockup {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+}
+
 .signin-brand .logo-mark {
-  width: 56px;
-  height: 56px;
+  width: 80px;
+  height: 80px;
 }
 
+/* The wordmark is live text in the UI font, heavy like the brand board's (Inter ExtraBold there), in
+   the logo's ink rather than the scheme's text colour. */
 .wordmark {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: -.01em;
+  font-family: var(--font-ui);
+  font-weight: 800;
+  letter-spacing: -.02em;
+  color: var(--logo-j);
 }
 
+.wordmark .wm-dash {
+  color: var(--logo-mint);
+}
+
+/* The 4 px below lifts the wordmark 2 px in the row, to sit on the emblem as in the lockup file. */
 .signin-brand h1 {
-  font: 700 var(--fs-brand)/1 var(--font-display);
-  letter-spacing: -.02em;
+  font: 800 var(--fs-brand)/1 var(--font-ui);
+  letter-spacing: -.025em;
+  margin-bottom: 4px;
 }
 
 .signin-tagline {
@@ -1639,19 +1699,23 @@ svg .ctl-badge {
   z-index: 20;
 }
 
+/* The lockup at the bar's size, in its proportions (docs/brand/lockup-dark.svg: the wordmark's cap
+   height 0.6 of the brackets' height, the arrow tip 0.4 of it from the J) and at the brand's minimum
+   width, 120 px: a 36 px emblem and the 18 px wordmark. The brand gives back most of the width the
+   bigger emblem takes (no padding before the divider, an 8 px gap to the badge), so the chips beside
+   it lose 4 px against the old mark. */
 .tb-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: none;
   text-decoration: none;
   color: var(--text);
-  padding-right: var(--s2);
 }
 
 .tb-brand .logo-mark {
-  width: 24px;
-  height: 24px;
+  width: 36px;
+  height: 36px;
 }
 
 .tb-brand .wordmark {
@@ -1800,7 +1864,9 @@ svg .ctl-badge {
 /* Colour-scheme picker: a native select, styled like a ghost button. */
 .tb-scheme {
   height: 30px;
-  max-width: 15.5em;
+  /* Short option names (brand.js 'short'): sized to the widest of them, so the device and context
+     chips keep their room. */
+  max-width: 11em;
   padding: 0 26px 0 10px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
@@ -4171,11 +4237,14 @@ a.inv-count:hover {
 
 /* ---- responsive ------------------------------------------------------------------------------- */
 
-@media (min-width: 1600px) {
+@media (min-width: 1800px) {
   .cmdk { width: 280px; }
 }
 
-@media (max-width: 1360px) {
+/* Below 1600 px the search button keeps its icon and key hint but not its label (its accessible
+   name is unchanged), so the device and context chips are not cut off next to the brand lockup and
+   the scheme picker. */
+@media (max-width: 1599px) {
   .cmdk .label { display: none; }
   .cmdk { width: auto; }
 }

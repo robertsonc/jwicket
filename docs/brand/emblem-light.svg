@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="15 13 236 236" width="236" height="236" role="img" aria-label="J-Wicket">
+  <title>J-Wicket</title>
+  <polygon points="99,37 171,37 215.5,68 215.5,192 170,224.5 100,224.5 54.5,192 54.5,68" fill="none" stroke="#0C141D" stroke-width="4" stroke-linejoin="round"/>
+  <polygon points="70,60 120,60 134,74 134,165 101,198 70,198 70,176 92,176 111,157 111,83 70,83" fill="#0C141D"/>
+  <g fill="#08D496">
+    <rect x="20" y="126.5" width="59" height="10"/>
+    <rect x="87" y="121" width="20.5" height="21" rx="4"/>
+    <rect x="143" y="126.5" width="96" height="10"/>
+    <polygon points="160,60 195,60 206,71 206,106 183,106 183,83 160,83"/>
+    <polygon points="183,157 206,157 206,190 194,202 160,202 160,180 183,180"/>
+  </g>
+  <polyline points="220,111 240,131.5 220,152" fill="none" stroke="#08D496" stroke-width="10" stroke-linejoin="miter" stroke-miterlimit="4"/>
+</svg>

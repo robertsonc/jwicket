@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import re
 import unittest
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from jwicket.resources import STATIC_DIR
+
+ROOT = Path(__file__).resolve().parent.parent
+BRAND_DIR = ROOT / "docs" / "brand"
+PREVIEW_DIR = ROOT / "docs" / "images" / "brand"
 
 URL = re.compile(r"https?://", re.IGNORECASE)
 # XML namespace identifiers are not fetched; createElementNS needs the SVG one.
@@ -306,6 +312,394 @@ class StyleTests(unittest.TestCase):
                 self.assertNotIn("@import", css)
                 self.assertIsNone(re.search(r"url\(\s*['\"]?//", css))
                 self.assertNotIn("expression(", css)
+
+
+
+# ---- the brand: the Sentinel Gate emblem, the favicon, the wordmark, the default colour scheme ---------
+
+SVG_NS = "{http://www.w3.org/2000/svg}"
+SHAPES = ("polygon", "rect", "polyline")
+# What makes the emblem's shape; colours are compared separately (CSS classes in the UI, fixed in the favicon).
+GEOMETRY = ("points", "x", "y", "width", "height", "rx", "stroke-width", "stroke-linejoin", "stroke-miterlimit")
+DATA_URI = re.compile(r"\bdata:[a-z-]+/[a-z0-9.+-]+[;,]", re.IGNORECASE)
+OLD_MARK = re.compile(r"lg-stump|lg-bail|lg-ground|_stumps|stumps and (two )?bails", re.IGNORECASE)
+
+Shape = Tuple[str, Tuple[Tuple[str, str], ...]]
+# The brand colours (docs/brand/README.md, "Colours"): frame, J and wordmark ink, mint.
+INKS = {
+    "dark": ("#475d68", "#ecf2f6", "#1ff3c3"),
+    "light": ("#0c141d", "#0c141d", "#08d496"),
+    "mono-black": ("#000", "#000", "#000"),
+    "mono-white": ("#fff", "#fff", "#fff"),
+}
+# Inter's cap height (1490 of 2048 units), and the emblem's brackets (y 60 to 202 of its 236-unit box).
+CAP_PER_EM = 1490 / 2048
+BRACKETS_PER_BOX = 142 / 236
+
+
+def number(value: str) -> str:
+    """'4' and '4.0', '99,37 171,37' and '99, 37  171, 37' compare equal."""
+    nums = re.findall(r"-?[0-9]*\.?[0-9]+", value)
+    if not nums or re.sub(r"[-0-9., ]", "", value):
+        return value.strip()
+    return " ".join(format(float(n), "g") for n in nums)
+
+
+def shape(tag: str, attrs: Dict[str, str]) -> Shape:
+    return tag, tuple((k, number(attrs[k])) for k in GEOMETRY if k in attrs)
+
+
+class MarkParser(HTMLParser):
+    """The shapes of every <svg class="logo-mark"> in index.html (HTMLParser lowercases names)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.marks: List[List[Shape]] = []
+        self.svg_attrs: List[Dict[str, str]] = []
+        self.shape_attrs: List[Dict[str, Optional[str]]] = []
+        self._in = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        a = {k: v or "" for k, v in attrs}
+        if tag == "svg" and "logo-mark" in a.get("class", "").split():
+            self._in = True
+            self.marks.append([])
+            self.svg_attrs.append(a)
+        elif self._in and tag in SHAPES:
+            self.marks[-1].append(shape(tag, a))
+            self.shape_attrs.append(dict(attrs))
+
+    def handle_startendtag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "svg":
+            self._in = False
+
+
+class TextParser(HTMLParser):
+    """The text of one element by id, as a screen reader gets it (aria-hidden left out) and as it is
+    seen (.sr-only left out), and the text of its .wm-dash."""
+
+    def __init__(self, element_id: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.element_id = element_id
+        self.spoken: List[str] = []
+        self.seen: List[str] = []
+        self.dash: List[str] = []
+        self._stack: List[Tuple[str, bool, bool, bool]] = []  # tag, hidden, sr-only, dash
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        a = {k: v or "" for k, v in attrs}
+        if not self._stack and a.get("id") != self.element_id:
+            return
+        hidden, sr, dash = self._stack[-1][1:] if self._stack else (False, False, False)
+        classes = a.get("class", "").split()
+        self._stack.append((tag, hidden or a.get("aria-hidden") == "true", sr or "sr-only" in classes,
+                            dash or "wm-dash" in classes))
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._stack:
+            self._stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if not self._stack:
+            return
+        _tag, hidden, sr, dash = self._stack[-1]
+        if not hidden:
+            self.spoken.append(data)
+        if not sr:
+            self.seen.append(data)
+        if dash:
+            self.dash.append(data)
+
+
+def drawn_shapes(root: ET.Element) -> List[Tuple[ET.Element, Dict[str, str]]]:
+    """The emblem's shapes in an SVG file, in paint order, each with its fill and stroke as painted
+    (inherited from an enclosing <g>). A <mask> is not painted, so its shapes are left out."""
+    out: List[Tuple[ET.Element, Dict[str, str]]] = []
+
+    def walk(el: ET.Element, paint: Dict[str, str]) -> None:
+        tag = el.tag[len(SVG_NS):]
+        if tag == "mask":
+            return
+        here = dict(paint)
+        for k in ("fill", "stroke"):
+            if k in el.attrib:
+                here[k] = el.attrib[k].lower()
+        if tag in SHAPES:
+            out.append((el, here))
+        for child in el:
+            walk(child, here)
+
+    walk(root, {})
+    return out
+
+
+def without_frame_stroke(parts: List[Shape]) -> List[Shape]:
+    """The parts with the frame's stroke-width left out (the small and the one-colour icons thicken it)."""
+    tag, attrs = parts[0]
+    return [(tag, tuple(a for a in attrs if a[0] != "stroke-width"))] + parts[1:]
+
+
+def css_px(css: str, selector: str, prop: str) -> float:
+    """A px value of `prop` in the rule for exactly `selector` (comments left out)."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    rule = re.search(r"(?:^|\})\s*" + re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert rule, selector
+    value = re.search(r"(?:^|;)\s*" + re.escape(prop) + r"\s*:\s*([^;]+);", rule.group(1))
+    assert value, (selector, prop)
+    raw = value.group(1).strip()
+    token = re.fullmatch(r"var\((--[\w-]+)\)", raw)
+    if token:
+        defined = re.search(re.escape(token.group(1)) + r"\s*:\s*([^;]+);", css)
+        assert defined, token.group(1)
+        raw = defined.group(1).strip()
+    return float(raw[:-2]) if raw.endswith("px") else float("nan")
+
+
+def brand_js_parts() -> List[Shape]:
+    """EMBLEM_PARTS in js/brand.js: [tag, { key: value, ... }] entries."""
+    source = strip_js_comments(read("js/brand.js"))
+    body = source[source.index("EMBLEM_PARTS") :]
+    body = body[: body.index("];")]
+    parts = []
+    for tag, attrs in re.findall(r"\[\s*'(\w+)',\s*\{([^}]*)\}\s*\]", body):
+        pairs = re.findall(r"""(?:'([\w-]+)'|([\w]+)):\s*(?:'([^']*)'|([0-9.]+))""", attrs)
+        parts.append(shape(tag, {(q or b): (sv or nv) for q, b, sv, nv in pairs}))
+    return parts
+
+
+def css_declarations(css: str, prop: str) -> List[Tuple[str, str]]:
+    """(selector, value) of every declaration of `prop`; the selector is the innermost rule's."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    out = []
+    for match in re.finditer(re.escape(prop) + r"\s*:\s*([^;]+);", css):
+        open_at = css.rfind("{", 0, match.start())
+        start = max(css.rfind("{", 0, open_at), css.rfind("}", 0, open_at)) + 1
+        out.append((" ".join(css[start:open_at].split()), match.group(1).strip()))
+    return out
+
+
+class BrandTests(unittest.TestCase):
+    """The Sentinel Gate emblem replaced the cricket-wicket mark everywhere; Obsidian & Phosphor is the
+    default colour scheme from the first paint (docs/brand/ has the guide)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.index = read("index.html")
+        cls.marks = MarkParser()
+        cls.marks.feed(cls.index)
+        cls.marks.close()
+        cls.css = read("css/app.css")
+        cls.brand_js = strip_js_comments(read("js/brand.js"))
+
+    def test_the_old_mark_is_gone(self) -> None:
+        for p in sorted(STATIC_DIR.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(STATIC_DIR).as_posix()
+                with self.subTest(file=rel):
+                    self.assertIsNone(OLD_MARK.search(p.read_text(encoding="utf-8")), "the cricket-wicket mark")
+
+    def test_one_emblem_in_index_brand_js_and_the_favicon(self) -> None:
+        parts = brand_js_parts()
+        self.assertEqual([t for t, _ in parts], ["polygon", "polygon", "rect", "rect", "rect", "polygon", "polygon",
+                                                 "polyline"])
+        self.assertEqual(len(self.marks.marks), 2, "the boot screen and the sign-in card each draw the emblem")
+        for i, mark in enumerate(self.marks.marks):
+            with self.subTest(index_mark=i):
+                self.assertEqual(mark, parts)
+                self.assertEqual(self.marks.svg_attrs[i].get("viewbox"), "15 13 236 236")
+                self.assertEqual(self.marks.svg_attrs[i].get("aria-hidden"), "true")
+        root = ET.fromstring(read("logo.svg"))
+        drawn = drawn_shapes(root)
+        tile, emblem = drawn[0][0], drawn[1:]
+        self.assertEqual(tile.tag, f"{SVG_NS}rect", "the favicon starts with its tile")
+        favicon = [shape(el.tag[len(SVG_NS):], dict(el.attrib)) for el, _ in emblem]
+        self.assertEqual(without_frame_stroke(favicon), without_frame_stroke(parts))
+        self.assertEqual(emblem[0][0].get("stroke-width"), "12", "the heavier frame of app-icon-small.svg")
+
+    def test_favicon_is_app_icon_small(self) -> None:
+        """Below 32 px only app-icon-small.svg is used (docs/brand/README.md, "Rules"): the favicon is it."""
+        brand = (BRAND_DIR / "app-icon-small.svg").read_text(encoding="utf-8")
+        self.assertEqual(read("logo.svg"), re.sub(r"#[0-9A-Fa-f]{6}\b", lambda m: m.group(0).lower(), brand))
+
+    def test_favicon_colours_part_by_part(self) -> None:
+        drawn = drawn_shapes(ET.fromstring(read("logo.svg")))
+        frame, j, mint = INKS["dark"]
+        expected = [{"fill": "#0b0e14", "stroke": frame}, {"fill": "none", "stroke": frame}, {"fill": j}]
+        expected += [{"fill": mint}] * 5 + [{"fill": "none", "stroke": mint}]
+        self.assertEqual([paint for _, paint in drawn], expected)
+
+    def test_brand_files_draw_the_same_emblem_in_the_brand_colours(self) -> None:
+        parts = without_frame_stroke(brand_js_parts())
+        files = sorted(BRAND_DIR.glob("*.svg")) + sorted(PREVIEW_DIR.glob("*.svg"))
+        self.assertEqual(len(files), 12, "10 brand files and the guide's 2 previews")
+        for path in files:
+            name = path.stem
+            with self.subTest(file=name):
+                root = ET.fromstring(path.read_text(encoding="utf-8"))
+                drawn = drawn_shapes(root)
+                if name.startswith(("app-icon", "preview-")):
+                    drawn = drawn[1:]  # the tile or the preview's background
+                kind = next(k for k in ("mono-black", "mono-white", "light", "dark") if k in name or
+                            (k == "dark" and name.startswith("app-icon")))
+                frame, ink, mint = INKS[kind]
+                found = [shape(el.tag[len(SVG_NS):], dict(el.attrib)) for el, _ in drawn]
+                self.assertEqual(without_frame_stroke(found), parts)
+                width = {"app-icon-small": "12"}.get(name, "6" if kind.startswith("mono") else "4")
+                self.assertEqual(drawn[0][0].get("stroke-width"), width, "the frame")
+                paints = [paint for _, paint in drawn]
+                self.assertEqual(paints[0], {"fill": "none", "stroke": frame})
+                self.assertEqual(paints[1].get("fill"), ink, "the J")
+                self.assertEqual({p.get("fill") for p in paints[2:7]}, {mint}, "the line, the dot and the brackets")
+                self.assertEqual(paints[7].get("stroke"), mint, "the arrow")
+                words = [(el.get("d", ""), (el.get("fill") or "").lower()) for el in root.iter(f"{SVG_NS}path")]
+                if name.startswith(("lockup", "preview")):
+                    if kind.startswith("mono"):
+                        self.assertEqual([fill for _, fill in words], [ink], "one colour, the hyphen included")
+                    else:
+                        self.assertEqual([fill for _, fill in words], [ink, mint], "the ink and the mint hyphen")
+                else:
+                    self.assertEqual(words, [], "an emblem has no wordmark")
+
+    def test_one_wordmark_drawing_in_every_lockup(self) -> None:
+        drawings = set()
+        for path in sorted(BRAND_DIR.glob("lockup-*.svg")) + sorted(PREVIEW_DIR.glob("preview-*.svg")):
+            root = ET.fromstring(path.read_text(encoding="utf-8"))
+            drawings.add("".join(el.get("d", "") for el in root.iter(f"{SVG_NS}path")))
+        self.assertEqual(len(drawings), 1, "the same outlines and hyphen in the colour, one-colour and preview lockups")
+        hyphen = "M400 119.9H365V139.6H400Z"
+        self.assertTrue(drawings.pop().endswith(hyphen), "the redrawn hyphen, 0.40 x 0.22 of the cap height")
+
+    def test_index_marks_take_their_colours_from_css(self) -> None:
+        for attrs in self.marks.shape_attrs:
+            with self.subTest(shape=attrs.get("class")):
+                self.assertIn(attrs.get("class"), ("lg-frame", "lg-j", "lg-acc", "lg-acc-stroke"))
+                self.assertIn(attrs.get("fill"), (None, "none"))
+                self.assertIsNone(attrs.get("stroke"))
+                self.assertIsNone(attrs.get("style"))
+        for cls_name in ("lg-frame", "lg-j", "lg-acc", "lg-acc-stroke"):
+            with self.subTest(rule=cls_name):
+                self.assertRegex(self.css, r"\.logo-mark \." + cls_name + r" \{[^}]*var\(--logo-")
+
+    def test_the_logo_keeps_the_brand_colours_in_every_scheme(self) -> None:
+        night, day = INKS["dark"], INKS["light"]
+        for i, prop in enumerate(("--logo-frame", "--logo-j", "--logo-mint")):
+            with self.subTest(token=prop):
+                self.assertEqual(sorted(css_declarations(self.css, prop)), sorted([
+                    (":root", night[i]),
+                    (':root:not([data-theme="dark"])', day[i]),
+                    (':root[data-theme="light"]', day[i]),
+                ]), "one value by night and one by day, and no scheme overrides it")
+        self.assertRegex(self.css, r"\.wordmark \{[^}]*color: var\(--logo-j\)")
+        self.assertRegex(self.css, r"\.wordmark \.wm-dash \{[^}]*color: var\(--logo-mint\)")
+
+    def test_ui_lockups_keep_the_lockup_proportions(self) -> None:
+        """Emblem and wordmark sized as in docs/brand/lockup-dark.svg: the cap height 0.6 of the brackets'
+        height (0.53 to 0.65 on the boards), and the lockup at least the brand's 120 px wide."""
+        for mark, word, gap in ((".tb-brand .logo-mark", ".tb-brand .wordmark", ".tb-brand"),
+                                (".signin-brand .logo-mark", ".signin-brand h1", ".signin-lockup")):
+            with self.subTest(lockup=gap):
+                box = css_px(self.css, mark, "width")
+                self.assertEqual(box, css_px(self.css, mark, "height"))
+                size = css_px(self.css, word, "font-size") if word.endswith(".wordmark") else 40.0
+                ratio = size * CAP_PER_EM / (box * BRACKETS_PER_BOX)
+                self.assertTrue(0.55 <= ratio <= 0.65, f"cap height / brackets {ratio:.2f}")
+                # lockup-dark.svg is 797 units wide, the emblem's box 236: at 120 px the box is 35.5 px.
+                self.assertGreaterEqual(box, 236 * 120 / 797, "no smaller than the lockup at its minimum width")
+                self.assertGreater(css_px(self.css, gap, "gap"), 0)
+        self.assertRegex(self.css, r"--fs-brand: 40px;")
+        self.assertIn('<div class="signin-lockup">', self.index, "the sign-in shows the horizontal lockup")
+
+    def test_favicon_is_referenced_and_self_contained(self) -> None:
+        icons = [dict(a) for t, a in index_tags(self.index) if t == "link" and dict(a).get("rel") == "icon"]
+        self.assertEqual(icons, [{"rel": "icon", "href": "/static/logo.svg", "type": "image/svg+xml"}])
+        text = read("logo.svg")
+        root = ET.fromstring(text)
+        self.assertEqual(root.tag, f"{SVG_NS}svg")
+        self.assertEqual(root.get("aria-label"), "J-Wicket")
+        title = root.find(f"{SVG_NS}title")
+        self.assertIsNotNone(title)
+        self.assertEqual(title.text if title is not None else None, "J-Wicket")
+        _x, _y, w, h = (float(v) for v in str(root.get("viewBox")).split())
+        self.assertEqual(w, h, "a square icon")
+        for el in root.iter():
+            with self.subTest(element=el.tag):
+                self.assertNotIn(el.tag[len(SVG_NS):], ("script", "style", "image", "use", "foreignObject"))
+                for name in el.attrib:
+                    self.assertNotIn(name, ("style", "class"), "colours live in the file, not in a stylesheet")
+                    self.assertFalse(name.endswith("href"), name)
+                    self.assertFalse(name.lower().startswith("on"), name)
+        self.assertNotIn("var(", text)
+        self.assertIsNone(DATA_URI.search(text))
+        for colour in ("#0b0e14", "#475d68", "#ecf2f6", "#1ff3c3"):
+            self.assertIn(colour, text.lower(), "the emblem on the Obsidian tile, in the brand colours")
+        self.assertLess(len(text.encode("utf-8")), 2048, "the favicon stays small (it ships in the bundle)")
+
+    def test_no_data_uris(self) -> None:
+        for name in assets(".html") + assets(".css") + assets(".svg") + assets(".js"):
+            text = strip_js_comments(read(name)) if name.endswith(".js") else read(name)
+            with self.subTest(file=name):
+                self.assertIsNone(DATA_URI.search(text), "img-src 'self' blocks data: URIs")
+
+    def test_signin_wordmark_reads_as_one_word(self) -> None:
+        parser = TextParser("signin-title")
+        parser.feed(self.index)
+        parser.close()
+        self.assertEqual("".join(parser.spoken).strip(), "J-Wicket", "the accessible name of the sign-in heading")
+        self.assertEqual("".join(parser.seen).strip(), "J-Wicket", "what is seen")
+        self.assertEqual("".join(parser.dash), "-", "the hyphen is the mint .wm-dash")
+        heading = re.search(r'<h1 id="signin-title"[^>]*>(.*?)</h1>', self.index)
+        self.assertIsNotNone(heading)
+        self.assertEqual(heading.group(1) if heading else None, 'J<span class="wm-dash">-</span>Wicket',
+                         "the name once: copied or found, it reads J-Wicket")
+
+    def test_topbar_wordmark_has_no_hidden_copy(self) -> None:
+        main = strip_js_comments(read("js/main.js"))
+        body = main[main.index("function wordmark()"):]
+        body = body[: body.index("\n}\n")]
+        self.assertNotIn("sr-only", body, "the link's aria-label names it; a hidden copy doubles copied text")
+        self.assertNotIn("aria-hidden", body)
+        self.assertIn("'wm-dash'", body)
+
+    def test_default_scheme_is_set_before_any_script(self) -> None:
+        default = re.search(r"SCHEMES = \[\s*\{ id: '(\w+)'", self.brand_js)
+        self.assertIsNotNone(default)
+        self.assertEqual(default.group(1) if default else None, "obsidian", "the first scheme is the default")
+        html = [dict(a) for t, a in index_tags(self.index) if t == "html"]
+        self.assertEqual(html[0].get("data-scheme"), "obsidian", "the first paint has the default")
+        main = strip_js_comments(read("js/main.js"))
+        self.assertIn("from './brand.js'", main)
+        self.assertIsNone(re.search(r"const SCHEMES\b", main), "one list of schemes, in brand.js")
+        self.assertIsNone(re.search(r"delete [\w.]*dataset\.scheme", main), "data-scheme always names a scheme")
+
+    def test_every_scheme_rule_resolves(self) -> None:
+        ids = re.findall(r"\{ id: '(\w+)', label:", self.brand_js)
+        self.assertEqual(ids, ["obsidian", "hpe", "nordic"])
+        css = re.sub(r"/\*.*?\*/", "", self.css, flags=re.DOTALL)
+        named = set(re.findall(r'data-scheme="(\w+)"', css))
+        # HPE is the bare :root rules, so data-scheme="hpe" (or none, or an unknown value) gets it.
+        self.assertEqual(named, {"obsidian", "nordic"})
+        self.assertNotIn(":not([data-scheme", css)
+        light = css.index("@media (prefers-color-scheme: light)")
+        for scheme in ("obsidian", "nordic"):
+            with self.subTest(scheme=scheme):
+                night = css.find(f':root[data-scheme="{scheme}"] {{')
+                media = css.find(f':root[data-scheme="{scheme}"]:not([data-theme="dark"]) {{')
+                day = css.find(f':root[data-scheme="{scheme}"][data-theme="light"] {{')
+                self.assertTrue(night >= 0 and media > light and day > media, "night, system day and day blocks")
+        bg = {selector for selector, _ in css_declarations(self.css, "--bg")}
+        for selector in (":root", ':root:not([data-theme="dark"])', ':root[data-theme="light"]'):
+            with self.subTest(hpe=selector):
+                self.assertIn(selector, bg, "HPE's night, system day and day tokens stay the bare :root rules")
+
+
+def index_tags(text: str) -> List[Tuple[str, List[Tuple[str, Optional[str]]]]]:
+    parsed = IndexParser()
+    parsed.feed(text)
+    parsed.close()
+    return parsed.tags
 
 
 if __name__ == "__main__":

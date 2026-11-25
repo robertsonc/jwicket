@@ -905,7 +905,10 @@ test('regexRisk fails closed and reads modifier groups, whatever this engine com
   // The validity probe uses the flags the pattern runs with: '.' matches a line break only with s.
   assert.equal(q.regexRisk('(.|\\n)+$', 'i'), null);
   assert.equal(q.regexRisk('(.|\\n)+$', 'is').why, 'repeats a choice whose branches can match the same text');
-  assert.equal(q.regexRisk('(?s:.|\\n)+', ''), null, 'not a valid pattern in this engine, or else refused');
+  // Node 22 does not compile (?s:...) (the pattern is invalid, so null); Node 24 does, and then the
+  // check must refuse it. Either way it never runs.
+  const sGroup = q.regexRisk('(?s:.|\\n)+', '');
+  assert.ok(sGroup === null || sGroup.why === 'repeats a choice whose branches can match the same text', JSON.stringify(sGroup));
   assert.ok(q.regexShapeRisk('(?s:.|\\n)+', { dotAll: false }), 'a (?s:) group turns dotAll on');
 });
 

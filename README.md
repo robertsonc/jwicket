@@ -1,4 +1,9 @@
-# J-Wicket
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.svg">
+    <img src="docs/brand/lockup-light.svg" alt="J-Wicket" width="360">
+  </picture>
+</h1>
 
 **J-Web, the SRX's built-in web UI, is thin where operators need it most. J-Wicket is an alternative designed to run on the firewall itself, starting read-only: live sessions filtered as you type, logs highlighted as log syntax, policies in the order Junos checks them.**
 
@@ -144,7 +149,7 @@ Reply formats are J-Wicket's reading of Juniper documentation until recorded rep
 - `built` **Live flow-session table** for the root system: reads `show security flow session` (RPC `get-flow-session-information`) on your own device session and re-reads every 2, 5, 10 or 30 s. "Live" is polling, never push; each poll costs two RPCs (one when the list is refused), plus one unfiltered summary for the gauge at most every 30 s while a device-side filter is set; between those reads the gauge shows the last one, labelled "table-wide" with its age.
 - `built` **Filters pushed to Junos:** positive, AND-ed terms on `src`, `dst`, `sport`, `dport`, `proto`, `app` and `iface` become RPC parameters, so the device does the narrowing, when the value is one the RPC accepts (a port from 1 to 65535, a protocol keyword or number, an application-protocol type from the RPC's own list); any other value filters in the browser. Following that list for `app` is owner decision OD-14's default, which the owner may veto. Chips show which terms ran on the device and which in the browser.
 - `built` **A guard that fails closed:** a filtered summary is read first, and if more than 5,000 sessions match, J-Wicket lists none and offers narrowing filters instead (5,000 is J-Wicket's own threshold, [Spec 004 section 7.4](docs/specs/004-live-sessions-and-logs.md#74-cost-of-listing-and-the-refusal-threshold); cost on hardware is Q-LOAD-02). Rows are capped at 500 by default, 2,000 at most, with truncation stated.
-- `built` **Live diff and rate:** new sessions wash green (in the default scheme), ended ones stay struck through for one poll; bytes per second is computed between polls, with an in-cell bar.
+- `built` **Live diff and rate:** new sessions wash in the scheme's accent colour, ended ones stay struck through for one poll; bytes per second is computed between polls, with an in-cell bar.
 - `built` **Sixteen columns** (status, ID, policy, zones, protocol, source, destination, NAT, application, interfaces, bytes each way, packets, rate, age, idle timeout left, node), fitted to the width or chosen by hand; zones are derived from the policy inventory and marked when uncertain.
 - `built` **Click any value to filter, Alt-click to exclude**; facets show the top 8 sources, destinations, ports, applications, policies and interfaces by sessions, bytes or rate.
 - `built` **Session drawer that updates live:** a flow diagram (client, ingress zone and interface, SRX policy with "rule n of m", egress, server), the NAT translation in both directions, both wings, a traffic sparkline and the idle-timeout bar.
@@ -166,7 +171,7 @@ Reply formats are J-Wicket's reading of Juniper documentation until recorded rep
   <img src="docs/images/readme/logs-traffic-filter.webp" width="900" alt="J-Wicket Logs view on fixture data: a syntax-highlighted traffic log filtered by ip:198.51.100.0/24 -dport:53, with an event-family histogram and top values">
 </p>
 
-*A traffic log filtered by `ip:198.51.100.0/24 -dport:53` (CIDR-aware, DNS excluded): CREATE, CLOSE and DENY lines highlighted, a per-5 s histogram stacked by family, top values on the right. Synthetic fixture data. The lab SRX streams its traffic logs off the box (stream mode), so there is no on-box traffic log to show live.*
+*A traffic log filtered by `ip:198.51.100.0/24 -dport:53` (CIDR-aware, DNS excluded): CREATE and CLOSE lines highlighted as log syntax, a per-5 s histogram stacked by family with the denies in red, top values on the right. Synthetic fixture data. The lab SRX streams its traffic logs off the box (stream mode), so there is no on-box traffic log to show live.*
 
 Syslog files, the on-box reporting database and the security log buffer, tailed with a cursor and highlighted as log syntax; traffic lines decode into a session timeline, and every held line can be exported.
 
@@ -262,7 +267,7 @@ An Overview with system health charts, a command palette, keyboard-first navigat
 - `built` **Cross-links everywhere:** from a session to its policy and its logs, from a log line to the live session, from a policy or object to Sessions and Logs.
 - `built` **Copyable read-only show commands** for policies, objects, sessions and logs, built from the Junos hierarchy for you to paste; J-Wicket never runs them.
 - `built` **Shareable URLs** that keep view, query, selection and scope, so Back, Forward and copy-link land on the same view.
-- `built` **Colour schemes:** HPE (the default), Obsidian & Phosphor for NOC screens, and Nordic Steel, colourblind-safe (allow is ice blue and deny magenta, never green against red); each in day and night, which follow the operating system until you pick one; every text colour measured at 4.5:1 or better. Dense or comfortable rows, and reduced motion honoured.
+- `built` **Colour schemes:** Obsidian & Phosphor (the default) for NOC screens, HPE, and Nordic Steel, colourblind-safe (allow is ice blue and deny magenta, never green against red); each in day and night, which follow the operating system until you pick one; every text colour measured at 4.5:1 or better. Dense or comfortable rows, and reduced motion honoured.
 - `built` **Phone layout:** bottom tab bar, session and log cards, full-screen detail sheet. Checked in emulated Chrome only, not on a real phone.
 - `built` **Accessibility aids:** skip link, throttled live announcements, ARIA listbox, combobox and grid roles, visible focus. Not tested with a screen reader; text colours are measured (see colour schemes), but the AA and keyboard requirement as a whole (UI-001-17) is open, so no compliance is claimed.
 - `built` **Quiet when unattended:** live reads pause on a hidden tab and after 10 min without key or pointer input (5 min before the default 15-min idle timeout), and the LIVE pills say PAUSED. The browser marks its own polls as background, and those never keep a session alive, so an unattended session ends about 15 min (the default) after the last activity.
@@ -310,7 +315,7 @@ Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with
   <img src="docs/images/readme/cluster-scope.png" width="900" alt="J-Wicket on a chassis-cluster fixture: device chip showing the redundancy-group role and a scope picker listing the root system, a logical system and a tenant system">
 </p>
 
-*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. This capture predates the fixture's synthetic two-node session table and the system-health tile, so its session panels say unsupported; today the fixture feeds them (backup copies not counted). Synthetic fixture data: the lab SRX is standalone.*
+*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open (its tenant system is deactivated). The fixture's synthetic two-node session table feeds the session panels (backup copies not counted); it has no system-health replies, so that tile says unsupported. Synthetic fixture data: the lab SRX is standalone.*
 
 </details>
 
@@ -464,6 +469,7 @@ The documentation map: which document answers which question.
 | How would it be tried on a lab vSRX? | [Lab deployment procedure](docs/deploy-lab.md) (lab only, never production) |
 | How do I propose or extend a feature? | [Contributor guide](CONTRIBUTING.md) and [spec template](docs/specs/000-template.md) |
 | How do I report a vulnerability, and what is the threat model? | [Security policy and threat summary](SECURITY.md) |
+| Which logo file, colours and sizes do I use? | [Brand guide: the Sentinel Gate logo](docs/brand/README.md) |
 
 | Path | What it is | State |
 | --- | --- | --- |
@@ -472,6 +478,7 @@ The documentation map: which document answers which question.
 | `tools/bundle.py` | Builds `dist/jwicket.py`, the single file Junos would run | Built and self-tested in CI |
 | `tests/` | Python and Node tests; synthetic fixtures and a corpus of Juniper documentation log lines | CI on Python 3.7, 3.9, 3.11, 3.13 and Node 22 |
 | `docs/` | Charter, parity ledger, catalog, architecture, specs, ADRs, governance, lab procedure | Living documents |
+| `docs/brand/` | The logo as SVG files, with its usage rules, colours and provenance | Adopted 2026-11-25 |
 | `docs/evidence/` | The spike packet, unedited | Evidence, not product |
 
 ## Contributing
