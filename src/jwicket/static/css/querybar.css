@@ -485,6 +485,20 @@
   white-space: nowrap;
 }
 
+/* Values the device returned can hold hidden or direction-changing characters: they are badged
+   (.ctl-badge, app.css), and the text is isolated so it cannot reorder what is around it. */
+.qb-opt-label,
+.qb-opt-detail,
+.qb-chip-text,
+.qb-explain {
+  unicode-bidi: isolate;
+}
+
+.qb-opt-label .ctl-badge,
+.qb-chip-text .ctl-badge {
+  font-size: .82em;
+}
+
 .qb-chip-x {
   display: inline-flex;
   flex: none;

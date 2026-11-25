@@ -1,0 +1,7 @@
+<!-- SYNTHETIC. Shaped like the spike's verified get-software-information reply (T5); not captured. -->
+<software-information>
+  <host-name>branch-fw-01</host-name>
+  <product-model>vsrx</product-model>
+  <product-name>vsrx</product-name>
+  <junos-version>24.4R2-S3.5</junos-version>
+</software-information>

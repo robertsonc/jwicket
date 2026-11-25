@@ -507,3 +507,85 @@ test('summary without the remaining fields (phone rows)', () => {
   assert.ok(toks.length > 0 && toks.every((t) => !t.f), 'no faint fields');
   assert.ok(!joined(toks).includes('session-id='));
 });
+
+// --- UI-19 SHARED: close reasons (S-11) and the control-character re-exports (S-1) -------------------
+
+const BSD_CLOSE = DOCS[10]; // juniper-docs.txt line 11: "session closed TCP CLIENT RST: ..."
+
+test('the 28 documented close reasons parse from SD and BSD lines and are documented with a group', () => {
+  assert.ok(BSD_CLOSE.includes('session closed TCP CLIENT RST: '), BSD_CLOSE);
+  assert.equal(lp.CLOSE_REASONS.length, 28);
+  assert.ok(Object.isFrozen(lp.CLOSE_REASONS));
+  const groups = { normal: 2, reset: 2, timeout: 4, error: 9, admin: 8, other: 3 };
+  for (const [g, n] of Object.entries(groups)) assert.equal(lp.CLOSE_REASONS.filter((r) => r.group === g).length, n, g);
+  for (const { text, group } of lp.CLOSE_REASONS) {
+    const bsd = lp.parse(BSD_CLOSE.replace('TCP CLIENT RST', text));
+    assert.equal(bsd.flow.reason, text, `BSD ${text}`);
+    assert.equal(bsd.flow.sessionId, 240003072, `BSD ${text}: the rest of the body still parses`);
+    const sd = lp.parse(`<14>1 2026-11-24T07:40:00Z fw RT_FLOW - RT_FLOW_SESSION_CLOSE [junos@2636.1.1.1.2.129 reason="${text}" source-address="10.10.0.12" source-port="1255" destination-address="198.51.100.20" destination-port="443" protocol-id="6" policy-name="allow-web" session-id="9001"]`);
+    assert.equal(sd.flow.reason, text, `SD ${text}`);
+    assert.deepEqual(lp.closeReason(text), { text, group, documented: true });
+    assert.deepEqual(lp.closeReason(text.toUpperCase()), { text, group, documented: true }, 'matched case-insensitively');
+    // The reason token is "bad" only for the error group (idle Timeout and resets are not failures).
+    const want = group === 'error' ? 'bad' : 'val';
+    const bsdTok = lp.tokenize(BSD_CLOSE.replace('TCP CLIENT RST', text)).filter((t) => t.k === 'reason');
+    assert.deepEqual(bsdTok.map((t) => [t.v, t.t]), [[text, want]], `BSD token ${text}`);
+    const sdTok = lp.tokenize(`<14>1 2026-11-24T07:40:00Z fw RT_FLOW - RT_FLOW_SESSION_CLOSE [junos@2636.1.1.1.2.129 reason="${text}"]`).filter((t) => t.k === 'reason');
+    assert.deepEqual(sdTok.map((t) => t.t), [want], `SD token ${text}`);
+  }
+  assert.equal(lp.closeReason('first path reroute, session recreated').group, 'admin');
+  assert.equal(lp.closeReason('idle Timeout').group, 'timeout');
+});
+
+test('closeReason: undocumented strings are shown as written; empty is null', () => {
+  assert.deepEqual(lp.closeReason('TCP RST'), { text: 'TCP RST', group: 'other', documented: false });
+  assert.equal(lp.closeReason('  TCP FIN  ').text, 'TCP FIN');
+  assert.equal(lp.closeReason(''), null);
+  assert.equal(lp.closeReason('   '), null);
+  assert.equal(lp.closeReason(null), null);
+  // Undocumented reasons are never red, except deny reasons such as "policy deny" (not close reasons).
+  const rst = lp.tokenize(BSD_CLOSE.replace('TCP CLIENT RST', 'TCP RST')).filter((t) => t.k === 'reason');
+  assert.deepEqual(rst.map((t) => t.t), ['val']);
+  const deny = lp.tokenize('Nov 24 07:45:19 fw RT_FLOW: RT_FLOW_SESSION_DENY: session denied 198.51.100.66/10239->203.0.113.2/22 0x0 junos-telnet 6(0) deny-inbound untrust trust UNKNOWN UNKNOWN N/A(N/A) ge-0/0/0.0 No policy deny');
+  assert.deepEqual(deny.filter((t) => t.k === 'reason').map((t) => [t.v, t.t]), [['policy deny', 'bad']]);
+});
+
+test('isPlaceholderValue keeps the documented "unknown" reason; other placeholders stay out', () => {
+  assert.equal(lp.isPlaceholderValue('reason', 'unknown'), false);
+  assert.equal(lp.isPlaceholderValue('Reason', 'UNKNOWN'), false);
+  assert.equal(lp.isPlaceholderValue('reason', 'N/A'), true);
+  assert.equal(lp.isPlaceholderValue('reason', ''), true);
+  assert.equal(lp.isPlaceholderValue('username', 'unknown'), true);
+  assert.equal(lp.isPlaceholderValue('application', 'UNKNOWN'), true);
+  assert.equal(lp.isPlaceholderValue('policy-name', 'allow-web'), false);
+  assert.equal(lp.isPlaceholderValue('reason', undefined), true);
+});
+
+test('the compact summary keeps the close reason, "unknown" included', () => {
+  for (const reason of ['TCP FIN', 'unknown', 'idle Timeout', 'TCP RST']) {
+    const p = lp.parse(BSD_CLOSE.replace('TCP CLIENT RST', reason));
+    const toks = lp.summary(p, { rest: false });
+    const r = toks.filter((t) => t.k === 'reason');
+    assert.deepEqual(r.map((t) => t.v), [reason], reason);
+    assert.ok(joined(toks).includes(` · ${reason}`), joined(toks));
+  }
+  const sd = lp.parse('<14>1 2026-11-24T07:40:00Z fw RT_FLOW - RT_FLOW_SESSION_CLOSE [junos@2636.1.1.1.2.129 reason="unknown" source-address="10.10.0.12" source-port="1255" destination-address="198.51.100.20" destination-port="443" protocol-id="6" policy-name="allow-web" session-id="9001"]');
+  assert.deepEqual(lp.summary(sd, { rest: false }).filter((t) => t.k === 'reason').map((t) => t.v), ['unknown']);
+  const err = lp.summary(lp.parse(BSD_CLOSE.replace('TCP CLIENT RST', 'ICMP error')), { rest: false }).find((t) => t.k === 'reason');
+  assert.equal(err.t, 'bad');
+  const fin = lp.summary(lp.parse(BSD_CLOSE.replace('TCP CLIENT RST', 'TCP FIN')), { rest: false }).find((t) => t.k === 'reason');
+  assert.equal(fin.t, 'str');
+});
+
+test('control-character helpers are re-exported from format.js and still work', () => {
+  const RLO = String.fromCharCode(0x202e);
+  const ZWSP = String.fromCharCode(0x200b);
+  assert.ok(lp.CONTROL_RE.test(RLO));
+  assert.equal(lp.controlName(RLO), 'U+202E');
+  assert.equal(lp.countControls(`a${RLO}b${ZWSP}`), 2);
+  assert.equal(lp.escapeControls(`a${RLO}b`), 'a<U+202E>b');
+  assert.equal(lp.escapeControls(null), '');
+  const toks = lp.tokenize(`Nov 24 07:00:00 fw mgd[1]: UI_COMMIT: User 'a${RLO}b' x`);
+  assert.deepEqual(toks.filter((t) => t.t === 'ctl').map((t) => t.v), [RLO]);
+  assert.equal(toks.map((t) => t.v).join(''), `Nov 24 07:00:00 fw mgd[1]: UI_COMMIT: User 'a${RLO}b' x`, 'lossless');
+});

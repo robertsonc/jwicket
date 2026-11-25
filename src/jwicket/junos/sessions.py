@@ -15,8 +15,11 @@ thousands of entries on a branch box, millions on a data-centre box. Three rules
 
 On a chassis cluster every session is held by both nodes (Active on one, Backup on the other), and
 each node reports its own counts, so counts are summed over the SPUs of one node and the largest
-node's figure is used, never the sum over nodes. Both copies of a session are still returned as rows
-(with their node) so the browser can tell Active from Backup.
+node's figure is used, never the sum over nodes. Failed-session counts are not combined at all on a
+cluster: whether each node counts its own failures is unknown, so the summary's ``failed`` is null
+and each node's figure stays in ``nodes``. Both copies of a session are still returned as rows (with
+their node) so the browser can tell Active from Backup, and on a multi-node reply ``limit`` counts
+sessions, not rows: both copies of the first ``limit`` session ids are kept.
 
 Reply element names follow J-Wicket's reading of the documentation and are confirmed per release by
 qualification Q-REL-01. The per-session list XML is inferred from the CLI output; how per-SPU
@@ -30,7 +33,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from jwicket.junos.xmlutil import Element, kids, local, text, text_of
 
@@ -52,7 +55,16 @@ MAX_LIMIT = 2000
 PROTOCOLS = (
     "ah", "egp", "esp", "gre", "icmp", "icmp6", "igmp", "ipip", "ospf", "pim", "rsvp", "sctp", "tcp", "udp",
 )
-_APP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,63}\Z")
+# The values of the ``application`` leaf of ``rpc get-flow-session-information`` in the Juniper 24.4R2
+# YANG (verified: junos-es-rpc-security@2024-01-01.yang in github.com/Juniper/yang, 24.4/24.4R2):
+# application-protocol types ("Application protocol name" in the YANG), not application names such as
+# junos-https. The CLI reference says "Predefined application name" instead;
+# what a device answers for a value such as junos-https is unknown (owner decision OD-14: follow the
+# YANG), so any other value is refused here and filtered in the browser.
+APPLICATIONS = (
+    "dns", "ftp", "ignore", "mgcp-ca", "mgcp-ua", "ms-rpc", "pptp", "sun-rpc", "q931", "ras", "realaudio", "rsh",
+    "rtsp", "sccp", "sip", "sqlnet-v2", "talk", "tftp", "http", "https", "smtp", "imap", "ssh", "telnet",
+)
 _IFACE = re.compile(r"^[a-z][a-z0-9\-]{1,9}(\d+(/\d+){0,3})?(\.\d{1,5})?\Z")
 
 
@@ -69,8 +81,12 @@ def _prefix(value: str) -> str:
 
 
 def _port(value: str) -> str:
+    # The RPC's source-port and destination-port leaves are uint32 range "1 .. 65535" (24.4R2 YANG,
+    # verified), so port 0 is refused rather than sent.
     if not value.isdigit() or not 0 <= int(value) <= 65535:
         raise FilterError(f"{value!r} is not a port number")
+    if int(value) == 0:
+        raise FilterError("port 0 cannot be filtered on the device")
     return str(int(value))
 
 
@@ -84,9 +100,13 @@ def _protocol(value: str) -> str:
 
 
 def _application(value: str) -> str:
-    if not _APP.match(value):
-        raise FilterError(f"{value!r} is not an application name")
-    return value
+    low = value.lower()
+    if low not in APPLICATIONS:
+        raise FilterError(
+            f"app {value} is not an application type the device can filter on (for example https, ftp, dns); "
+            "filter it in the browser instead."
+        )
+    return low
 
 
 def _interface(value: str) -> str:
@@ -231,12 +251,13 @@ def _location_of(path: List[Element]) -> Optional[str]:
     return "/".join(parts) or None
 
 
-def parse_sessions(reply: Element, limit: int) -> Json:
-    rows: List[Json] = []
-    total = 0
+def _flow_sessions(reply: Element) -> List[Tuple[Element, Optional[str], int]]:
+    """Every ``flow-session`` in document order, with its location and the index of the
+    ``multi-routing-engine-item`` it sits in (0 when there is none)."""
+    found: List[Tuple[Element, Optional[str], int]] = []
+    items: List[Element] = []
 
-    def walk(node: Element, path: List[Element]) -> None:
-        nonlocal total
+    def walk(node: Element, path: List[Element], item: int) -> None:
         # A "flow-fpc-pic-id" label applies to the sessions that follow it inside the same
         # container only; a new container (another node, another SPU group) starts unlabelled.
         spu: Optional[str] = None
@@ -245,23 +266,69 @@ def parse_sessions(reply: Element, limit: int) -> Json:
             if tag == "flow-fpc-pic-id":
                 spu = text_of(child)
             elif tag == "flow-session":
-                total += 1
-                if len(rows) < limit:
-                    loc = _location_of(path)
-                    if spu:
-                        loc = f"{loc} {spu}" if loc else spu
-                    rows.append(_session(child, loc))
+                loc = _location_of(path)
+                if spu:
+                    loc = f"{loc} {spu}" if loc else spu
+                found.append((child, loc, item))
             else:
-                walk(child, [*path, child])
+                inner = item
+                if tag == "multi-routing-engine-item":
+                    items.append(child)
+                    inner = len(items) - 1
+                walk(child, [*path, child], inner)
 
-    walk(reply, [reply])
+    walk(reply, [reply], 0)
+    return found
+
+
+def _node_count(reply: Element) -> int:
+    return sum(1 for e in reply.iter() if local(e.tag) == "multi-routing-engine-item")
+
+
+def parse_sessions(reply: Element, limit: int) -> Json:
+    """The listed sessions, capped at ``limit``.
+
+    One node: the first ``limit`` rows. More than one node (a chassis cluster reply): ``limit``
+    counts sessions, so both copies of the first ``limit`` distinct session ids are kept, in the order
+    the ids appear on the first node (then any id only another node holds). ``returned`` counts rows
+    (both copies); ``sessions_returned`` counts distinct session ids. The CLI sample of ``show
+    security flow session extensive node all`` shows the same Session ID on both nodes, Active and
+    Backup, with zero counters on the backup (verified for CLI text); how an XML list reply lays out
+    the per-node results is not recorded (Q-REL-01, inferred). A row without a session id counts as a
+    session of its own.
+    """
+    found = _flow_sessions(reply)
+    total = len(found)
+    multi = _node_count(reply) > 1
+    if multi:
+        keys: List[Any] = [
+            text(node, "session-identifier") or ("no-id", index) for index, (node, _loc, _item) in enumerate(found)
+        ]
+        order: List[Any] = []
+        seen: Set[Any] = set()
+        # The first node's ids first, then ids that appear only on later nodes.
+        first_node = [key for (_node, _loc, item), key in zip(found, keys) if item == 0]
+        for key in first_node + keys:
+            if key not in seen:
+                seen.add(key)
+                order.append(key)
+        kept = set(order[:limit])
+        rows = [_session(node, loc) for (node, loc, _item), key in zip(found, keys) if key in kept]
+        sessions_returned = len(order)
+        truncated = sessions_returned > len(kept)
+    else:
+        rows = [_session(node, loc) for node, loc, _item in found[:limit]]
+        # Each row of a one-node reply is one session.
+        sessions_returned = total
+        truncated = total > len(rows)
     per_node = _per_node(reply, ("displayed-session-count",))
     counts = [n["displayed-session-count"] for n in per_node if n["displayed-session-count"] is not None]
     out: Json = {
         "status": "ok",
         "rows": rows,
         "returned": total,
-        "truncated": total > len(rows),
+        "sessions_returned": sessions_returned,
+        "truncated": truncated,
         # Sessions on the device that matched: the largest node's count, since a cluster's nodes
         # each hold a copy of every session.
         "device_count": max(counts) if counts else None,
@@ -287,9 +354,11 @@ def _per_node(reply: Element, tags: Tuple[str, ...]) -> List[Json]:
 
 
 def parse_summary(reply: Element) -> Json:
-    """Active, maximum and failed sessions. Summed over the SPUs of one node; on a chassis cluster the
-    largest node's active, maximum and matching counts are used (each node holds a copy of every
-    session), failed counts are summed (each node fails its own), and ``nodes`` lists each node."""
+    """Active, maximum and failed sessions, summed over the SPUs of one node. On a reply with more than
+    one node (a chassis cluster) the largest node's active, maximum and matching counts are used (each
+    node holds a copy of every session), ``failed`` is null because J-Wicket never sums counts across
+    nodes and whether each node counts its own failures is unknown, and ``nodes`` lists each node's
+    figures, failed included."""
     tags = ("active-sessions", "max-sessions", "failed-sessions", "displayed-session-count")
     per_node = _per_node(reply, tags)
 
@@ -302,7 +371,8 @@ def parse_summary(reply: Element) -> Json:
         "status": "ok",
         "active": largest("active-sessions"),
         "max": largest("max-sessions"),
-        "failed": sum(failed) if failed else None,
+        # One node: the sum over its SPUs. More than one node: not combined (see the docstring).
+        "failed": (sum(failed) if failed else None) if len(per_node) <= 1 else None,
         # A summary request carrying filters reports how many sessions match them.
         "matching": largest("displayed-session-count"),
     }

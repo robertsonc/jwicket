@@ -27,13 +27,24 @@ const DEFAULT_WINDOW = 5000;
 const API_MAX_LINES = 2000;
 const REPORT_COUNT = 1000;
 const FAIL_BACKOFF_S = 10;
+const SOURCES_RETRY_S = 30; // the log configuration stayed busy (429s): read it again by itself
+// A refilter checks lines newest first for at most this long; the new lines of one read for at most
+// APPEND_BUDGET_MS. A slow pattern then leaves older lines unchecked (and says so) instead of freezing
+// the tab (LOG-02; query.regexRisk refuses the worst patterns first).
+const FILTER_BUDGET_MS = 150;
+const APPEND_BUDGET_MS = 50;
 const PREF = {
   wrap: 'jwicket.logs.wrap',
   compact: 'jwicket.logs.compact',
   facets: 'jwicket.logs.facets',
   window: 'jwicket.logs.window',
   interval: 'jwicket.logs.interval',
+  zone: 'jwicket.logs.zone',
 };
+// Close-reason group -> pill colour. The 28 reasons are Junos's documented ones (Session Close Log
+// Fields, Table 2); the grouping is J-Wicket's own (inferred), see logparse.CLOSE_REASONS.
+const CR_PILL = { normal: 'teal', reset: 'amber', timeout: 'muted', error: 'deny', admin: 'sky', other: 'muted' };
+const IDLE_LABEL = 'Live reads paused: no activity. Move the pointer or press a key to resume.';
 const CLICKABLE = new Set(['ip', 'port', 'proto', 'zone', 'policy', 'iface', 'nat', 'num', 'str', 'bad', 'good', 'user', 'val', 'tag', 'daemon', 'host', 'pid']);
 const FLOW_FAMS = new Set(['create', 'close', 'deny']);
 const SEP = ' \u00b7 ';
@@ -110,6 +121,48 @@ function tick(el, text) {
   el.textContent = text;
   if ((REDUCED && REDUCED.matches) || typeof el.animate !== 'function') return;
   el.animate([{ transform: 'translateY(-35%)', opacity: 0.25 }, { transform: 'none', opacity: 1 }], { duration: 260, easing: 'cubic-bezier(.2,.7,.2,1)' });
+}
+
+// ---- device time zone (LG-02) -------------------------------------------------------------------------
+
+const ZONE_FMT = new Map();
+const ZONE_OFF = new Map();
+
+function zoneFormat(zone) {
+  if (!ZONE_FMT.has(zone)) {
+    let f = null;
+    try {
+      f = new Intl.DateTimeFormat('en-US', { timeZone: zone, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (_err) {
+      f = null;
+    }
+    ZONE_FMT.set(zone, f);
+  }
+  return ZONE_FMT.get(zone);
+}
+
+/** Milliseconds `zone` is ahead of UTC at the instant `utcMs` (cached per quarter hour), through Intl. */
+function zoneOffset(utcMs, zone) {
+  const f = zoneFormat(zone);
+  if (!f || !Number.isFinite(utcMs)) return 0;
+  const key = `${zone}|${Math.floor(utcMs / 900000)}`;
+  const hit = ZONE_OFF.get(key);
+  if (hit !== undefined) return hit;
+  const whole = Math.floor(utcMs / 1000) * 1000;
+  const p = {};
+  for (const part of f.formatToParts(new Date(whole))) p[part.type] = part.value;
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute), Number(p.second));
+  const off = asUtc - whole;
+  if (ZONE_OFF.size > 4000) ZONE_OFF.clear();
+  ZONE_OFF.set(key, off);
+  return off;
+}
+
+/** "UTC+1", "UTC\u22125:30" for an offset in ms. */
+function utcOffsetLabel(ms) {
+  const m = Math.round(ms / 60000);
+  const a = Math.abs(m);
+  return `UTC${m >= 0 ? '+' : '\u2212'}${Math.floor(a / 60)}${a % 60 ? `:${pad2(a % 60)}` : ''}`;
 }
 
 function isoNoZone(ms) {
@@ -538,7 +591,7 @@ class LogsView {
     this.q = ctx.query;
     this.lp = ctx.logparse;
     this.dead = false;
-    this.timers = { poll: 0, ago: 0 };
+    this.timers = { poll: 0, ago: 0, sources: 0 };
     this.offs = [];
     this.sources = null; // /api/logs/sources payload (sources)
     this.sourceList = [];
@@ -568,6 +621,7 @@ class LogsView {
     this.selfHidden = 0;
     this.famOff = new Set();
     this.famCounts = null;
+    this.denyReasons = new Set(); // reason values seen on DENY lines: never shown as close reasons
     this.hist = { times: [], series: [] };
     this.queryText = '';
     this.plan = null;
@@ -606,6 +660,14 @@ class LogsView {
     this.interval = INTERVALS.includes(iv) ? iv : 5;
     this.whereOpen = false;
     this.whereAuto = true;
+    this.firstDone = false; // a read of this source has been ingested (LOG-09)
+    this.limited = null; // 429s in a row on this source: { src, n, reason, since, interval, retryAfter } (LOG-07)
+    this.unchecked = []; // rows (oldest first) the last refilter's time budget did not reach (LOG-02)
+    this.filterCut = null; // that refilter: { ms, checked, total, time }
+    this.appendCut = []; // new lines whose filter ran out of time (live then pauses)
+    this.idle = Boolean(ctx.ui.isIdle?.()); // the shell's idle pause (SL-08)
+    this.zoneOn = prefGet(PREF.zone) === '1'; // show times in the configured device zone (LG-02)
+    this.zoneName = null; // that zone while the toggle is on and the zone is convertible
 
     if (!this.q || !this.lp) {
       el.append(
@@ -622,6 +684,7 @@ class LogsView {
     this.families = this.lp.FAMILIES.map((f) => ({ id: f.id, label: f.label }));
     this.famIndex = new Map(this.families.map((f, i) => [f.id, i]));
     this.fields = this.logFields();
+    this.zoneName = this.activeZone();
     this.build();
     this.bind();
     this.readRoute(ctx.route, true);
@@ -715,6 +778,8 @@ class LogsView {
     this.famMore = h('button', { class: 'lg-fam lg-fam-more', type: 'button', 'aria-expanded': 'false', on: { click: () => { this.famsExpanded = !this.famsExpanded; this.renderFams(); } } });
     this.famEl.append(this.famMore);
     this.rangeEl = h('div', { class: 'lg-range' });
+    // LG-02: offered only when the configured device zone is one this browser can convert to.
+    this.zoneBtn = h('button', { class: 'lg-zone-btn', type: 'button', 'aria-pressed': 'false', hidden: true, on: { click: () => this.toggleZone() } });
     this.ageSeg = h(
       'div',
       { class: 'seg lg-ages', role: 'group', 'aria-label': 'Time range' },
@@ -732,7 +797,7 @@ class LogsView {
     this.timeline = h(
       'section',
       { class: 'tile lg-timeline', 'aria-label': 'Timeline' },
-      h('div', { class: 'lg-tl-head' }, this.famEl, h('div', { class: 'lg-tl-side' }, this.rangeEl, this.ageSeg)),
+      h('div', { class: 'lg-tl-head' }, this.famEl, h('div', { class: 'lg-tl-side' }, this.rangeEl, this.zoneBtn, this.ageSeg)),
       h('div', { class: 'lg-tl-legend' }, this.histogram.legendEl),
       this.histogram.el,
     );
@@ -846,9 +911,11 @@ class LogsView {
         if (row) this.select(row, { scroll: false });
       }
     });
+    on(window, 'jwicket:idle', (e) => this.setIdle(Boolean(e && e.detail && e.detail.idle)));
     this.offs.push(this.ctx.store.on('inventory', () => {
       this.updateHints();
-      this.list.reconcile(true);
+      if (this.activeZone() !== this.zoneName) this.applyZone();
+      else this.list.reconcile(true);
       this.renderSub();
     }));
     this.offs.push(this.ctx.store.on('sessions', () => this.refreshLiveLink()));
@@ -865,6 +932,8 @@ class LogsView {
   destroy() {
     this.dead = true;
     clearTimeout(this.timers.poll);
+    clearTimeout(this.timers.sources);
+    clearTimeout(this.facetsTimer);
     clearInterval(this.timers.ago);
     if (this.abort) this.abort.abort();
     for (const off of this.offs) off();
@@ -930,16 +999,31 @@ class LogsView {
 
   // ---- sources ------------------------------------------------------------------------------------
 
-  async loadSources(force = false) {
-    const res = await this.ctx.api.get('/api/logs/sources');
-    if (this.dead) return;
+  async loadSources() {
+    clearTimeout(this.timers.sources);
+    this.timers.sources = 0;
+    // Another tab or window of this session may be reading: wait for it (up to 5 tries) instead of
+    // failing, and say so on the loading card.
+    const res = await this.ctx.api.get('/api/logs/sources', null, {
+      retry429: { attempts: 5 },
+      onWait: () => {
+        if (this.dead || this.sources) return;
+        this.showState({ status: 'loading', title: 'Reading the log configuration', message: 'Waiting for another read on your session to finish\u2026', skeleton: true });
+      },
+    });
+    if (this.dead || res.aborted) return;
     if (res.status === 401) return;
     if (!res.ok) {
-      if (res.status === 429 && !force) {
-        setTimeout(() => !this.dead && this.loadSources(true), (res.retryAfter || 2) * 1000);
+      if (res.status === 429) {
+        // Still busy after the retries: a state of this session, never a device failure. Try again in 30 s.
+        this.failSources({ status: 'busy', message: null, retryLabel: 'Retry' });
+        this.timers.sources = setTimeout(() => {
+          this.timers.sources = 0;
+          if (!this.dead && !this.sources) this.loadSources();
+        }, SOURCES_RETRY_S * 1000);
         return;
       }
-      this.failSources({ status: res.status === 0 ? 'offline' : 'failed', message: res.data.error || `The log sources could not be read (HTTP ${res.status}).` });
+      this.failSources({ status: res.status === 0 ? 'offline' : res.internal ? 'internal' : 'failed', message: res.data.error || `The log sources could not be read (HTTP ${res.status}).` });
       return;
     }
     this.ctx.ui.noteFixture(res.data.meta);
@@ -974,7 +1058,7 @@ class LogsView {
     this.renderSources();
     this.renderWhere();
     const denied = state.status === 'denied';
-    this.subEl.textContent = 'The log configuration could not be read.';
+    this.subEl.textContent = state.status === 'busy' ? 'The log configuration was not read yet.' : 'The log configuration could not be read.';
     this.showState({
       status: state.status,
       title: denied ? 'Your Junos login class cannot read the log configuration' : undefined,
@@ -982,7 +1066,7 @@ class LogsView {
       hint: denied
         ? 'J-Wicket first reads the syslog and security log settings to learn which logs exist, and your class may not read them. Reading a log file ("show log") also needs the trace permission, which the read-only class does not have. Ask your Junos administrator.'
         : undefined,
-      actions: [this.retryButton(() => this.loadSources(true))],
+      actions: [this.retryButton(() => this.loadSources(), state.retryLabel)],
     });
     this.renderLive();
     this.renderBar();
@@ -991,20 +1075,40 @@ class LogsView {
 
   buildSourceList(src) {
     const list = [];
+    const mode = (src.traffic && src.traffic.effective_mode) || null;
     for (const f of src.files || []) {
       const traffic = /RT_FLOW/i.test(f.match || '') ? 'yes' : (f.contents || []).some((c) => /^(any|user) (any|info)$/.test(c)) ? 'maybe' : 'no';
       const meta = [];
       if (f.match) meta.push(`match ${f.match}`);
       if ((f.contents || []).length) meta.push(f.contents.join(', '));
       if (f.structured_data) meta.push('structured data');
-      if (f.assumed) meta.push('default file');
-      list.push({ id: f.id, kind: 'file', name: f.name, label: f.name, meta: meta.join(SEP) || 'syslog file', file: f, traffic, structured: Boolean(f.structured_data) });
+      const entry = { id: f.id, kind: 'file', name: f.name, label: f.name, meta: meta.join(SEP) || 'syslog file', file: f, traffic, structured: Boolean(f.structured_data), badges: [] };
+      if (f.inactive) {
+        // Deactivated in the configuration: Junos stops writing it, but the file may still be on disk.
+        entry.meta = 'deactivated: Junos no longer writes it; older lines may still be there';
+        entry.metaCls = 'is-off';
+      } else if (f.assumed) {
+        entry.meta = 'not in the configuration (assumed default file)';
+        entry.metaTitle = 'No syslog file named messages is configured; J-Wicket assumes the default file, and reading it may fail on this device.';
+      }
+      list.push(entry);
     }
     for (const d of src.databases || []) {
       if (d.id === 'report') {
-        list.push({ id: 'report', kind: 'report', name: d.name || 'On-box reporting', label: 'on-box report', meta: 'reporting database', types: (d.types || []).slice(), traffic: 'yes' });
+        const entry = { id: 'report', kind: 'report', name: d.name || 'On-box reporting', label: 'on-box report', meta: 'reporting database', types: (d.types || []).slice(), traffic: 'yes', badges: [], note: d.note || null, supported: d.supported !== false };
+        // The in-detail report queries came with Junos OS 23.1R1 (the server's note says which release runs).
+        if (d.supported === false) {
+          entry.btnLabel = 'on-box report \u00b7 needs Junos 23.1R1';
+          entry.metaTitle = d.note || null;
+        }
+        // LOG-10: the amber note badge whenever the report has a note, supported or not.
+        if (d.note) entry.badges.push({ text: 'note', cls: 'is-note', title: d.note });
+        if (d.disabled) entry.badges.push({ text: 'logging disabled', cls: 'is-off', title: 'security log disable is configured: the device writes no new security logs; records written before may still be read.' });
+        list.push(entry);
       } else if (d.id === 'buffer') {
-        list.push({ id: 'buffer', kind: 'buffer', name: d.name || 'Security log buffer', label: 'log buffer', meta: 'routing engine, event mode', traffic: 'yes' });
+        const entry = { id: 'buffer', kind: 'buffer', name: d.name || 'Security log buffer', label: 'log buffer', meta: mode === 'stream-event' ? 'routing engine, stream-event mode' : mode === 'event' ? 'routing engine, event mode' : 'routing engine', traffic: 'yes', badges: [], disabled: Boolean(d.disabled) };
+        if (d.disabled) entry.badges.push({ text: 'logging disabled', cls: 'is-off', title: 'security log disable is configured: the device writes no new security logs; records written before may still be read.' });
+        list.push(entry);
       }
     }
     return list;
@@ -1017,21 +1121,28 @@ class LogsView {
 
   renderSources() {
     const { h, put, icon } = this.dom;
+    const esc = (v) => this.lp.escapeControls(String(v ?? ''));
     put(
       this.srcGroup,
       this.sourceList.map((s) =>
         h(
           'button',
           {
-            class: ['lg-src', `kind-${s.kind}`],
+            class: ['lg-src', `kind-${s.kind}`, s.metaCls === 'is-off' && 'is-inactive', ((s.badges || []).length || s.btnLabel) && 'has-badges'],
             type: 'button',
             'aria-pressed': this.src && this.src.id === s.id ? 'true' : 'false',
             dataset: { id: s.id },
-            title: `${s.name}${SEP}${s.meta}`,
+            title: [`${esc(s.name)}${SEP}${esc(s.meta)}`, s.metaTitle, ...(s.badges || []).map((b) => `${b.text}: ${esc(b.title)}`)].filter(Boolean).join('\n'),
             on: { click: () => this.switchSource(s) },
           },
           icon(s.kind === 'file' ? 'logs' : s.kind === 'report' ? 'grid' : 'layers', { class: 'lg-src-ico' }),
-          h('span', { class: 'lg-src-txt' }, h('span', { class: 'lg-src-name' }, s.label), h('span', { class: 'lg-src-meta' }, s.meta)),
+          h(
+            'span',
+            { class: 'lg-src-txt dev-text' },
+            h('span', { class: 'lg-src-name' }, this.vis(s.btnLabel || s.label)),
+            h('span', { class: ['lg-src-meta', s.metaCls], title: s.metaTitle || null }, this.vis(s.meta)),
+          ),
+          (s.badges || []).map((b) => h('span', { class: ['lg-src-badge', b.cls], title: esc(b.title) }, b.text)),
           s.traffic === 'yes' ? h('span', { class: 'lg-src-flow', title: 'Holds traffic (RT_FLOW) logs' }, 'flow') : null,
         ),
       ),
@@ -1082,29 +1193,47 @@ class LogsView {
     const streams = tr.streams || [];
     const facts = [
       h('dt', null, 'Mode'),
-      h('dd', null, h('span', { class: ['pill', modeCls] }, mode), h('span', { class: 'faint' }, ` ${tr.mode_basis || ''}`)),
+      h('dd', { class: 'dev-text' }, h('span', { class: ['pill', modeCls] }, this.vis(mode)), h('span', { class: 'faint' }, ' ', this.vis(tr.mode_basis || ''))),
     ];
+    if (tr.mode_inactive) {
+      facts.push(h('dt', null, 'Configured mode'), h('dd', { class: 'dev-text' }, h('span', { class: 'mono' }, this.vis(tr.mode_inactive)), ', deactivated, not in effect'));
+    }
     if (streams.length) {
       facts.push(
-        h('dt', null, 'Streamed to'),
+        h('dt', null, 'Streams'),
         h(
           'dd',
           { class: 'lg-streams' },
-          streams.map((s) =>
-            h(
+          streams.map((s) => {
+            // Where a stream goes: a host (host:port), a RADIUS server, or a local stream file.
+            let where;
+            if (s.file !== null && s.file !== undefined) where = [h('b', { class: 'mono' }, 'local stream file ', this.vis(s.file)), h('span', { class: 'faint' }, ' \u00b7 J-Wicket cannot read stream files yet')];
+            else if (s.radius !== null && s.radius !== undefined) where = h('b', { class: 'mono' }, 'RADIUS ', this.vis(s.radius));
+            else where = h('b', { class: 'mono' }, this.vis(`${s.host || '?'}${s.port ? `:${s.port}` : ''}`));
+            return h(
               'span',
-              { class: 'lg-stream-host' },
+              { class: ['lg-stream-host', 'dev-text', s.inactive && 'is-inactive'] },
               icon('broadcast'),
-              h('b', { class: 'mono' }, `${s.host || '?'}${s.port ? `:${s.port}` : ''}`),
-              h('span', { class: 'faint' }, [s.name, s.format, (s.category || []).filter(Boolean).join('/')].filter(Boolean).join(SEP)),
-            ),
-          ),
+              where,
+              s.inactive ? h('span', { class: 'pill muted', title: 'This stream is deactivated in the configuration, so it is not in effect.' }, 'deactivated') : null,
+              h('span', { class: 'faint' }, this.vis([s.name, s.format, (s.category || []).filter(Boolean).join('/')].filter(Boolean).join(SEP))),
+            );
+          }),
         ),
       );
     }
-    facts.push(h('dt', null, 'On-box reporting'), h('dd', null, tr.report ? 'Enabled: a local report database keeps a copy.' : 'Not enabled.'));
+    facts.push(
+      h('dt', null, 'On-box reporting'),
+      h('dd', null, tr.report_inactive ? 'configured but deactivated' : tr.report ? 'Enabled: a local report database keeps a copy.' : 'Not enabled.'),
+    );
+    if (tr.disabled) facts.push(h('dt', null, 'Security logging'), h('dd', null, 'disabled (security log disable)'));
+    // The format as configured, verbatim; J-Wicket does not interpret it.
+    facts.push(
+      h('dt', null, 'Format'),
+      h('dd', { class: 'dev-text' }, tr.format ? [h('span', { class: 'mono' }, this.vis(tr.format)), ' (security log format, as configured)'] : 'not set'),
+    );
     const jump = (s) =>
-      h('button', { class: ['btn', 'sm', this.src && this.src.id === s.id && 'is-current'], type: 'button', on: { click: () => this.switchSource(s) } }, icon(s.kind === 'file' ? 'logs' : s.kind === 'report' ? 'grid' : 'layers'), s.label);
+      h('button', { class: ['btn', 'sm', this.src && this.src.id === s.id && 'is-current'], type: 'button', on: { click: () => this.switchSource(s) } }, icon(s.kind === 'file' ? 'logs' : s.kind === 'report' ? 'grid' : 'layers'), this.vis(s.label));
     put(
       this.whereEl,
       h(
@@ -1115,7 +1244,7 @@ class LogsView {
           'div',
           { class: 'lg-where-body' },
           h('h2', { class: 'lg-where-title' }, 'Where are my traffic logs?'),
-          h('p', { class: 'lg-where-text' }, tr.where || 'The security log mode is not known.'),
+          h('p', { class: 'lg-where-text dev-text' }, this.vis(tr.where || 'The security log mode is not known.')),
           h('dl', { class: 'kv lg-where-kv' }, facts),
           h(
             'div',
@@ -1181,6 +1310,11 @@ class LogsView {
     this.facets = FACETS.map(() => new Map());
     this.facetsDirty = true;
     this.lastDay = null;
+    this.newestFrame = null;
+    this.unchecked = [];
+    this.appendCut = [];
+    this.filterCut = null;
+    this.denyReasons.clear();
     if (this.singleHost !== null) {
       this.singleHost = null;
       this.updatePaintKey();
@@ -1199,6 +1333,9 @@ class LogsView {
     this.notice = null;
     this.follow = true;
     this.clockChecked = false;
+    this.firstDone = false;
+    this.limited = null;
+    this.disabledNoted = false;
     this.resetRows();
     this.renderFollow();
     this.renderNotice();
@@ -1212,7 +1349,7 @@ class LogsView {
   refresh(fromButton) {
     if (fromButton) this.ctx.ui.toast(`Reading ${this.src ? this.src.label : 'the logs'} again from the device\u2026`, 'info');
     if (!this.sources) {
-      this.loadSources(true);
+      this.loadSources();
       return;
     }
     this.restart();
@@ -1274,6 +1411,9 @@ class LogsView {
     clearTimeout(this.timers.poll);
     if (this.dead || !this.src) return;
     if (!initial && this.paused) return;
+    // Until a read of this source has been ingested, every read is a first read (no cursor, the newest
+    // lines, no flash, no gap markers): a 429 on the first read must not turn the retry into a tail.
+    initial = initial || !this.firstDone;
     const gen = this.readGen;
     const src = this.src;
     const params = this.readParams(initial);
@@ -1292,9 +1432,12 @@ class LogsView {
       return;
     }
     if (res.status === 429) {
+      this.noteLimited(res, src, initial);
       this.schedule(res.retryAfter || 2);
       return;
     }
+    // A 200 (or any other answer) ends a run of 429s.
+    this.clearLimited();
     if (res.data && res.data.meta) {
       this.meta = res.data.meta;
       this.ctx.ui.noteFixture(res.data.meta);
@@ -1314,7 +1457,7 @@ class LogsView {
       const message = res.data.error || `The log read failed (HTTP ${res.status}).`;
       this.lastRead = { at: Date.now(), ok: false, message };
       if (initial && !this.rows.length) {
-        this.showState({ status: res.status === 0 ? 'offline' : 'failed', message, actions: [this.retryButton(() => this.restart())] });
+        this.showState({ status: res.status === 0 ? 'offline' : res.internal ? 'internal' : 'failed', message, actions: [this.retryButton(() => this.restart())] });
       } else {
         this.notice = { kind: 'warn', text: `The last read failed: ${message} J-Wicket tries again in ${FAIL_BACKOFF_S} s.` };
         this.renderNotice();
@@ -1357,8 +1500,47 @@ class LogsView {
         if (this.dead || gen !== this.readGen) return;
       }
     }
-    this.ingest(log, src, initial);
+    this.ingest(log, src, initial, params);
+    if (!this.failed) this.firstDone = true;
     this.schedule();
+  }
+
+  /**
+   * A 429 on a log read. The floor is J-Wicket's own (per signed-in session, shared by every tab and
+   * window of it), not the device's. After the second in a row, or the first on a first read, say why.
+   */
+  noteLimited(res, src, initial) {
+    const prev = this.limited && this.limited.src === src.id ? this.limited : null;
+    const data = res.data || {};
+    const interval = Number(data.interval_s);
+    this.limited = {
+      src: src.id,
+      n: (prev ? prev.n : 0) + 1,
+      reason: res.reason || (typeof data.reason === 'string' ? data.reason : null),
+      since: prev ? prev.since : Date.now(),
+      interval: Number.isFinite(interval) && interval > 0 ? interval : null,
+      retryAfter: Math.max(1, Math.ceil(res.retryAfter || 2)),
+    };
+    const L = this.limited;
+    if (L.n >= 2 || initial) {
+      let text;
+      if (L.reason === 'busy') text = `Another read on your session is still running (a slow device or another tab). J-Wicket waits ${L.retryAfter} s, as the server asked.`;
+      else if (L.reason === 'rate' && L.interval !== null) text = `J-Wicket reads ${this.lp.escapeControls(src.label)} at most once every ${String(L.interval)} s for your session, and another J-Wicket tab or window of this session seems to be reading it too. This tab waits its turn (next read in ${L.retryAfter} s).`;
+      else text = `J-Wicket was asked to wait ${L.retryAfter} s before reading ${this.lp.escapeControls(src.label)} again.`;
+      this.notice = { kind: 'info', tag: 'limited', text };
+      this.renderNotice();
+    }
+    this.renderFoot();
+  }
+
+  /** Any answer other than a 429 ends a run of them. */
+  clearLimited() {
+    if (!this.limited) return;
+    this.limited = null;
+    if (this.notice && this.notice.tag === 'limited') {
+      this.notice = null;
+      this.renderNotice();
+    }
   }
 
   logState(log, src) {
@@ -1393,6 +1575,17 @@ class LogsView {
   reportState(log, src) {
     const { h, icon } = this.dom;
     const type = this.reportType;
+    if (src.supported === false) {
+      // No report type works on this release: the server says which release runs; no other-type action.
+      const others = this.sourceList.filter((x) => x.id !== src.id && x.traffic === 'yes');
+      return {
+        status: 'unsupported',
+        title: 'The on-box report queries are not available on this release',
+        message: log.message || src.note || null,
+        hint: 'J-Wicket reads on-box reporting with the in-detail report queries, which this device does not have. Other sources may still hold traffic logs.',
+        actions: others.map((x) => h('button', { class: 'btn sm', type: 'button', on: { click: () => this.switchSource(x) } }, icon(x.kind === 'file' ? 'logs' : 'layers'), 'Read ', this.vis(x.label), ' instead')),
+      };
+    }
     const fixture = Boolean((this.meta && this.meta.fixture) || (this.ctx.store.session && this.ctx.store.session.fixture));
     const fam = REPORT_FAMILY[type];
     const allOk = this.reportOk.has('session-all');
@@ -1435,7 +1628,7 @@ class LogsView {
     this.restart();
   }
 
-  ingest(log, src, initial) {
+  ingest(log, src, initial, params = {}) {
     const lines = Array.isArray(log.lines) ? log.lines : [];
     let items;
     if (src.kind === 'buffer') {
@@ -1448,13 +1641,29 @@ class LogsView {
         this.renderLive();
         return;
       }
+      // The reply's own flag, or `security log disable` in the configuration (the source's flag).
+      if ((log.disabled || src.disabled) && lines.length && !this.disabledNoted) {
+        this.disabledNoted = true;
+        // JUNOS-08: the documentation says only that the statement disables security logging; that the
+        // lines shown were written before it is J-Wicket's reading.
+        this.notice = { kind: 'info', text: 'Security logging is disabled (security log disable); J-Wicket reads the lines shown as written before that (inferred).' };
+        this.renderNotice();
+      }
     } else {
       items = lines.map((line) => ({ line: String(line), ev: null }));
     }
     if (src.kind !== 'file') items = this.timeOrder(items);
     if (src.kind === 'file') {
       this.cursor = log.cursor || this.cursor;
-      this.deviceInfo = { window: log.window, dropped: initial ? log.dropped || 0 : (this.deviceInfo && this.deviceInfo.dropped) || 0, returned: lines.length };
+      this.deviceInfo = {
+        window: log.window,
+        dropped: initial ? log.dropped || 0 : (this.deviceInfo && this.deviceInfo.dropped) || 0,
+        returned: lines.length,
+        // Lines the device had after the cursor (the whole window on a first read), before the device filter.
+        scanned: Number.isFinite(log.scanned) ? log.scanned : null,
+        initial,
+        devTerms: Boolean(params.contains || params.exclude),
+      };
     } else {
       this.deviceInfo = { returned: lines.length, limited: src.kind === 'report' && lines.length >= REPORT_COUNT };
     }
@@ -1470,20 +1679,24 @@ class LogsView {
       markers.push({ kind: 'gap', text: `${this.fmt.num(log.dropped)} lines arrived faster than one read returns and were skipped here.` });
     }
     if (!initial && src.kind === 'report' && lines.length >= REPORT_COUNT) {
-      markers.push({ kind: 'gap', text: `The device returned its limit of ${this.fmt.num(REPORT_COUNT)} lines; some lines before this point may be missing.` });
+      // Live report reads send a start time and no 'descending'; which end of a capped reply the device
+      // keeps is not confirmed (Q-LOG-01).
+      markers.push({ kind: 'gap', text: `The device returned its limit of ${this.fmt.num(REPORT_COUNT)} lines; J-Wicket reads on from the newest one. If this device returns newest first without 'descending' (not yet confirmed, Q-LOG-01), lines before this point may be missing.` });
     }
     const dedupe = src.kind !== 'file' || Boolean(log.reset);
     const before = this.seq;
     this.append(items, markers, dedupe, initial);
-    this.checkClocks(initial, src, before);
+    this.checkClocks(initial, src, before, Boolean(params.cursor));
   }
 
   /**
-   * Time-zone sanity. Lines a live tail just read were written moments ago: if their zone-less
-   * times sit far from the device's UTC clock, the device logs in local time and every time here
-   * (read as UTC) is off by that offset. Also says when this browser's clock is off the device's.
+   * Time-zone sanity. Lines a cursor read just returned were written moments ago: if their zone-less
+   * times sit far from the device's UTC clock, the device logs in local time and every time here (read
+   * as UTC) is off by that offset. With a configured zone J-Wicket can convert (LG-02), this is a
+   * cross-check of that zone. Also says when this browser's clock is off the device's. A first read is
+   * never compared: its lines may be hours old.
    */
-  checkClocks(initial, src, beforeSeq) {
+  checkClocks(initial, src, beforeSeq, cursorRead) {
     const server = this.meta && this.meta.read_at ? Date.parse(this.meta.read_at) : NaN;
     if (!Number.isFinite(server)) return;
     const notes = [];
@@ -1494,22 +1707,33 @@ class LogsView {
         notes.push(`This browser's clock is ${this.fmt.duration(Math.round(Math.abs(skew) / 1000))} ${skew > 0 ? 'ahead of' : 'behind'} the device's, so age filters (age<15m) are off by that much.`);
       }
     }
-    if (!initial && src.kind === 'file' && !this.clockChecked) {
+    if (cursorRead && src.kind === 'file' && !this.clockChecked) {
       let fresh = null;
       for (let i = this.rows.length - 1; i >= 0 && this.rows[i].seq > beforeSeq; i -= 1) {
         const r = this.rows[i];
-        if (!r.marker && r.time !== null && !r.p.zoned) {
+        if (!r.marker && Number.isFinite(r.p.time) && !r.p.zoned) {
           fresh = r;
           break;
         }
       }
       if (fresh) {
         this.clockChecked = true;
-        const d = fresh.time - server;
-        if (Math.abs(d) > 20 * 60000) {
+        const label = this.lp.escapeControls(src.label);
+        const d = fresh.p.time - server; // as written (read as UTC) minus the device's UTC clock
+        const zone = this.deviceZone();
+        if (zone) {
+          const expect = zoneOffset(server, zone);
+          const off = d - expect;
+          if (Math.abs(off) > 20 * 60000) {
+            const n = Math.abs(Math.round(off / 900000) / 4);
+            notes.push(`${label}: lines look ${n} h off the configured zone (${zone}, ${utcOffsetLabel(expect)} now): new lines are stamped about ${utcOffsetLabel(Math.round(d / 900000) * 900000)}. A time-zone change takes effect for all processes only after a reboot, and security log utc-timestamp stamps security logs in UTC whatever the zone (J-Wicket does not read that setting); either may explain it (J-Wicket's reading).`);
+          } else if (!this.zoneName && Math.abs(d) > 20 * 60000) {
+            notes.push(`New lines in ${label} are stamped about ${utcOffsetLabel(expect)}, as the configured time zone ${zone} is now. J-Wicket reads them as UTC, so the chart, ages and time ranges are off by that much; "Show times in the device zone" reads them in ${zone}.`);
+          }
+        } else if (Math.abs(d) > 20 * 60000) {
           const q = Math.round(d / 900000) / 4;
           const off = `UTC${q >= 0 ? '+' : '\u2212'}${Math.abs(q)}`;
-          notes.push(`New lines in ${src.label} are stamped ${this.fmt.duration(Math.round(Math.abs(d) / 1000))} ${d > 0 ? 'ahead of' : 'behind'} the device's UTC clock. Their times carry no zone, so the device probably logs in local time (about ${off}); J-Wicket reads them as UTC, so the chart, ages and time ranges are off by that much.`);
+          notes.push(`New lines in ${label} are stamped ${this.fmt.duration(Math.round(Math.abs(d) / 1000))} ${d > 0 ? 'ahead of' : 'behind'} the device's UTC clock. Their times carry no zone, so the device probably logs in local time (about ${off}); J-Wicket reads them as UTC, so the chart, ages and time ranges are off by that much.`);
         }
       }
     }
@@ -1545,7 +1769,7 @@ class LogsView {
       p,
       fam,
       famIx: this.famIndex.get(fam),
-      time: Number.isFinite(p.time) ? p.time : null,
+      time: this.frameOf(p),
       self: this.lp.isSelfRead(p, this.readAs),
       sid: sessionIdOf(p),
       len: line.length,
@@ -1580,7 +1804,12 @@ class LogsView {
       }
       const row = this.makeRow(it.line, it.ev);
       added.push(row);
-      if (row.time !== null && (this.newest === null || row.time > this.newest)) this.newest = row.time;
+      // The next report start / buffer since comes from the time as written (read as UTC), as before
+      // LG-02: the zone the device reads those parameters in is unknown.
+      const t = row.p.time;
+      if (Number.isFinite(t) && (this.newest === null || t > this.newest)) this.newest = t;
+      if (row.time !== null && (this.newestFrame === null || row.time > this.newestFrame)) this.newestFrame = row.time;
+      if (row.fam === 'deny' && row.fk && row.fk[4] !== null) this.denyReasons.add(row.fk[4]);
     }
     // A marker with nothing after it says nothing: drop markers when no lines followed.
     const lines = added.filter((r) => !r.marker);
@@ -1643,6 +1872,16 @@ class LogsView {
    */
   forgetRows(removed) {
     if (!removed.length) return 0;
+    const maxSeq = removed[removed.length - 1].seq;
+    // Unchecked rows are the oldest of the window: trimming takes them first. When the last one goes,
+    // every line left has been checked and the cut marker goes too.
+    if (this.unchecked.length) {
+      let u = 0;
+      while (u < this.unchecked.length && this.unchecked[u].seq <= maxSeq) u += 1;
+      if (u) this.unchecked.splice(0, u);
+      if (!this.unchecked.length) this.filterCut = null;
+    }
+    if (this.appendCut.length) this.appendCut = this.appendCut.filter((r) => r.seq > maxSeq);
     let hist = 0;
     for (const row of removed) {
       if (row.marker) continue;
@@ -1660,12 +1899,12 @@ class LogsView {
       this.hist.times.splice(0, hist);
       this.hist.series.splice(0, hist);
     }
-    const maxSeq = removed[removed.length - 1].seq;
     const v = this.visible;
     let k = 0;
     while (k < v.length && v[k].seq <= maxSeq) k += 1;
-    // A gap or rotation marker with nothing before it says nothing.
-    while (k < v.length && v[k].marker && v[k].marker.kind !== 'day') k += 1;
+    // A gap or rotation marker with nothing before it says nothing (the filter's cut marker does, while
+    // unchecked lines remain above it).
+    while (k < v.length && v[k].marker && v[k].marker.kind !== 'day' && !(v[k].marker.kind === 'cut' && this.unchecked.length)) k += 1;
     if (!k) return 0;
     const before = this.list.tops[k] || 0;
     v.splice(0, k);
@@ -1847,13 +2086,12 @@ class LogsView {
     return [...out];
   }
 
-  /** 0: one of your own hidden reads; 1: filtered out by the query; 2: passes the query. */
-  passes(row) {
-    if (row.self && !this.showSelf) return 0;
-    if (!this.pred(row.p)) return 1;
-    return 2;
-  }
-
+  /**
+   * Filters the whole window again. Candidate lines (not markers, not your own hidden reads) are
+   * checked newest first within FILTER_BUDGET_MS: a slow pattern (a /regex/ that backtracks on long
+   * lines) stops early instead of freezing the tab, and the lines it did not reach are neither shown
+   * nor counted; the notice, a marker, the count, the empty state and the export menu say so.
+   */
   refilter() {
     this.filterGen += 1;
     const counts = new Array(this.families.length).fill(0);
@@ -1863,19 +2101,31 @@ class LogsView {
     let selfHidden = 0;
     let matches = 0;
     this.facets = FACETS.map(() => new Map());
-    for (const row of this.rows) {
-      if (row.marker) {
-        vis.push(row);
-        continue;
-      }
+    const cand = [];
+    for (let i = this.rows.length - 1; i >= 0; i -= 1) {
+      const row = this.rows[i];
+      if (row.marker) continue;
       row.fs = 0;
-      const r = this.passes(row);
-      if (r === 0) {
+      if (row.self && !this.showSelf) {
         selfHidden += 1;
         row.fs = FS_SELF;
         continue;
       }
-      if (r === 1) continue;
+      cand.push(row);
+    }
+    const res = this.q.filterTimed(cand, (row) => this.pred(row.p), FILTER_BUDGET_MS);
+    const pass = new Set(res.rows);
+    // Lines past `checked` (older) were not reached: kept apart, oldest first.
+    this.unchecked = res.complete ? [] : cand.slice(res.checked).reverse();
+    const oldest = !res.complete && res.checked ? cand[res.checked - 1] : null;
+    const cutSeq = res.complete ? -Infinity : oldest ? oldest.seq : Infinity;
+    this.appendCut = [];
+    for (const row of this.rows) {
+      if (row.marker) {
+        if (row.seq > cutSeq) vis.push(row);
+        continue;
+      }
+      if (!pass.has(row)) continue;
       const famOn = !this.famOff.has(row.fam);
       if (famOn && row.time !== null) {
         times.push(row.time);
@@ -1898,7 +2148,17 @@ class LogsView {
       }
     }
     // Markers between nothing are noise: drop leading/consecutive markers in the visible list.
-    this.visible = this.withDividers(this.tidyMarkers(vis));
+    const tidy = this.tidyMarkers(vis);
+    if (!res.complete) {
+      let at = null;
+      for (let i = res.checked - 1; i >= 0 && at === null; i -= 1) if (cand[i].time !== null) at = cand[i].time;
+      this.filterCut = { ms: Math.round(res.ms), checked: res.checked, total: cand.length, time: at };
+      // Above the oldest checked line (or alone, when none was checked): the lines above were not checked.
+      tidy.unshift(this.cutMarker(oldest ? oldest.seq : (this.rows.length ? this.rows[this.rows.length - 1].seq + 0.5 : 0)));
+    } else {
+      this.filterCut = null;
+    }
+    this.visible = this.withDividers(tidy);
     this.famCounts = counts;
     this.selfHidden = selfHidden;
     this.matchCount = matches;
@@ -1910,6 +2170,12 @@ class LogsView {
     else if (anchor) this.list.restore(anchor, (seq) => this.indexOfSeq(seq));
     this.unseen = 0;
     this.renderAll();
+  }
+
+  /** The marker above the oldest line a time-boxed refilter checked; `seq` sorts it just before that line. */
+  cutMarker(seq) {
+    const ms = this.filterCut ? this.filterCut.ms : FILTER_BUDGET_MS;
+    return { seq: seq - 0.75, line: '', p: null, fam: 'other', famIx: 0, time: null, self: false, sid: null, len: 0, pl: 0, marker: { kind: 'cut', text: `Lines above were not checked: the filter stopped after ${ms} ms` } };
   }
 
   tidyMarkers(vis) {
@@ -1949,23 +2215,35 @@ class LogsView {
     return { seq: row.seq - 0.5, line: '', p: null, fam: 'other', famIx: 0, time: row.time, self: false, sid: null, len: 0, pl: 0, marker: { kind: 'day', text: dayLabel(row.time), zoned: Boolean(row.p && row.p.zoned) } };
   }
 
+  /**
+   * Filters only the lines a read added, within APPEND_BUDGET_MS. When the filter cannot keep up, the
+   * lines it did not reach are not shown, and the live tail pauses until the query changes.
+   */
   filterAppend(added) {
     const from = this.visible.length;
     let visibleAdded = 0;
     let pendingMarker = null;
+    const cand = [];
+    for (const row of added) {
+      if (row.marker) continue;
+      row.fs = 0;
+      if (row.self && !this.showSelf) {
+        this.selfHidden += 1;
+        row.fs = FS_SELF;
+        continue;
+      }
+      cand.push(row);
+    }
+    const res = this.q.filterTimed(cand, (row) => this.pred(row.p), APPEND_BUDGET_MS);
+    const pass = new Set(res.rows);
+    const late = res.complete ? null : new Set(cand.slice(res.checked));
     for (const row of added) {
       if (row.marker) {
         pendingMarker = row;
         continue;
       }
-      row.fs = 0;
-      const r = this.passes(row);
-      if (r === 0) {
-        this.selfHidden += 1;
-        row.fs = FS_SELF;
-        continue;
-      }
-      if (r === 1) continue;
+      if (late && late.has(row)) continue;
+      if (!pass.has(row)) continue;
       const famOn = !this.famOff.has(row.fam);
       if (famOn && row.time !== null) {
         this.hist.times.push(row.time);
@@ -1996,6 +2274,16 @@ class LogsView {
           row.fs |= FS_MATCH;
         }
       }
+    }
+    if (late) {
+      for (const row of late) this.appendCut.push(row);
+      if (!this.paused) {
+        this.paused = true;
+        clearTimeout(this.timers.poll);
+        this.renderLive();
+      }
+      this.notice = { kind: 'warn', tag: 'append', text: `Live paused: the filter needed more than ${APPEND_BUDGET_MS} ms for the new lines; unchecked lines are not shown. Change the query, then resume (space).` };
+      this.renderNotice();
     }
     if (this.visible.length > from) {
       // When following, afterIngest() scrolls to the end and draws once there.
@@ -2052,7 +2340,7 @@ class LogsView {
       next = `${base ? `${base} ` : ''}time>=${fmt(lo)} time<=${fmt(hi)}`;
     }
     this.setQuery(next.trim());
-    this.ctx.ui.announce(range ? `Time range ${clock(range.lo)} to ${clock(range.hi)} UTC` : 'Time range cleared');
+    this.ctx.ui.announce(range ? `Time range ${clock(range.lo)} to ${clock(range.hi)} (${this.zoneShort()})` : 'Time range cleared');
   }
 
   setQuery(text) {
@@ -2165,7 +2453,7 @@ class LogsView {
 
   /** The paint key: rows measured under another key are measured (and painted) again. */
   updatePaintKey() {
-    const key = `${this.compact ? 'c' : 'r'}${this.twoLineMode() ? '2' : '1'}|${this.compact ? this.singleHost || '' : ''}`;
+    const key = `${this.compact ? 'c' : 'r'}${this.twoLineMode() ? '2' : '1'}|${this.compact ? this.singleHost || '' : ''}|${this.zoneName || ''}`;
     const changed = key !== this.pkey;
     this.pkey = key;
     return changed;
@@ -2231,8 +2519,10 @@ class LogsView {
 
   tsToken(row) {
     const p = row.p;
-    const zone = p.zoned ? 'UTC' : 'device clock, no zone in the line (read as UTC)';
-    return { t: 'ts', v: shortClock(row.time, hasMs(p)), title: `${p.ts} · ${zone}` };
+    let zone;
+    if (this.zoneName) zone = p.zoned ? `shown in the device zone ${this.zoneName} (configured)` : `no zone in the line; read in the device zone ${this.zoneName} (configured)`;
+    else zone = p.zoned ? 'UTC' : 'device clock, no zone in the line (read as UTC)';
+    return { t: 'ts', v: shortClock(row.time, hasMs(p)), title: `${this.lp.escapeControls(p.ts)} · ${zone}` };
   }
 
   /** Header edits for a compact non-RT_FLOW line: [{s, e, rep}] over the raw line, sorted. */
@@ -2457,10 +2747,17 @@ class LogsView {
       cell.className = 'lg-day-text';
       const zone = document.createElement('span');
       zone.className = 'lg-day-zone';
-      zone.textContent = row.marker.zoned ? 'times in UTC' : 'device clock, read as UTC';
-      zone.title = row.marker.zoned
-        ? 'The lines carry their time zone; times are shown in UTC.'
-        : 'These lines carry no time zone. J-Wicket reads them as UTC; if the device logs in local time, times are off by its UTC offset.';
+      if (this.zoneName) {
+        zone.textContent = `times in ${this.zoneName} (device zone, configured)`;
+        zone.title = row.marker.zoned
+          ? `The lines carry their time zone; times are shown in the device's configured zone ${this.zoneName}.`
+          : `These lines carry no time zone; J-Wicket reads them in the device's configured zone ${this.zoneName}. A time-zone change takes effect for all processes only after a reboot.`;
+      } else {
+        zone.textContent = row.marker.zoned ? 'times in UTC' : 'device clock, read as UTC';
+        zone.title = row.marker.zoned
+          ? 'The lines carry their time zone; times are shown in UTC.'
+          : 'These lines carry no time zone. J-Wicket reads them as UTC; if the device logs in local time, times are off by its UTC offset.';
+      }
       cell.append(document.createTextNode(row.marker.text), zone);
       node.append(cell);
       return node;
@@ -2470,7 +2767,7 @@ class LogsView {
       const cell = document.createElement('span');
       cell.setAttribute('role', 'gridcell');
       cell.className = 'lg-marker-text';
-      cell.append(this.dom.icon(row.marker.kind === 'reset' ? 'refresh' : 'alert'), document.createTextNode(row.marker.text));
+      cell.append(this.dom.icon(row.marker.kind === 'reset' ? 'refresh' : row.marker.kind === 'cut' ? 'filter' : 'alert'), document.createTextNode(row.marker.text));
       node.append(cell);
       return node;
     }
@@ -2663,7 +2960,10 @@ class LogsView {
     }
     let j = i + delta;
     j = Math.max(0, Math.min(this.visible.length - 1, j));
-    while (this.visible[j] && this.visible[j].marker && j > 0 && j < this.visible.length - 1) j += delta > 0 ? 1 : -1;
+    // Step over markers (day headers, cut and gap notes) in the direction of travel, staying in
+    // bounds: a list that starts with a day header must still let j select its first line.
+    const step = delta > 0 ? 1 : -1;
+    while (this.visible[j] && this.visible[j].marker && j + step >= 0 && j + step < this.visible.length) j += step;
     const row = this.visible[j];
     if (!row || row.marker) return;
     if (this.follow && delta < 0) {
@@ -2806,12 +3106,14 @@ class LogsView {
     const f = p.fields || {};
     const fl = p.flow;
     const real = (v) => (isPlaceholder(v) ? null : String(v));
+    // "unknown" is one of Junos's documented close reasons, not a placeholder (LOG-05).
+    const realReason = (v) => (v === null || v === undefined || this.lp.isPlaceholderValue('reason', v) ? null : String(v));
     const src = fl ? fl.src : hostOnly(f['source-address']);
     const dst = fl ? fl.dst : hostOnly(f['destination-address']);
     const dportRaw = fl ? fl.dport : f['destination-port'];
     const dport = dportRaw !== null && dportRaw !== undefined && /^\d+$/.test(String(dportRaw)) ? String(dportRaw) : null;
     const policy = fl ? fl.policy : real(f['policy-name']);
-    const reason = fl ? (fl.reason && !isPlaceholder(fl.reason) ? fl.reason : null) : real(f.reason);
+    const reason = realReason(fl ? fl.reason : f.reason);
     const from = fl ? fl.from : real(f['source-zone-name']);
     const to = fl ? fl.to : real(f['destination-zone-name']);
     const pair = from || to ? [from, to] : null;
@@ -2877,7 +3179,8 @@ class LogsView {
                     title: `${label}: ${this.lp.escapeControls(value)} · ${this.fmt.plural(n, 'line')}. Click to filter, Alt-click to exclude.`,
                   },
                   bar,
-                  h('span', { class: 'lg-fc-v mono' }, this.vis(value)),
+                  id === 'reason' ? this.reasonDot(value) : null,
+                  h('span', { class: 'lg-fc-v mono dev-text' }, this.vis(value)),
                   h('span', { class: 'lg-fc-n mono' }, this.fmt.num(n)),
                 ),
               );
@@ -2910,6 +3213,40 @@ class LogsView {
       term = this.tokenTerm({ t: 'val', v: value, k: def[2] });
     }
     if (term) this.addTerm(term, e.altKey);
+  }
+
+  // ---- close reasons (LOG-06) ----------------------------------------------------------------------
+
+  /** Title of a close reason: documented (Table 2) with J-Wicket's group, or shown as written. */
+  reasonTitle(cr) {
+    if (!cr) return null;
+    if (!cr.documented) return "Not in Junos's documented close reasons; shown as written.";
+    return `${cr.text}: a documented Junos close reason (Session Close Log Fields, Table 2); J-Wicket groups it as ${cr.group}.`;
+  }
+
+  /** A close-reason pill coloured by J-Wicket's group (an undocumented reason is muted). */
+  closePill(reason, { small = false } = {}) {
+    const { h } = this.dom;
+    const cr = this.lp.closeReason(reason);
+    if (!cr) return h('span', { class: ['pill', 'muted', small && 'lg-cr-sm'] }, 'closed');
+    const group = cr.documented ? cr.group : 'other';
+    return h(
+      'span',
+      { class: ['pill', CR_PILL[group] || 'muted', `cr-${group}`, !cr.documented && 'cr-undoc', small && 'lg-cr-sm', 'dev-text'], title: this.reasonTitle(cr) },
+      this.vis(reason),
+    );
+  }
+
+  /** The group dot in the Reasons facet. A reason seen only on DENY lines keeps the denied style. */
+  reasonDot(value) {
+    const { h } = this.dom;
+    const cr = this.lp.closeReason(value);
+    if (!cr) return null;
+    if (!cr.documented && this.denyReasons.has(value)) {
+      return h('span', { class: 'lg-fc-dot cr-deny', 'aria-hidden': 'true', title: 'A deny reason (RT_FLOW_SESSION_DENY), shown as written.' });
+    }
+    const group = cr.documented ? cr.group : 'other';
+    return h('span', { class: ['lg-fc-dot', `cr-${group}`, !cr.documented && 'cr-undoc'], 'aria-hidden': 'true', title: this.reasonTitle(cr) });
   }
 
   renderHost() {
@@ -2982,7 +3319,7 @@ class LogsView {
     const fmt = (ms) => isoNoZone(Math.floor(ms / 60000) * 60000).slice(0, 16);
     this.setQuery(`${base ? `${base} ` : ''}time>=${fmt(lo)} time<=${fmt(hi + 60000)}`);
     if (this.bar) this.bar.focus();
-    this.ctx.ui.toast('Edit the two times in the query (UTC); report and buffer sources ask the device for that range.', 'info');
+    this.ctx.ui.toast(`Edit the two times in the query (${this.zoneShort()}); report and buffer sources send them to the device as written.`, 'info');
   }
 
   renderAges() {
@@ -3009,6 +3346,18 @@ class LogsView {
     const base = this.q.FIELDS.logs;
     const out = Object.assign({}, base);
     for (const sym of Object.getOwnPropertySymbols(base)) Object.defineProperty(out, sym, { value: base[sym], enumerable: false });
+    // time: and age: follow the clock the times are shown in (LG-02); without the device zone they are
+    // exactly the parser's time, as before.
+    if (base.time) out.time = { ...base.time, get: (r) => this.frameOf(r) };
+    if (base.age) {
+      out.age = {
+        ...base.age,
+        get: (r, c) => {
+          const t = this.instantOf(r);
+          return Number.isFinite(t) ? ((c && c.now) || Date.now()) / 1000 - t / 1000 : null;
+        },
+      };
+    }
     if (base.app) {
       out.app = {
         ...base.app,
@@ -3031,9 +3380,91 @@ class LogsView {
       this.renderLive();
       this.renderFoot();
     } else {
+      // Lines a read's filter did not reach are checked again (newest first, time-boxed) first.
+      if (this.appendCut.length) this.refilter();
       this.renderLive();
       if (!this.inflight) this.poll(false);
     }
+  }
+
+  /** The shell's idle pause (no operator input): reads wait in api.js; the pill and footer say so. */
+  setIdle(idle) {
+    if (this.dead || idle === this.idle) return;
+    this.idle = idle;
+    this.renderLive();
+    this.renderFoot();
+  }
+
+  // ---- device time zone (LG-02) -------------------------------------------------------------------
+
+  /** The configured device zone when this browser can convert to it (an IANA name), else null. */
+  deviceZone() {
+    const inv = this.ctx.store.lastInventory;
+    const dz = this.fmt.deviceZone(inv ? inv.clock : null);
+    return dz && dz.convertible && dz.zone ? dz.zone : null;
+  }
+
+  /** The zone times are shown in: the device zone while the toggle is on, else null (UTC frame). */
+  activeZone() {
+    return this.zoneOn ? this.deviceZone() : null;
+  }
+
+  /**
+   * The time a line is drawn and filtered at (the "frame"). Without the device zone: as written, read
+   * as UTC (zone-less lines), or UTC (lines that carry a zone). With it: zone-less lines as written
+   * (read in the configured zone), and lines with a zone converted to it.
+   */
+  frameOf(p) {
+    if (!p || !Number.isFinite(p.time)) return null;
+    if (p.zoned && this.zoneName) return p.time + zoneOffset(p.time, this.zoneName);
+    return p.time;
+  }
+
+  /** The real instant of a line, for ages: a zone-less time is read in the device zone when it is on. */
+  instantOf(p) {
+    if (!p || !Number.isFinite(p.time)) return null;
+    if (!p.zoned && this.zoneName) {
+      const u = this.fmt.naiveToUtc(p.time, this.zoneName);
+      return Number.isFinite(u) ? u : p.time;
+    }
+    return p.time;
+  }
+
+  toggleZone() {
+    this.zoneOn = !this.zoneOn;
+    prefSet(PREF.zone, this.zoneOn ? '1' : '0');
+    this.applyZone();
+    this.ctx.ui.announce(this.zoneName ? `Times shown in the device zone ${this.zoneName}.` : 'Times shown as written, read as UTC.');
+  }
+
+  /** The zone frame changed: every row's time, the paint, the filter and the chart follow. */
+  applyZone() {
+    this.zoneName = this.activeZone();
+    this.newestFrame = null;
+    for (const row of this.rows) {
+      if (row.marker) continue;
+      row.time = this.frameOf(row.p);
+      if (row.time !== null && (this.newestFrame === null || row.time > this.newestFrame)) this.newestFrame = row.time;
+    }
+    this.applyQuery(this.queryText, this.bar ? this.bar.parsed : this.q.parse(this.queryText, { view: 'logs' }), { silent: true });
+    this.repaint();
+    this.renderSub();
+    if (this.panelSeq !== null) {
+      const row = this.bySeq.get(this.panelSeq);
+      if (row) this.openDetail(row);
+    }
+  }
+
+  /** "UTC", "device clock" or the device zone: the clock of the times shown, short. */
+  zoneShort() {
+    if (this.zoneName) return this.zoneName;
+    return this.zoneNote() === 'UTC' ? 'UTC' : 'device clock';
+  }
+
+  /** The clock of one line's time, short. */
+  zoneTag(p) {
+    if (this.zoneName) return this.zoneName;
+    return p && p.zoned ? 'UTC' : 'device clock';
   }
 
   setInterval(s) {
@@ -3054,9 +3485,9 @@ class LogsView {
     this.ctx.ui.copy(text, n ? `Log line copied; ${this.fmt.plural(n, 'hidden character')} written as <U+XXXX>.` : 'Log line copied.');
   }
 
-  retryButton(fn) {
+  retryButton(fn, label = 'Try again') {
     const { h, icon } = this.dom;
-    return h('button', { class: 'btn sm', type: 'button', on: { click: fn } }, icon('refresh'), 'Try again');
+    return h('button', { class: 'btn sm', type: 'button', on: { click: fn } }, icon('refresh'), label);
   }
 
   // ---- export -------------------------------------------------------------------------------------
@@ -3106,6 +3537,9 @@ class LogsView {
       item('log', 'Raw lines (.log)', 'exactly as the device wrote them'),
       item('csv', 'CSV (.csv)', 'time, tag, addresses, policy, line'),
       item('json', 'JSON (.json)', 'lines with parsed fields'),
+      this.uncheckedCount()
+        ? h('p', { class: 'lg-menu-note is-cut' }, `Exports only the ${this.fmt.plural(count, 'line')} shown: the filter stopped before checking ${this.fmt.plural(this.uncheckedCount(), 'line')}, which are not included.`)
+        : null,
       h('p', { class: 'lg-menu-note' }, 'Made in this browser from what is on screen; no device read, no row cap.'),
     );
     this.exportWrap.append(this.menu);
@@ -3169,7 +3603,7 @@ class LogsView {
             p.host, p.daemon, p.tag, r.fam, Number.isInteger(p.severity) ? (this.lp.SEVERITIES || [])[p.severity] : '',
             val(f['source-address']), val(f['source-port']), val(f['destination-address']), val(f['destination-port']),
             fl.protocol || val(f['protocol-id']) || val(f.protocol), val(f['policy-name']), val(f['source-zone-name']), val(f['destination-zone-name']),
-            r.sid || '', val(f.reason), r.line,
+            r.sid || '', this.lp.isPlaceholderValue('reason', f.reason) ? '' : f.reason, r.line,
           ].map(csvCell).join(','),
         );
       }
@@ -3220,15 +3654,20 @@ class LogsView {
         'div',
         { class: 'lg-d-head' },
         h('span', { class: ['lg-d-fam', `fam-${row.fam}`] }, h('span', { class: 'lg-fam-sw', 'aria-hidden': 'true' }), famLabel),
-        p.tag ? h('span', { class: ['lg-d-tag', 'mono', `fam-${row.fam}`] }, p.tag) : null,
+        p.tag ? h('span', { class: ['lg-d-tag', 'mono', 'dev-text', `fam-${row.fam}`] }, this.vis(p.tag)) : null,
         sev ? h('span', { class: ['pill', p.severity <= 3 ? 'deny' : p.severity === 4 ? 'reject' : 'muted'], title: p.severitySource ? `severity from ${p.severitySource}` : null }, sev) : null,
         row.self ? h('span', { class: 'pill gold', title: this.selfNote || '' }, 'your J-Wicket read') : null,
         h('span', { class: 'spacer' }),
         h(
           'span',
-          { class: 'lg-d-time mono', title: p.zoned ? `As written: ${p.ts}` : `As written: ${p.ts || '(no time)'}. The line carries no time zone; J-Wicket reads it as UTC. If the device logs in local time, this is off by its UTC offset.` },
-          row.time !== null ? stampMs(row.time, hasMs(p)) : p.ts || 'no time',
-          row.time !== null ? h('span', { class: 'lg-d-zone' }, p.zoned ? ' UTC' : ' device clock') : null,
+          {
+            class: 'lg-d-time mono',
+            title: this.zoneName
+              ? `As written: ${this.lp.escapeControls(p.ts || '(no time)')}. Shown in the device's configured zone ${this.zoneName}${p.zoned ? '' : ' (the line carries no zone; J-Wicket reads it in that zone)'}.`
+              : p.zoned ? `As written: ${this.lp.escapeControls(p.ts)}` : `As written: ${this.lp.escapeControls(p.ts || '(no time)')}. The line carries no time zone; J-Wicket reads it as UTC. If the device logs in local time, this is off by its UTC offset.`,
+          },
+          row.time !== null ? stampMs(row.time, hasMs(p)) : this.vis(p.ts || 'no time'),
+          row.time !== null ? h('span', { class: 'lg-d-zone' }, ` ${this.zoneTag(p)}`) : null,
         ),
       ),
     );
@@ -3295,7 +3734,8 @@ class LogsView {
     const policy = fl.policy
       ? h('button', { class: 'policy-link', type: 'button', title: `Open policy ${this.lp.escapeControls(fl.policy)} in Policies`, on: { click: () => this.ctx.navigate('policies', { q: `name:${quoteValue(fl.policy, true)}`, sel: policySel(this.ctx.store.policyIndex(), fl.policy, fl.from, fl.to) }) } }, this.vis(fl.policy))
       : h('span', { class: 'faint mono' }, 'no policy');
-    const verdict = row.fam === 'deny' ? h('span', { class: 'pill deny' }, 'denied') : row.fam === 'close' ? h('span', { class: 'pill teal' }, this.vis(fl.reason || 'closed')) : h('span', { class: 'pill permit' }, 'permitted');
+    // Deny lines keep the denied style and never get a close-reason badge.
+    const verdict = row.fam === 'deny' ? h('span', { class: 'pill deny' }, 'denied') : row.fam === 'close' ? this.closePill(fl.reason) : h('span', { class: 'pill permit' }, 'permitted');
     const nat = [];
     if (fl.snat) nat.push(h('div', { class: 'lg-d-nat' }, h('span', { class: 'pill violet' }, 'SNAT'), h('span', { class: 'mono' }, hp(fl.src, fl.sport)), icon('arrow'), h('span', { class: 'mono nat' }, hp(fl.natSrc, fl.natSport)), fl.snatRule ? h('span', { class: 'faint' }, `rule ${fl.snatRule}`) : null));
     if (fl.dnat) nat.push(h('div', { class: 'lg-d-nat' }, h('span', { class: 'pill violet' }, 'DNAT'), h('span', { class: 'mono' }, hp(fl.dst, fl.dport)), icon('arrow'), h('span', { class: 'mono nat' }, hp(fl.natDst, fl.natDport)), fl.dnatRule ? h('span', { class: 'faint' }, `rule ${fl.dnatRule}`) : null));
@@ -3355,7 +3795,11 @@ class LogsView {
     const items = shown.map((r) => {
       const f = r.p.flow || {};
       let what = '';
-      if (r.fam === 'close') what = [f.reason, f.elapsed !== null ? this.fmt.duration(f.elapsed) : null, f.bytesClient !== null || f.bytesServer !== null ? `${this.fmt.num((f.bytesClient || 0) + (f.bytesServer || 0))} B` : null].filter(Boolean).join(SEP);
+      let pill = null;
+      if (r.fam === 'close') {
+        pill = this.closePill(f.reason, { small: true });
+        what = [f.elapsed !== null ? this.fmt.duration(f.elapsed) : null, f.bytesClient !== null || f.bytesServer !== null ? `${this.fmt.num((f.bytesClient || 0) + (f.bytesServer || 0))} B` : null].filter(Boolean).join(SEP);
+      }
       else if (r.fam === 'create') what = [f.policy ? `via ${f.policy}` : null, f.snat ? `SNAT ${f.natSrc}:${f.natSport}` : null, f.dnat ? `DNAT \u2192 ${f.natDst}:${f.natDport}` : null].filter(Boolean).join(SEP);
       else what = [f.policy ? `by ${f.policy}` : null, f.sport !== null ? `from port ${f.sport}` : null, f.reason].filter(Boolean).join(SEP);
       return h(
@@ -3364,7 +3808,7 @@ class LogsView {
         h('span', { class: 'lg-tl-dot', 'aria-hidden': 'true' }),
         h('span', { class: 'lg-tl-time mono' }, r.time !== null ? stampMs(r.time, hasMs(r.p)).slice(11) : '?'),
         h('span', { class: ['lg-tl-ev', `fam-${r.fam}`] }, evLabel[r.fam] || r.fam),
-        h('span', { class: 'lg-tl-what' }, this.vis(what || '\u2014')),
+        h('span', { class: 'lg-tl-what dev-text' }, pill, pill && what ? ' ' : null, pill && !what ? null : this.vis(what || '\u2014')),
         r.seq === row.seq
           ? h('span', { class: 'pill gold' }, 'this line')
           : h('button', { class: 'btn ghost sm', type: 'button', on: { click: () => { const v = this.indexOfSeq(r.seq) >= 0; if (v) this.select(r, { scroll: true, open: true }); else this.openDetail(r); } } }, 'Show'),
@@ -3391,7 +3835,7 @@ class LogsView {
     return h(
       'section',
       { class: 'panel-section' },
-      h('h3', null, 'Session timeline', h('span', { class: 'lg-d-h3note' }, this.zoneNote() === 'UTC' ? ' \u00b7 times UTC' : ' \u00b7 device clock')),
+      h('h3', null, 'Session timeline', h('span', { class: 'lg-d-h3note' }, ` \u00b7 ${this.zoneShort() === 'UTC' ? 'times UTC' : this.zoneShort()}`)),
       h('div', { class: 'lg-d-tlhead' }, h('b', null, title), h('span', { class: 'faint' }, `${this.fmt.plural(related.length, 'line')} in this window`), h('span', { class: 'spacer' }), filterBtn),
       h('ol', { class: 'lg-tl' }, items),
       missing.length ? h('ul', { class: 'lg-d-missing' }, missing.map((m) => h('li', null, m))) : null,
@@ -3428,7 +3872,7 @@ class LogsView {
       return;
     }
     el.hidden = false;
-    const at = row.time !== null ? `${stampMs(row.time, hasMs(row.p)).slice(11)} ${row.p.zoned ? 'UTC' : '(device clock)'}` : null;
+    const at = row.time !== null ? `${stampMs(row.time, hasMs(row.p)).slice(11)} ${this.zoneName || row.p.zoned ? this.zoneTag(row.p) : '(device clock)'}` : null;
     const terms = this.sessionTerms(fl, null);
     const go = (sel) => this.ctx.navigate('sessions', sel ? { q: terms, sel } : { q: terms });
     const btn = (label, sel) => h('button', { class: 'btn sm', type: 'button', title: `Sessions with ${terms}`, on: { click: () => go(sel) } }, icon('sessions'), label);
@@ -3436,7 +3880,7 @@ class LogsView {
       put(
         el,
         h('span', { class: 'lg-live-dot is-closed', 'aria-hidden': 'true' }),
-        h('span', null, h('b', null, 'Closed'), at ? ` at ${at}` : '', fl.elapsed !== null ? ` after ${this.fmt.duration(fl.elapsed)}` : '', fl.reason ? ' (' : '', fl.reason ? this.vis(fl.reason) : '', fl.reason ? ')' : '', '. This line is the end of the session.'),
+        h('span', null, h('b', null, 'Closed'), at ? ` at ${at}` : '', fl.elapsed !== null ? ` after ${this.fmt.duration(fl.elapsed)}` : '', fl.reason ? [' ', this.closePill(fl.reason, { small: true })] : '', '. This line is the end of the session.'),
         btn('Same flow in Sessions now'),
       );
       return;
@@ -3475,7 +3919,7 @@ class LogsView {
     const closed = row.sid ? this.rows.find((r) => !r.marker && r.sid === row.sid && r.fam === 'close' && r.seq > row.seq) : null;
     if (closed) {
       const cf = closed.p.flow || {};
-      put(el, h('span', { class: 'lg-live-dot is-closed', 'aria-hidden': 'true' }), h('span', null, h('b', null, 'Closed'), closed.time !== null ? ` at ${stampMs(closed.time, hasMs(closed.p)).slice(11)}` : '', cf.reason ? [' (', this.vis(cf.reason), ')'] : '', ': its CLOSE line is in this window (timeline above).'));
+      put(el, h('span', { class: 'lg-live-dot is-closed', 'aria-hidden': 'true' }), h('span', null, h('b', null, 'Closed'), closed.time !== null ? ` at ${stampMs(closed.time, hasMs(closed.p)).slice(11)}` : '', cf.reason ? [' ', this.closePill(cf.reason, { small: true })] : '', ': its CLOSE line is in this window (timeline above).'));
       return;
     }
     if (hit) {
@@ -3539,13 +3983,14 @@ class LogsView {
     const add = (label, value, key, opts = {}) => {
       if (value === null || value === undefined || value === '') return;
       const v = String(value);
-      const ph = isPlaceholder(v);
+      // "unknown" is a documented close reason: kept for the reason field (LOG-05).
+      const ph = this.lp.isPlaceholderValue(label, v);
       const term = opts.term !== undefined ? opts.term : ph ? null : key ? termText(key, v) : null;
       rows.push(
         h(
           'tr',
           { class: ph ? 'is-ph' : null },
-          h('th', { scope: 'row', class: 'mono' }, label),
+          h('th', { scope: 'row', class: 'mono dev-text' }, this.vis(label)),
           h('td', { class: 'mono' }, opts.cls ? h('span', { class: opts.cls }, this.vis(v)) : this.vis(v)),
           h(
             'td',
@@ -3573,7 +4018,7 @@ class LogsView {
     for (const k of keys) {
       const qk = fieldKeys.get(k.toLowerCase()) || null;
       const cls = /address/.test(k) ? (/^nat-/.test(k) ? 'nat' : 'ip') : /interface/.test(k) ? 'iface' : null;
-      add(k, fields[k], qk, { cls, term: isPlaceholder(fields[k]) ? null : this.tokenTerm({ t: 'val', v: String(fields[k]), k: qk }) });
+      add(k, fields[k], qk, { cls, term: this.lp.isPlaceholderValue(k, fields[k]) ? null : this.tokenTerm({ t: 'val', v: String(fields[k]), k: qk }) });
     }
     const fieldsTable = rows.length ? h('table', { class: 'lg-d-fields' }, h('tbody', null, rows.splice(0))) : null;
     // Lines without structured data: the typed tokens of the message are a second table.
@@ -3617,7 +4062,7 @@ class LogsView {
 
   showState(opts) {
     const { put, stateCard, skeleton, h } = this.dom;
-    const bad = ['denied', 'unsupported', 'failed', 'offline', 'session-lost'].includes(opts.status);
+    const bad = ['denied', 'unsupported', 'failed', 'offline', 'session-lost', 'busy', 'internal'].includes(opts.status);
     // Nothing was read: the explanation sits right under the header, not centred in an empty frame,
     // and the timeline and stream step aside.
     const block = bad && !this.rows.length;
@@ -3687,13 +4132,17 @@ class LogsView {
     if (this.selfHidden === total) why.push('your own J-Wicket reads being hidden');
     const dev = this.plan && this.plan.device && Object.keys(this.plan.device).length;
     const devNote = dev && this.queryText ? ` The device returned these ${this.fmt.plural(total, 'line')} for the gold terms; the exact field match in the browser then left none.` : '';
-    const key = `${total}|${why.join(',')}`;
+    const unchecked = this.uncheckedCount();
+    const checked = Math.max(0, total - this.selfHidden - unchecked);
+    const key = `${total}|${why.join(',')}|${unchecked}`;
     if (this.stateKind === 'nomatch' && this.noMatchKey === key) return;
     this.noMatchKey = key;
     this.showState({
       status: 'empty',
       kind: 'nomatch',
-      title: `None of the ${this.fmt.plural(total, 'line')} in this window match`,
+      title: unchecked
+        ? `None of the ${this.fmt.num(checked)} lines checked match; the filter stopped before the rest`
+        : `None of the ${this.fmt.plural(total, 'line')} in this window match`,
       message: why.length ? `Filtered out by ${why.join(' and ')}.${devNote}` : null,
       hint: 'New lines that match appear here as they arrive.',
       actions,
@@ -3701,7 +4150,30 @@ class LogsView {
     });
   }
 
+  /** Lines the filter has not checked: older ones a refilter did not reach, and new ones of a read. */
+  uncheckedCount() {
+    return this.unchecked.length + this.appendCut.length;
+  }
+
+  /** The query bar's notice while a refilter stopped early; a complete refilter clears it. */
+  renderCut() {
+    if (!this.bar) return;
+    const c = this.filterCut;
+    if (!c || !this.unchecked.length) {
+      if (this.cutShown) this.bar.setNotice('');
+      this.cutShown = false;
+      return;
+    }
+    const time = c.time !== null ? `${clock(c.time)} ${this.zoneShort()}` : 'the oldest line checked';
+    this.bar.setNotice(
+      `Filter stopped after ${c.ms} ms at line ${this.fmt.num(c.checked)} of ${this.fmt.num(c.total)} (newest first, back to ${time}). Older lines were not checked and are not shown. Use a plain word or a keyed term, simplify the /regex/, or keep fewer lines.`,
+      'warn',
+    );
+    this.cutShown = true;
+  }
+
   renderAll() {
+    this.renderCut();
     this.renderFams();
     this.renderBar();
     this.renderMatchNav();
@@ -3719,8 +4191,9 @@ class LogsView {
     this.renderFacets();
   }
 
-  /** "UTC" when the newest line carries its zone; else the device clock, read as UTC. */
+  /** "UTC" when the newest line carries its zone; else the device clock, read as UTC; or the device zone. */
   zoneNote() {
+    if (this.zoneName) return `device zone ${this.zoneName} (configured)`;
     for (let i = this.rows.length - 1; i >= 0 && i >= this.rows.length - 50; i -= 1) {
       const r = this.rows[i];
       if (!r.marker && r.time !== null) return r.p.zoned ? 'UTC' : 'device clock, read as UTC';
@@ -3753,7 +4226,7 @@ class LogsView {
     if (sel) {
       put(
         this.rangeEl,
-        h('span', { class: 'lg-range-txt' }, icon('clock'), h('b', { class: 'mono' }, `${clock(sel.lo)} \u2013 ${clock(sel.hi)}`), h('span', { class: 'faint' }, this.zoneNote() === 'UTC' ? 'UTC' : 'device clock')),
+        h('span', { class: 'lg-range-txt' }, icon('clock'), h('b', { class: 'mono' }, `${clock(sel.lo)} \u2013 ${clock(sel.hi)}`), h('span', { class: 'faint' }, this.zoneShort())),
         h('button', { class: 'btn ghost sm', type: 'button', title: 'Clear the time range (double-click the chart)', on: { click: () => this.onBrush(null) } }, icon('close'), 'Clear'),
       );
     } else {
@@ -3800,9 +4273,20 @@ class LogsView {
       put(this.countEl, this.countNum, this.countOf, this.countWord, this.countWin);
     }
     tick(this.countNum, this.fmt.num(shown));
-    this.countOf.textContent = shown !== total ? ` of ${this.fmt.num(total)}` : '';
-    this.countWord.textContent = ` ${total === 1 && shown === total ? 'line' : 'lines'}`;
-    this.countWin.textContent = ` \u00b7 keeps ${this.fmt.compact(this.windowMax)}`;
+    const unchecked = this.uncheckedCount();
+    if (unchecked) {
+      // The filter stopped early: say how many lines were checked at all.
+      const checked = Math.max(0, total - this.selfHidden - unchecked);
+      this.countOf.textContent = ` of ${this.fmt.num(checked)} checked`;
+      this.countWord.textContent = ` \u00b7 ${this.fmt.num(total)} in window`;
+      this.countWin.textContent = '';
+      this.countEl.title = `The filter checked ${this.fmt.plural(checked, 'line')}; ${this.fmt.plural(unchecked, 'line')} were not checked and are not shown.`;
+    } else {
+      this.countOf.textContent = shown !== total ? ` of ${this.fmt.num(total)}` : '';
+      this.countWord.textContent = ` ${total === 1 && shown === total ? 'line' : 'lines'}`;
+      this.countWin.textContent = ` \u00b7 keeps ${this.fmt.compact(this.windowMax)}`;
+      this.countEl.removeAttribute('title');
+    }
     if (this.selfHidden || this.showSelf) {
       put(
         this.selfEl,
@@ -3884,27 +4368,46 @@ class LogsView {
     const { h, put } = this.dom;
     const can = this.src && !this.failed && this.liveCapable();
     const live = can && !this.paused;
-    this.livePill.className = `live-pill${live ? '' : ' paused'}`;
+    // The shell's idle pause: the tail is on, but reads wait for operator activity (SL-08).
+    const idle = live && this.idle;
+    this.livePill.className = `live-pill${live && !idle ? '' : ' paused'}${idle ? ' lg-idle' : ''}`;
     this.livePill.disabled = !can;
     put(
       this.livePill,
       h('span', { class: 'dot', 'aria-hidden': 'true' }),
-      live ? 'LIVE' : can ? 'PAUSED' : 'STOPPED',
-      h('span', { class: 'sub' }, live ? `${this.interval} s` : can ? 'space' : ''),
+      idle ? 'PAUSED' : live ? 'LIVE' : can ? 'PAUSED' : 'STOPPED',
+      h('span', { class: 'sub' }, idle ? 'idle' : live ? `${this.interval} s` : can ? 'space' : ''),
     );
     this.livePill.setAttribute('aria-pressed', live ? 'false' : 'true');
-    this.livePill.setAttribute('aria-label', live ? `Live: reading new lines every ${this.interval} s. Pause (space).` : can ? 'Paused. Resume the live tail (space).' : 'The live tail is stopped.');
-    this.livePill.title = live ? 'Pause the live tail (space)' : can ? 'Resume the live tail (space)' : 'Nothing to tail';
+    this.livePill.setAttribute('aria-label', idle ? IDLE_LABEL : live ? `Live: reading new lines every ${this.interval} s. Pause (space).` : can ? 'Paused. Resume the live tail (space).' : 'The live tail is stopped.');
+    this.livePill.title = idle ? IDLE_LABEL : live ? 'Pause the live tail (space)' : can ? 'Resume the live tail (space)' : 'Nothing to tail';
     for (const b of this.ivSeg.querySelectorAll('button')) b.setAttribute('aria-pressed', Number(b.dataset.s) === this.interval ? 'true' : 'false');
     this.ctx.ui.setLive('logs', Boolean(live));
   }
 
+  /**
+   * LG-02: the toggle for the device's configured time zone, shown when this browser can convert to
+   * it. "Configured", never "in effect": Junos applies a time-zone change to every process only after
+   * a reboot.
+   */
+  renderZoneBtn() {
+    const zone = this.deviceZone();
+    this.zoneBtn.hidden = !zone;
+    if (!zone) return;
+    this.zoneBtn.textContent = `Show times in the device zone (${zone}, configured)`;
+    this.zoneBtn.setAttribute('aria-pressed', this.zoneName ? 'true' : 'false');
+    this.zoneBtn.title = this.zoneName
+      ? `Times are shown in ${zone}, the time zone in the device's configuration; lines without a zone are read in it. Click to show them as written, read as UTC.`
+      : `Read lines without a zone in ${zone}, the time zone in the device's configuration, and show every time in it. A time-zone change takes effect for all processes only after a reboot.`;
+  }
+
   renderSub() {
     const { h, put } = this.dom;
+    this.renderZoneBtn();
     const s = this.src;
     if (!s) return;
     const scope = this.ctx.store.scope;
-    const parts = [h('b', { class: 'mono' }, s.kind === 'report' ? `report ${this.reportType}` : s.kind === 'buffer' ? 'security log buffer' : s.label)];
+    const parts = [h('b', { class: 'mono dev-text' }, s.kind === 'report' ? `report ${this.reportType}` : s.kind === 'buffer' ? 'security log buffer' : this.vis(s.label))];
     if (s.kind === 'file') parts.push(h('span', null, 'tail with a cursor: each read returns only new lines'));
     else if (s.kind === 'buffer') parts.push(h('span', null, 'each read asks for events since the newest one seen'));
     else parts.push(h('span', null, 'each read moves the start time to the newest line seen'));
@@ -3924,19 +4427,39 @@ class LogsView {
     const { h, put } = this.dom;
     const parts = [];
     const lr = this.lastRead;
-    if (this.inflight) parts.push(h('span', { class: 'lg-reading' }, 'reading\u2026'));
-    else if (lr) parts.push(h('span', { class: lr.ok ? null : 'act-deny' }, `${lr.ok ? 'read' : 'read failed'} ${clock(lr.at)} (${this.fmt.ago(lr.at)})`));
-    if (!this.inflight && this.nextAt && !this.paused && this.liveCapable()) {
+    const L = this.limited;
+    if (this.idle && !this.paused && this.liveCapable()) {
+      // Reads wait in api.js while the shell's idle pause holds; "reading…" would be untrue.
+      parts.push(h('span', null, 'paused: no activity'));
+    } else if (this.inflight) {
+      parts.push(h('span', { class: 'lg-reading' }, 'reading\u2026'));
+    } else if (L && this.src && L.src === this.src.id) {
+      // In place of the stale "read … ago": the reads were refused by J-Wicket's own floor or a busy read.
+      const next = this.nextAt ? Math.max(0, Math.ceil((this.nextAt - Date.now()) / 1000)) : L.retryAfter;
+      parts.push(h('span', { class: 'act-reject', title: L.reason === 'busy' ? 'Another read on your session was still running.' : 'J-Wicket reads each source at most once every few seconds per signed-in session; another tab or window of this session is reading too.' }, `rate-limited \u00d7${L.n}`));
+      if (!this.paused) parts.push(h('span', null, `next in ${next} s`));
+    } else if (lr) {
+      parts.push(h('span', { class: lr.ok ? null : 'act-deny' }, `${lr.ok ? 'read' : 'read failed'} ${clock(lr.at)} (${this.fmt.ago(lr.at)})`));
+    }
+    if (!this.inflight && !L && this.nextAt && !this.paused && !this.idle && this.liveCapable()) {
       const s = Math.max(0, Math.ceil((this.nextAt - Date.now()) / 1000));
       parts.push(h('span', null, `next in ${s} s`));
     } else if (this.paused) parts.push(h('span', null, 'paused'));
     const di = this.deviceInfo;
     if (di && this.src && this.src.kind === 'file' && Number.isFinite(di.window)) {
-      parts.push(h('span', null, `device window ${this.fmt.num(di.window)} lines`));
-      if (di.dropped) parts.push(h('span', { title: 'The first read returns the newest matching lines only' }, `${this.fmt.num(di.dropped)} older not read`));
+      const num = (n) => this.fmt.num(n);
+      if (di.initial) {
+        // The first read: how much of the device's window the newest lines came from.
+        if (di.devTerms) parts.push(h('span', { title: 'The device filtered its whole window with the gold terms; the newest matches were returned.' }, `${num(di.returned)} of ${num(di.window)} lines in the device window match`));
+        else parts.push(h('span', null, `device window ${num(di.window)} lines`));
+      } else if (di.scanned !== null) {
+        if (di.devTerms) parts.push(h('span', null, `last read: ${num(di.scanned)} new ${di.scanned === 1 ? 'line' : 'lines'} on the device, ${num(di.returned)} matched the device filter`));
+        else parts.push(h('span', null, `last read: ${num(di.scanned)} new ${di.scanned === 1 ? 'line' : 'lines'}`));
+      }
+      if (di.dropped) parts.push(h('span', { title: 'The first read returns the newest matching lines only' }, `${num(di.dropped)} older not read`));
     }
     if (di && this.src && this.src.kind === 'report' && di.limited) parts.push(h('span', { class: 'act-reject' }, `report limit ${this.fmt.num(REPORT_COUNT)} reached`));
-    if (this.newest !== null && this.src && this.src.kind !== 'file') parts.push(h('span', null, `newest ${clock(this.newest)}`));
+    if (this.newestFrame !== null && this.src && this.src.kind !== 'file') parts.push(h('span', null, `newest ${clock(this.newestFrame)}${this.zoneName ? ` ${this.zoneName}` : ''}`));
     if (this.meta && this.meta.fixture) parts.push(h('span', { class: 'pill gold' }, 'fixture'));
     if (this.selfHidden && !this.showSelf) {
       parts.push(h('span', { class: 'lg-foot-note', title: this.selfNote }, this.selfNote || 'Junos logs every J-Wicket read as UI_NETCONF_CMD; yours are hidden.'));

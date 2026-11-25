@@ -1,0 +1,7 @@
+<!-- SYNTHETIC. A release older than 23.1R1, so the on-box report queries are not offered; not captured. -->
+<software-information>
+  <host-name>logs-fw-01</host-name>
+  <product-model>srx550m</product-model>
+  <product-name>srx550m</product-name>
+  <junos-version>22.4R3</junos-version>
+</software-information>

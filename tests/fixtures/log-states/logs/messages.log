@@ -1,0 +1,4 @@
+Nov 23 22:00:01 logs-fw-01 /kernel: SYNTHETIC FIXTURE: log lines below are illustrative, not captured from a device
+Nov 23 22:00:19 logs-fw-01 mgd[1402]: UI_COMMIT_COMPLETED: commit complete
+Nov 24 06:10:02 logs-fw-01 sshd[2211]: Accepted password for admin from 10.10.0.20 port 51022 ssh2
+Nov 24 06:10:03 logs-fw-01 mgd[2214]: UI_LOGIN_EVENT: User 'admin' login, class 'j-super-user' [2214], ssh-connection '10.10.0.20 51022 10.10.0.1 22', client-mode 'cli'

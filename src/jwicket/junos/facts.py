@@ -11,11 +11,16 @@ node or as a flat repeated sequence, and reports ``unknown`` rather than guessin
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from jwicket.junos.xmlutil import Element, active_path, is_inactive, kid, kids, local, text, text_of
 
 Json = Dict[str, Any]
+
+# What J-Wicket accepts as a configured time-zone value: IANA names ("Europe/Paris"), "UTC" and
+# GMT offsets ("GMT+8"). Anything else is reported as not recognised rather than shown.
+_TIME_ZONE = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
 
 def software(reply: Element) -> Json:
     """Hostname, model and release. In a cluster the reply holds one item per node."""
@@ -88,6 +93,35 @@ def standalone() -> Json:
 def mnha_configured(config: Optional[Element]) -> bool:
     """Multinode High Availability is configured and in effect (not deactivated, nor its chassis)."""
     return active_path(config, "chassis", "high-availability") is not None
+
+
+def time_zone(config: Optional[Element]) -> Json:
+    """The configured ``system time-zone``, as written (the snapshot's ``clock``).
+
+    * Not configured: ``configured`` false and ``time_zone`` null, so the Junos default, UTC, applies
+      (verified: the HPE time-zone statement page).
+    * Deactivated (the statement or ``system``): ``configured`` false, the written value in
+      ``deactivated``. That it is then not in effect is inferred.
+    * A change takes effect for all processes only after a reboot (verified caveat), so this is the
+      *configured* zone, never "the zone in effect".
+
+    J-Wicket never assumes UTC when the configuration was not read: ``config`` None is a failed read.
+    """
+    if config is None:
+        return {"status": "failed", "message": "The time zone was not read."}
+    system = kid(config, "system")
+    node = kid(system, "time-zone")
+    base: Json = {"status": "ok", "time_zone": None, "configured": False, "deactivated": None,
+                  "source": "configuration"}
+    if node is None:
+        return base
+    # The text exactly as written: a value with spaces or control characters is not one J-Wicket shows.
+    value = node.text if isinstance(node.text, str) else None
+    if value is None or not _TIME_ZONE.match(value):
+        return {"status": "failed", "message": "The configured time zone is not a value J-Wicket recognises."}
+    if is_inactive(system) or is_inactive(node):
+        return {**base, "deactivated": value}
+    return {**base, "time_zone": value, "configured": True}
 
 
 def central_management(config: Optional[Element]) -> Json:

@@ -1,0 +1,79 @@
+<!-- SYNTHETIC. Shaped like <get-configuration database="committed" inherit="inherit" groups="groups">
+     on Junos 24.4; not captured from a device. See tests/fixtures/README.md.
+     log-states: the log source states J-Wicket reports. A deactivated syslog file; no "messages" file,
+     so messages is assumed; security log mode stream-event (so the routing engine's buffer is a
+     source); four streams (a remote host, a RADIUS server, a local stream file, and a deactivated
+     one); on-box reporting, security log disable and security log format binary. The stream child
+     tags (host, radius/ipaddr/primary, file/localfilename) are J-Wicket's inferred reading of the
+     YANG and documentation (src/jwicket/junos/logs.py, _stream), not verified against a device. -->
+<configuration xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <system>
+    <syslog>
+      <file>
+        <name>interactive-commands</name>
+        <contents><name>interactive-commands</name><any/></contents>
+      </file>
+      <file inactive="inactive">
+        <name>traffic-old</name>
+        <contents><name>any</name><any/></contents>
+        <match>RT_FLOW_SESSION</match>
+        <structured-data/>
+      </file>
+    </syslog>
+  </system>
+  <security>
+    <log>
+      <mode>stream-event</mode>
+      <format>binary</format>
+      <disable/>
+      <report/>
+      <stream>
+        <name>to-siem</name>
+        <format>sd-syslog</format>
+        <host><ipaddr>192.0.2.50</ipaddr><port>514</port></host>
+      </stream>
+      <stream>
+        <name>to-radius</name>
+        <radius><ipaddr><primary>192.0.2.60</primary></ipaddr></radius>
+      </stream>
+      <stream>
+        <name>local-copy</name>
+        <format>sd-syslog</format>
+        <file><localfilename>traffic-stream.log</localfilename></file>
+      </stream>
+      <stream inactive="inactive">
+        <name>old-collector</name>
+        <host><ipaddr>198.51.100.40</ipaddr></host>
+      </stream>
+    </log>
+    <zones>
+      <security-zone>
+        <name>trust</name>
+        <interfaces><name>ge-0/0/1.0</name></interfaces>
+      </security-zone>
+      <security-zone>
+        <name>untrust</name>
+        <interfaces><name>ge-0/0/0.0</name></interfaces>
+      </security-zone>
+    </zones>
+    <policies>
+      <policy>
+        <from-zone-name>trust</from-zone-name>
+        <to-zone-name>untrust</to-zone-name>
+        <policy>
+          <name>allow-out</name>
+          <match>
+            <source-address>any</source-address>
+            <destination-address>any</destination-address>
+            <application>any</application>
+          </match>
+          <then>
+            <permit/>
+            <log><session-close/></log>
+          </then>
+        </policy>
+      </policy>
+      <default-policy><deny-all/></default-policy>
+    </policies>
+  </security>
+</configuration>

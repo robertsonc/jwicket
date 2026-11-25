@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from xml.etree import ElementTree
 
-from jwicket.api import App, build_router
+from jwicket.api import App, build_router, record_session_end
 from jwicket.auth.sessions import SessionStore
 from jwicket.auth.throttle import LoginThrottle
 from jwicket.logs import AuditTrail
@@ -141,7 +141,7 @@ def make_app(
     warnings: Optional[List[str]] = None,
 ) -> App:
     clock = clock or FakeClock()
-    return App(
+    app = App(
         backend=backend,
         sessions=SessionStore(
             idle_s=900, absolute_s=3600, max_sessions=max_sessions, max_per_user=max_per_user, clock=clock
@@ -153,6 +153,9 @@ def make_app(
         mono_clock=clock,
         extra_warnings=list(warnings or []),
     )
+    # As app.build_app wires it: idle, absolute and shutdown ends reach the audit trail.
+    app.sessions.on_end = lambda sess, reason: record_session_end(app, sess, reason)
+    return app
 
 
 class Reply:

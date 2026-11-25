@@ -20,6 +20,8 @@
 // J-Wicket cannot decide (a predefined application port it does not know, an address compared with a
 // DNS name) is unknown, so the view keeps the policy and says why instead of hiding it.
 
+import { CLOSE_REASONS } from './logparse.js';
+
 // --- errors -----------------------------------------------------------------------------------------
 
 class QueryError extends Error {
@@ -622,10 +624,32 @@ function resolveKey(fields, key) {
   return name ? { name, def: fields[name] } : null;
 }
 
-const PROTO_NUM = { icmp: 1, igmp: 2, tcp: 6, udp: 17, gre: 47, esp: 50, ah: 51, icmp6: 58, icmpv6: 58, ospf: 89, pim: 103, sctp: 132 };
-const NUM_PROTO = { 1: 'icmp', 2: 'igmp', 6: 'tcp', 17: 'udp', 47: 'gre', 50: 'esp', 51: 'ah', 58: 'icmp6', 89: 'ospf', 103: 'pim', 132: 'sctp' };
+// IANA protocol numbers (verified). "ipip" has none here: IANA lists both 4 (IPv4 encapsulation) and
+// 94 (IPIP), and which one Junos means by the keyword is not known.
+const PROTO_NUM = { icmp: 1, igmp: 2, tcp: 6, egp: 8, udp: 17, rsvp: 46, gre: 47, esp: 50, ah: 51, icmp6: 58, icmpv6: 58, ospf: 89, pim: 103, sctp: 132 };
+const NUM_PROTO = { 1: 'icmp', 2: 'igmp', 6: 'tcp', 8: 'egp', 17: 'udp', 46: 'rsvp', 47: 'gre', 50: 'esp', 51: 'ah', 58: 'icmp6', 89: 'ospf', 103: 'pim', 132: 'sctp' };
 
-function protoNames(p) {
+/**
+ * The 14 protocol keywords `get-flow-session-information` accepts for `protocol` (or a number 0..255):
+ * the CLI reference page "show security flow session" (verified). The 24.4R2 YANG leaf `protocol` is a
+ * free string with no keywords or range, and the page "show security flow session protocol" lists only
+ * 13 (no icmp6), a documentation inconsistency.
+ */
+export const SESSION_PROTOCOLS = Object.freeze(['ah', 'egp', 'esp', 'gre', 'icmp', 'icmp6', 'igmp', 'ipip', 'ospf', 'pim', 'rsvp', 'sctp', 'tcp', 'udp']);
+
+/**
+ * The `application` values `get-flow-session-information` accepts: the 24 values of its `application`
+ * enumeration in the Juniper 24.4R2 YANG (verified), described there as "Application protocol name":
+ * application-protocol types, not application names such as junos-https. The CLI reference says
+ * "Predefined application name" instead; what a device answers for junos-https is not known, so other
+ * names are filtered in the browser.
+ */
+export const SESSION_APPS = Object.freeze(['dns', 'ftp', 'ignore', 'mgcp-ca', 'mgcp-ua', 'ms-rpc', 'pptp', 'sun-rpc', 'q931', 'ras',
+  'realaudio', 'rsh', 'rtsp', 'sccp', 'sip', 'sqlnet-v2', 'talk', 'tftp', 'http', 'https', 'smtp', 'imap', 'ssh', 'telnet']);
+const SESSION_APP_SET = new Set(SESSION_APPS);
+
+/** A protocol as every name it goes by: "tcp" -> ["tcp", "6"], "17" -> ["udp", "17"], "ipip" -> ["ipip"]. */
+export function protoNames(p) {
   if (p === null || p === undefined || p === '') return [];
   const s = String(p).trim().toLowerCase();
   if (/^\d+$/.test(s)) return NUM_PROTO[s] ? [NUM_PROTO[s], s] : [s];
@@ -716,9 +740,86 @@ function sessionZones(row, ctx, side) {
   return z ? z[side] || [] : [];
 }
 
+// --- chassis-cluster copies of a session --------------------------------------------------------------
+
+/**
+ * The HA role a session row carries, if any: 'active', 'backup', 'standalone', 'warm' or null. The
+ * reply tags vary by release, so `state` and `status` are read first (Active or Backup), then any extra
+ * key that looks like a state, role, HA or status field.
+ */
+export function sessionRole(row) {
+  if (!row || typeof row !== 'object') return null;
+  for (const v of [row.state, row.status]) {
+    const m = /^\s*(active|backup)\s*$/i.exec(String(v ?? ''));
+    if (m) return m[1].toLowerCase();
+  }
+  for (const [k, v] of Object.entries(row.extra || {})) {
+    if (!/state|role|ha|status/i.test(k)) continue;
+    const m = /^\s*(active|backup|stand-?alone|warm)\s*$/i.exec(String(v ?? ''));
+    if (m) return m[1].toLowerCase().replace('-', '');
+  }
+  return null;
+}
+
+const counter = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+const sessionTraffic = (row) => counter(wing(row, 'in').bytes) + counter(wing(row, 'out').bytes) + counter(wing(row, 'in').packets) + counter(wing(row, 'out').packets);
+
+/**
+ * On a chassis cluster each node lists a session, so a list holds two copies of it. Which rows are
+ * the backup copies: `{ backups: Set<row.id>, why: Map<row.id, string>, groups }`.
+ *   1. A row the device marks Backup (sessionRole) is a backup copy.
+ *   2. Rows with a location (a node) are grouped by session_id. In a group of 2 or more rows where no
+ *      row carries a role, when at least one row has traffic (bytes and packets, both directions), the
+ *      rows with zero counters are taken as backup copies (inferred: zero counters on the backup copy).
+ *   3. Rows without a location (a standalone device) are never inferred to be backups.
+ * `groups` counts session_id groups of 2 or more located rows. The CLI sample of "show security flow
+ * session extensive node all" shows the same Session ID on both nodes, Active and Backup, with zero
+ * counters on the backup (verified for CLI text); the XML list reply is not recorded (Q-REL-01), so the
+ * pairing rests on the XML reply keeping that id.
+ */
+export function sessionCopies(rows) {
+  const backups = new Set();
+  const why = new Map();
+  const bySid = new Map();
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r || typeof r !== 'object') continue;
+    if (sessionRole(r) === 'backup') {
+      backups.add(r.id);
+      why.set(r.id, 'the device marks this copy Backup');
+    }
+    if (!r.location) continue;
+    const key = String(r.session_id ?? r.id);
+    const list = bySid.get(key);
+    if (list) list.push(r);
+    else bySid.set(key, [r]);
+  }
+  let groups = 0;
+  for (const list of bySid.values()) {
+    if (list.length < 2) continue;
+    groups += 1;
+    if (list.some((r) => sessionRole(r) !== null)) continue;
+    const busy = list.filter((r) => sessionTraffic(r) > 0);
+    if (!busy.length || busy.length === list.length) continue;
+    for (const r of list) {
+      if (sessionTraffic(r) > 0) continue;
+      backups.add(r.id);
+      why.set(r.id, 'inferred: the same session on another node, with zero counters');
+    }
+  }
+  return { backups, why, groups };
+}
+
+/** Where PREDEFINED_APPS comes from, for a "catalog" tag's title. */
+export const PREDEFINED_SOURCE = 'J-Wicket’s own table of junos-defaults applications (protocol and destination port), not read from this device and not checked against a Juniper document';
+
 // Predefined Junos applications (junos-defaults) whose protocol and destination port J-Wicket knows.
-// The inventory does not expand junos-defaults, so any other predefined application has a port that
-// is not known here: the policy filter keeps such a policy and marks it instead of guessing.
+// This is J-Wicket's own table of junos-defaults applications (protocol and destination port), not read
+// from this device and not checked against a Juniper document (PREDEFINED_SOURCE). The inventory does
+// not expand junos-defaults, so any other predefined application has a port that is not known here:
+// the policy filter keeps such a policy and marks it instead of guessing.
 export const PREDEFINED_APPS = Object.freeze({
   'junos-http': { protocol: 'tcp', port: '80' },
   'junos-https': { protocol: 'tcp', port: '443' },
@@ -782,18 +883,61 @@ export function policyPorts(row) {
     }
   };
   for (const ref of (row && row.resolved && row.resolved.application) || []) {
+    const skipped = new Set((ref.inactive_skipped || []).map(String));
+    const missing = (n) => (skipped.has(n) ? DEACTIVATED_WHY : 'not found in the configuration');
     if (ref.kind === 'any') out.any = true;
     else if (ref.kind === 'predefined') leaf({ name: ref.name, predefined: true });
     else if (ref.kind === 'dynamic-defaults') out.unknown.push({ name: ref.name, why: 'the dynamic application’s own default ports' });
-    else if (ref.kind === 'unresolved') out.unknown.push({ name: ref.name, why: 'not found in the configuration' });
+    else if (ref.kind === 'unresolved') out.unknown.push({ name: ref.name, why: missing(ref.name) });
     else (ref.leaves || []).forEach(leaf);
-    for (const n of ref.unresolved || []) if (n !== ref.name) out.unknown.push({ name: n, why: 'not found in the configuration' });
+    const seen = new Set([ref.name]);
+    for (const n of ref.unresolved || []) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      out.unknown.push({ name: n, why: missing(n) });
+    }
+    for (const n of skipped) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      out.unknown.push({ name: n, why: DEACTIVATED_WHY });
+    }
   }
   if (row && typeof row === 'object') PORTS_CACHE.set(row, out);
   return out;
 }
 
+const DEACTIVATED_WHY = 'deactivated in the configuration (not in effect)';
+
+/**
+ * The name part of an address ref's inactive_skipped entries ("book:name") that match `name`: the entry
+ * itself, or (book-less) its name part. Book names are taken to hold no ":" (inferred).
+ */
+function addrSkipped(ref) {
+  const entries = (ref.inactive_skipped || []).map(String);
+  const names = new Set();
+  for (const e of entries) {
+    names.add(e);
+    const colon = e.indexOf(':');
+    if (colon > 0) names.add(e.slice(colon + 1));
+  }
+  return { entries, has: (n) => names.has(String(n)) };
+}
+
 const PORT_ANY = '0-65535';
+
+/** A policy's configuration comments (annotate): its own, those inside it, and its zone pair's. */
+function policyComments(r) {
+  if (!r) return [];
+  return [r.comment, ...(Array.isArray(r.part_comments) ? r.part_comments : []).map((c) => c && c.text), r.pair_comment]
+    .filter((x) => typeof x === 'string' && x !== '');
+}
+
+/** A `match` list of a policy row ([] when absent). */
+function matchList(r, key) {
+  const v = r && r.match ? r.match[key] : null;
+  if (Array.isArray(v)) return v.filter((x) => x !== null && x !== undefined && x !== '');
+  return v === null || v === undefined || v === '' ? [] : [v];
+}
 
 function policyAddr(row, side) {
   const m = row.match || {};
@@ -822,9 +966,23 @@ export function policyAddrUnknown(row, side) {
   const sides = side === 'both' ? ['source', 'destination'] : [side];
   for (const sd of sides) {
     for (const ref of (row && row.resolved && row.resolved[sd]) || []) {
-      if (ref.kind === 'unresolved') out.push({ name: ref.name, why: 'not found in an address book' });
+      const skipped = addrSkipped(ref);
+      const missing = (n) => (skipped.has(n) ? DEACTIVATED_WHY : 'not found in an address book');
+      const seen = new Set([ref.name]);
+      if (ref.kind === 'unresolved') out.push({ name: ref.name, why: missing(ref.name) });
       if (ref.truncated) out.push({ name: ref.name, why: 'address set longer than J-Wicket lists' });
-      for (const n of ref.unresolved || []) if (n !== ref.name) out.push({ name: n, why: 'not found in an address book' });
+      for (const n of ref.unresolved || []) {
+        if (seen.has(n)) continue;
+        seen.add(n);
+        out.push({ name: n, why: missing(n) });
+      }
+      for (const e of skipped.entries) {
+        const colon = e.indexOf(':');
+        const n = colon > 0 ? e.slice(colon + 1) : e;
+        if (seen.has(n) || seen.has(e)) continue;
+        seen.add(n);
+        out.push({ name: n, why: DEACTIVATED_WHY });
+      }
       for (const l of ref.leaves || []) {
         if (l.kind === 'dns') out.push({ name: l.name, why: `DNS name ${l.value || ''}`.trim() });
         else if (l.kind === 'wildcard') out.push({ name: l.name, why: `wildcard address ${l.value || ''}`.trim() });
@@ -894,8 +1052,8 @@ export const FIELDS = {
     dst: { aliases: ['destination', 'dstip', 'dip', 'destination-address', 'destination-prefix'], type: 'ip', device: true, label: 'destination address as the client sent it', get: (r) => wing(r, 'in').dst, values: (rows) => topValues(rows, (r) => wing(r, 'in').dst) },
     sport: { aliases: ['srcport', 'source-port'], type: 'int', device: true, label: 'client port', get: (r) => wing(r, 'in').sport },
     dport: { aliases: ['port', 'dstport', 'destination-port'], type: 'int', device: true, label: 'destination port', get: (r) => wing(r, 'in').dport, values: (rows) => topValues(rows, (r) => wing(r, 'in').dport) },
-    proto: { aliases: ['protocol'], type: 'enum', device: true, label: 'protocol (tcp, udp, icmp or a number)', get: (r) => protoNames(wing(r, 'in').proto), values: (rows) => merge(topValues(rows, (r) => wing(r, 'in').proto), ['tcp', 'udp', 'icmp']) },
-    app: { aliases: ['application'], type: 'text', device: true, label: 'application', get: (r) => r.application, values: (rows, inv) => merge(topValues(rows, (r) => r.application), invApps(inv)) },
+    proto: { aliases: ['protocol'], type: 'enum', device: true, label: 'protocol (tcp, udp, icmp or a number)', get: (r) => protoNames(wing(r, 'in').proto), values: (rows) => merge(topValues(rows, (r) => wing(r, 'in').proto), SESSION_PROTOCOLS) },
+    app: { aliases: ['application'], type: 'text', device: true, label: 'application (device filter: application protocol types such as https, ftp, dns, the RPC\u2019s own list; other names filter in the browser)', get: (r) => r.application, values: (rows, inv) => merge(topValues(rows, (r) => r.application), invApps(inv)) },
     iface: { aliases: ['interface', 'if'], type: 'text', device: true, label: 'ingress or egress interface', get: (r) => [wing(r, 'in').iface, wing(r, 'out').iface], values: (rows, inv) => merge(topValues(rows, (r) => [wing(r, 'in').iface, wing(r, 'out').iface]), invIfaces(inv)) },
     ingress: { aliases: ['in', 'iniface'], type: 'text', label: 'ingress interface', get: (r) => wing(r, 'in').iface, values: (rows) => topValues(rows, (r) => wing(r, 'in').iface) },
     egress: { aliases: ['out', 'outiface'], type: 'text', label: 'egress interface', get: (r) => wing(r, 'out').iface, values: (rows) => topValues(rows, (r) => wing(r, 'out').iface) },
@@ -948,7 +1106,7 @@ export const FIELDS = {
     app: { aliases: ['application'], type: 'text', report: 'application', verbatim: true, label: 'application (layer 7)', get: (r) => logField(r, 'application', 'application-name'), values: (rows) => topValues(rows, (r) => logField(r, 'application', 'application-name')) },
     service: { aliases: ['service-name', 'svc'], type: 'text', verbatim: true, label: 'service (junos-https)', get: (r) => logField(r, 'service-name'), values: (rows, inv) => merge(topValues(rows, (r) => logField(r, 'service-name')), invApps(inv)) },
     nested: { aliases: ['nested-application'], type: 'text', verbatim: true, label: 'nested application', get: (r) => logField(r, 'nested-application') },
-    reason: { aliases: ['close-reason'], type: 'text', report: 'reason', verbatim: true, label: 'close or deny reason ("TCP FIN")', get: (r) => logField(r, 'reason'), values: (rows) => topValues(rows, (r) => logField(r, 'reason')) },
+    reason: { aliases: ['close-reason'], type: 'text', report: 'reason', verbatim: true, label: 'close or deny reason ("TCP FIN", "TCP CLIENT RST")', get: (r) => logField(r, 'reason'), values: (rows) => merge(topValues(rows, (r) => logField(r, 'reason')), CLOSE_REASONS.map((c) => c.text)) },
     user: { aliases: ['username'], type: 'text', report: 'username', verbatim: true, label: 'user name', get: (r) => logField(r, 'username'), values: (rows) => topValues(rows, (r) => logField(r, 'username')) },
     iface: { aliases: ['interface', 'packet-incoming-interface', 'interface-name'], type: 'text', verbatim: true, label: 'interface', get: (r) => [logField(r, 'packet-incoming-interface'), logField(r, 'interface-name'), logField(r, 'source-interface-name'), logField(r, 'destination-interface-name')], values: (rows, inv) => merge(invIfaces(inv), topValues(rows, (r) => logField(r, 'packet-incoming-interface', 'interface-name'))) },
     session: { aliases: ['sid', 'session-id', 'id'], type: 'int', report: 'session-id', verbatim: true, label: 'session id', get: (r) => logField(r, 'session-id', 'session-id-32') },
@@ -991,7 +1149,7 @@ export const FIELDS = {
     }, unknown: (r) => policyPorts(r).unknown.length > 0 },
     action: { aliases: ['then'], type: 'enum', label: 'permit, deny or reject', get: (r) => r.action, values: () => ['permit', 'deny', 'reject'] },
     group: { aliases: ['groups', 'apply-group'], type: 'text', label: 'configuration group', get: (r) => merge([r.group], r.groups || []), values: (rows, inv) => merge(((scopeOf(inv) || {}).groups || []).map((g) => g.name), topValues(rows, (r) => r.group)) },
-    inactive: { aliases: ['disabled'], type: 'enum', label: 'yes or no', get: (r) => (r.inactive ? ['yes', 'true', r.inactive_reason || 'policy'] : ['no', 'false']), values: () => ['yes', 'no'] },
+    inactive: { aliases: ['disabled'], type: 'enum', label: 'yes, no, or why: policy, zone-pair, policies, security, scope', get: (r) => (r.inactive ? ['yes', 'true', r.inactive_reason || 'policy'] : ['no', 'false']), values: () => ['yes', 'no', 'policy', 'zone-pair', 'policies', 'security', 'scope'] },
     log: { aliases: ['logging'], type: 'enum', label: 'init, close, yes or none', get: (r) => {
       const l = r.log || {};
       const out = [];
@@ -1005,15 +1163,22 @@ export const FIELDS = {
     kind: { aliases: ['type'], type: 'enum', label: 'zone or global', get: (r) => r.kind, values: () => ['zone', 'global'] },
     seq: { aliases: ['order', 'position'], type: 'int', label: 'position in its zone pair', get: (r) => r.seq },
     desc: { aliases: ['description'], type: 'text', contains: true, label: 'description (substring)', get: (r) => r.description },
+    comment: { aliases: ['comments', 'note', 'annotation'], type: 'text', contains: true, label: 'configuration comment (annotate), substring', get: policyComments },
+    dynapp: { aliases: ['dynamic-application', 'l7'], type: 'text', label: 'dynamic application (unified policies)', get: (r) => matchList(r, 'dynamic_application') },
+    url: { aliases: ['url-category'], type: 'text', label: 'URL category', get: (r) => matchList(r, 'url_category') },
+    identity: { aliases: ['source-identity', 'user'], type: 'text', label: 'source identity', get: (r) => matchList(r, 'source_identity') },
+    profile: { aliases: ['source-end-user-profile'], type: 'text', label: 'source end-user profile', get: (r) => matchList(r, 'source_end_user_profile') },
   }, (r) => [r.name, r.description, ...(r.from || []), ...(r.to || []), r.action, r.group, ...(r.groups || []),
     ...((r.match && r.match.source) || []), ...((r.match && r.match.destination) || []), ...((r.match && r.match.application) || []),
-    ...policyAddr(r, 'both'), r.scheduler, ...(r.application_services || [])].filter(Boolean).join(' ')),
+    ...policyAddr(r, 'both'), r.scheduler, ...(r.application_services || []), ...policyComments(r),
+    ...matchList(r, 'dynamic_application'), ...matchList(r, 'url_category'), ...matchList(r, 'source_identity'),
+    ...matchList(r, 'source_end_user_profile')].filter(Boolean).join(' ')),
 };
 
 const EXAMPLES = {
   sessions: ['dport:443 bytes>1M', 'src:10.10.0.0/16 -app:junos-dns-udp', 'policy:allow-web dur>5m', 'nat:dst zone:dmz', 'proto:udp | proto:icmp'],
-  logs: ['family:deny', 'tag:RT_FLOW_SESSION_CLOSE reason:"TCP FIN"', 'src:10.10.0.0/16 -dport:53', 'policy:allow-web bytes>1M', 'sev>=warning age<15m'],
-  policies: ['action:deny', 'addr:10.10.3.4', 'zone:dmz log:none', 'port:443 -inactive:yes', 'group:corp-baseline'],
+  logs: ['family:deny', 'tag:RT_FLOW_SESSION_CLOSE reason:"TCP FIN"', 'reason:*RST', 'src:10.10.0.0/16 -dport:53', 'policy:allow-web bytes>1M', 'sev>=warning age<15m'],
+  policies: ['action:deny', 'addr:10.10.3.4', 'zone:dmz log:none', 'port:443 -inactive:yes', 'group:corp-baseline', 'comment:CHG'],
 };
 
 // --- validation and compilation ------------------------------------------------------------------------
@@ -1130,8 +1295,618 @@ function makeIpv4Glob(pat) {
   return (lo, hi) => within(Number(lo), Number(hi), 0, start, 0);
 }
 
-// Regular expressions are user input: the text they run over is capped, so one term cannot take
-// seconds per row on long log lines (the views time-box a whole refilter as well).
+// --- regular expressions that can take seconds ----------------------------------------------------------
+//
+// A backtracking pattern such as (a+)+$ takes seconds on one long line. regexRisk() reads the pattern
+// with a small tokenizer (escapes, classes, groups including (?i:...) modifier groups, quantifiers) and
+// refuses these shapes. It is J-Wicket's heuristic, not a proof:
+//   1. a group holding a repeat that is itself repeated (* + {n,} or {n,m} with m > 1): the inner repeat
+//      is unbounded (* + {n,}) or a wide range such as {0,2000}; or the group can match nothing and
+//      holds any repeat, as in (a?){24}; or a part with a choice of length is followed by text it can
+//      also match, as in (\s?\s)+;
+//   2. two unbounded (or wide) repeats whose characters can be the same, with only optional parts
+//      between them (.*.*, \w*\w+, .+\S*) or required parts both can match, holding at most one
+//      different plain character (.*=.*, .*==.*, .*\d\d.*, \w*a\w*; S-9 listed .*=.*zzz as safe, but it is
+//      cubic on a run of '=', 2.4 s on 2048 of them);
+//      a back-reference counts as a repeat of anything; overlap is decided by testing sample
+//      characters, so two classes count as overlapping unless no sample matches both;
+//   3. a back-reference inside a repeated group;
+//   4. a repeated group holding a choice whose branches can start with the same character, as in
+//      (a|aa)+ or (\w|\d)+;
+//   5. a run of bounded optional parts that can match the same text in more than PATH_LIMIT ways, as
+//      in .?.?.?.?.?.?.?.?.?.?.?
+// A pattern the tokenizer cannot read exactly is refused as well: the check fails closed. That covers
+// groups nested deeper than MAX_GROUP_DEPTH, patterns longer than REGEX_SOURCE_MAX (both bound the
+// cost of the check itself), legacy octal escapes such as \075, and \u{...} or \p{...} without the u
+// flag (the engine reads them as a letter and a quantifier). With the u flag, single characters are
+// compared the way the u flag reads them. Patterns with nothing after the second repeat (\S+@\S+,
+// .*:.*) are refused under rule 2 too, although they are at worst quadratic on a capped line: the
+// rule does not look at what follows, and the hint gives the rewrite ([^@\s]+@\S+). Logs also time-boxes
+// a refilter (LOG-02), the second line of defence; Policies, Objects and Sessions filter short texts
+// and have no time box, so they rely on this check and on REGEX_INPUT_MAX.
+
+const RISK_WHY = {
+  nested: 'repeats a repeat',
+  adjacent: 'has two repeats in a row that can match the same text',
+  backref: 'repeats a back-reference',
+  choice: 'repeats a choice whose branches can match the same text',
+  split: 'has two repeats that can both match what is between them',
+  paths: 'can split the same text in too many ways',
+};
+const RISK_HINT = {
+  choice: 'Write the branches so that they start differently (for example a+ instead of (a|aa)+).',
+  split: 'Drop a leading or trailing .* (a match is found anywhere in the text without it), or keep the separator out of the first repeat (for example [^=]*=.* instead of .*=.*).',
+  paths: 'Use fewer optional parts in a row, or smaller {n,m} ranges.',
+};
+const RISK_HINT_DEFAULT = 'Write it without nested or back-to-back repeats (for example a+ instead of (a+)+).';
+
+// A bounded repeat with more choices than this ({0,20}, {0,2000}) counts as unbounded: an unbounded
+// repeat next to it costs (text length x span) per start.
+const WIDE_SPAN = 4;
+// The most ways a run of bounded optional parts may split one piece of text (rule 5).
+const PATH_LIMIT = 1024;
+// Deeper nesting, or a longer pattern, is refused as 'cannot be checked': the walk below revisits
+// nested parts, so these two bound the time the check itself takes.
+const MAX_GROUP_DEPTH = 16;
+const REGEX_SOURCE_MAX = 2048;
+
+class RegexRiskError extends Error {}
+
+/** Thrown by regexTree for syntax it does not read; `at` is the offset of the part it stopped at. */
+class RegexTreeError extends Error {
+  constructor(message, at) {
+    super(message);
+    this.at = at;
+  }
+}
+
+function classEnd(src, i) {
+  let j = i + 1;
+  if (src[j] === '^') j += 1;
+  while (j < src.length) {
+    if (src[j] === '\\') j += 2;
+    else if (src[j] === ']') return j + 1;
+    else j += 1;
+  }
+  throw new RegexTreeError('unclosed class', i);
+}
+
+/** The pattern as a tree; throws RegexTreeError on anything it does not read (regexRisk then refuses). */
+function regexTree(src, { unicode = false } = {}) {
+  const n = src.length;
+  let i = 0;
+  const quant = () => {
+    const c = src[i];
+    let q = null;
+    if (c === '*') q = { min: 0, max: Infinity, len: 1 };
+    else if (c === '+') q = { min: 1, max: Infinity, len: 1 };
+    else if (c === '?') q = { min: 0, max: 1, len: 1 };
+    else if (c === '{') {
+      const m = /^\{(\d+)(,(\d*))?\}/.exec(src.slice(i, i + 24));
+      if (m) {
+        const min = Number(m[1]);
+        const max = m[2] === undefined ? min : m[3] === '' ? Infinity : Number(m[3]);
+        q = { min, max, len: m[0].length };
+      }
+    }
+    if (!q) return null;
+    i += q.len;
+    if (src[i] === '?') i += 1; // lazy
+    return { min: q.min, max: q.max };
+  };
+  const alt = (depth) => {
+    const start = i;
+    const alts = [seq(depth)];
+    while (i < n && src[i] === '|') {
+      i += 1;
+      alts.push(seq(depth));
+    }
+    return { type: 'alt', alts, start, end: i };
+  };
+  const seq = (depth) => {
+    const start = i;
+    const items = [];
+    while (i < n && src[i] !== '|' && !(src[i] === ')' && depth > 0)) items.push(term(depth));
+    return { type: 'seq', items, start, end: i };
+  };
+  const term = (depth) => {
+    const start = i;
+    const c = src[i];
+    let node;
+    if (c === '(') {
+      if (depth >= MAX_GROUP_DEPTH) throw new RegexTreeError('groups nested too deeply', start);
+      i += 1;
+      let look = false;
+      if (src[i] === '?') {
+        const a = src[i + 1];
+        const b = src[i + 2];
+        // Modifier groups (?i:...) (?-i:...) (?i-m:...): a non-capturing group with its own flags.
+        const mod = /^\?[ims]*(?:-[ims]*)?:/.exec(src.slice(i, i + 12));
+        if (a === ':') i += 2;
+        else if (a === '=' || a === '!') { i += 2; look = true; }
+        else if (a === '<' && (b === '=' || b === '!')) { i += 3; look = true; }
+        else if (a === '<') {
+          const close = src.indexOf('>', i + 2);
+          if (close < 0) throw new RegexTreeError('bad group name', start);
+          i = close + 1;
+        } else if (mod) i += mod[0].length;
+        else throw new RegexTreeError('unknown group', start);
+      }
+      const body = alt(depth + 1);
+      if (src[i] !== ')') throw new RegexTreeError('unclosed group', start);
+      i += 1;
+      node = { type: 'group', body, look, start };
+    } else if (c === ')') {
+      throw new RegexTreeError('unbalanced )', start);
+    } else if (c === '[') {
+      i = classEnd(src, i);
+      node = { type: 'atom', src: src.slice(start, i), start };
+    } else if (c === '\\') {
+      const e = src[i + 1];
+      if (e === undefined) throw new RegexTreeError('trailing backslash', start);
+      // \0 followed by a digit is a legacy octal escape (\075 is '='): not read, so refused.
+      if (e === '0' && /\d/.test(src[i + 2] || '')) throw new RegexTreeError('octal escape', start);
+      // Without the u flag the engine reads \u{3} and \p{1,9} as a letter and a quantifier.
+      if (!unicode && (e === 'u' || e === 'p' || e === 'P') && src[i + 2] === '{') throw new RegexTreeError('escape needs the u flag', start);
+      if (/[1-9]/.test(e)) {
+        i += 2;
+        while (/\d/.test(src[i] || '')) i += 1;
+        node = { type: 'backref', start };
+      } else if (e === 'k' && src[i + 2] === '<') {
+        const close = src.indexOf('>', i + 3);
+        if (close < 0) throw new RegexTreeError('bad back-reference', start);
+        i = close + 1;
+        node = { type: 'backref', start };
+      } else if (e === 'b' || e === 'B') {
+        i += 2;
+        node = { type: 'assert', start };
+      } else {
+        if (e === 'x' && /^[0-9a-fA-F]{2}$/.test(src.slice(i + 2, i + 4))) i += 4;
+        else if (e === 'u' && src[i + 2] === '{' && src.indexOf('}', i + 3) > 0) i = src.indexOf('}', i + 3) + 1;
+        else if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(src.slice(i + 2, i + 6))) i += 6;
+        else if ((e === 'p' || e === 'P') && src[i + 2] === '{' && src.indexOf('}', i + 3) > 0) i = src.indexOf('}', i + 3) + 1;
+        else if (e === 'c' && /[A-Za-z]/.test(src[i + 2] || '')) i += 3;
+        else i += 2;
+        node = { type: 'atom', src: src.slice(start, i), start };
+      }
+    } else if (c === '^' || c === '$') {
+      i += 1;
+      node = { type: 'assert', start };
+    } else {
+      const cp = src.codePointAt(i);
+      i += cp > 0xffff ? 2 : 1;
+      node = { type: 'atom', src: src.slice(start, i), start };
+    }
+    const q = quant();
+    if (q) node.q = q;
+    node.end = i;
+    return node;
+  };
+  const tree = alt(0);
+  if (i < n) throw new RegexTreeError('unbalanced )', i);
+  return tree;
+}
+
+// Characters tried when deciding whether two single-character matchers overlap: ASCII, a few common
+// non-ASCII letters and spaces, plus every character written in either matcher (range ends included).
+const SAMPLE_CODES = [...Array.from({ length: 128 }, (_, k) => k), 0xa0, 0xdf, 0xe9, 0x130, 0x17f, 0x2028, 0x212a, 0x3000, 0x4e2d, 0xfeff];
+const SAMPLE = SAMPLE_CODES.map((k) => String.fromCharCode(k));
+const ESCAPED = { t: '\t', n: '\n', r: '\r', v: '\v', f: '\f', 0: '\0' };
+
+function writtenChars(src, unicode = false) {
+  const out = [];
+  for (let k = 0; k < src.length; k += 1) {
+    const c = src[k];
+    if (c !== '\\') {
+      const cp = src.codePointAt(k);
+      if (cp > 0xffff) {
+        // An astral character: the whole character and each half, since without the u flag a class
+        // matches the halves one by one.
+        out.push(String.fromCodePoint(cp), src[k], src[k + 1]);
+        k += 1;
+      } else out.push(c);
+      continue;
+    }
+    const e = src[k + 1];
+    const hex = (len) => {
+      const t = src.slice(k + 2, k + 2 + len);
+      return /^[0-9a-fA-F]+$/.test(t) && t.length === len ? String.fromCharCode(parseInt(t, 16)) : null;
+    };
+    if (e === 'x' && hex(2)) { out.push(hex(2)); k += 3; continue; }
+    if (unicode && e === 'u' && src[k + 2] === '{') {
+      const close = src.indexOf('}', k + 3);
+      const t = close > 0 ? src.slice(k + 3, close) : '';
+      if (/^[0-9a-fA-F]{1,6}$/.test(t) && parseInt(t, 16) <= 0x10ffff) {
+        out.push(String.fromCodePoint(parseInt(t, 16)));
+        k = close;
+        continue;
+      }
+    }
+    if (e === 'u' && hex(4)) { out.push(hex(4)); k += 5; continue; }
+    if (e !== undefined && Object.prototype.hasOwnProperty.call(ESCAPED, e)) out.push(ESCAPED[e]);
+    else if (e !== undefined && !/[dDwWsSbBpPkcux]/.test(e)) out.push(e);
+    k += 1;
+  }
+  return out;
+}
+
+// Overlap is tested case-insensitively always (modifier groups can switch case folding on), and with
+// '.' matching line breaks unless the pattern's own flags say otherwise.
+const ATOM_RE = new Map();
+function atomMatcher(src, dotAll, unicode = false) {
+  const key = `${dotAll ? 's' : '-'}${unicode ? 'u' : '-'}${src}`;
+  if (ATOM_RE.has(key)) return ATOM_RE.get(key);
+  let re = null;
+  // \p{...} means something else without the u flag: treat it as matching anything (regexTree
+  // refuses it there anyway). With the u flag the atom is compiled the way the pattern runs.
+  if (unicode || !/\\[pP]\{/.test(src)) {
+    try {
+      re = new RegExp(`^(?:${src})$`, `i${dotAll ? 's' : ''}${unicode ? 'u' : ''}`);
+    } catch (_e) {
+      re = null;
+    }
+  }
+  if (ATOM_RE.size > 500) ATOM_RE.clear();
+  ATOM_RE.set(key, re);
+  return re;
+}
+
+const ANY_ATOM = '[\\s\\S]';
+
+/** Whether two atoms can match the same character; `dotAll` as for atomMatcher. Memoised per call. */
+function overlapTester(dotAll, unicode = false) {
+  const memo = new Map();
+  const one = (a, b) => {
+    const key = a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+    if (memo.has(key)) return memo.get(key);
+    const ra = atomMatcher(a, dotAll, unicode);
+    const rb = atomMatcher(b, dotAll, unicode);
+    let hit = !ra || !rb; // not sure: assume they overlap
+    if (!hit) for (const ch of new Set([...SAMPLE, ...writtenChars(a, unicode), ...writtenChars(b, unicode)])) if (ra.test(ch) && rb.test(ch)) { hit = true; break; }
+    memo.set(key, hit);
+    return hit;
+  };
+  return (as, bs) => as.some((a) => bs.some((b) => one(a, b)));
+}
+
+/** Every single-character matcher inside a node. */
+function atomsIn(node) {
+  if (!node) return [];
+  if (node.type === 'atom') return [node.src];
+  if (node.type === 'backref') return [ANY_ATOM];
+  if (node.type === 'group') return node.look ? [] : atomsIn(node.body);
+  if (node.type === 'alt') return node.alts.flatMap(atomsIn);
+  if (node.type === 'seq') return node.items.flatMap(atomsIn);
+  return [];
+}
+
+const span = (q) => (q ? (q.max === Infinity ? Infinity : q.max - q.min) : 0);
+const wide = (q) => span(q) > WIDE_SPAN;
+const repeated = (q) => Boolean(q) && (q.max === Infinity || q.max > 1);
+
+/** Whether a node can match the empty string. */
+// Memoised per node: the walk asks the same parts again at every level of nesting.
+const NULLABLE = new WeakMap();
+const FIRST = new WeakMap();
+const LAST = new WeakMap();
+
+function nullableOf(node) {
+  if (NULLABLE.has(node)) return NULLABLE.get(node);
+  const v = nullableRaw(node);
+  NULLABLE.set(node, v);
+  return v;
+}
+
+function nullableRaw(node) {
+  if (node.q && node.q.min === 0) return true;
+  if (node.type === 'atom') return false;
+  if (node.type === 'assert' || node.type === 'backref') return true;
+  if (node.type === 'group') return node.look || nullableOf(node.body);
+  if (node.type === 'alt') return node.alts.some(nullableOf);
+  return node.items.every(nullableOf);
+}
+
+/** The atoms a node can start with (through parts that may match nothing). */
+function firstAtoms(node) {
+  if (FIRST.has(node)) return FIRST.get(node);
+  const v = firstRaw(node);
+  FIRST.set(node, v);
+  return v;
+}
+
+function firstRaw(node) {
+  if (node.type === 'atom') return [node.src];
+  if (node.type === 'backref') return [ANY_ATOM];
+  if (node.type === 'assert') return [];
+  if (node.type === 'group') return node.look ? [] : firstAtoms(node.body);
+  if (node.type === 'alt') return node.alts.flatMap(firstAtoms);
+  const out = [];
+  for (const it of node.items) {
+    out.push(...firstAtoms(it));
+    if (!nullableOf(it)) break;
+  }
+  return out;
+}
+
+function some(node, pred) {
+  if (!node) return false;
+  if (pred(node)) return true;
+  if (node.type === 'group') return some(node.body, pred);
+  if (node.type === 'alt') return node.alts.some((x) => some(x, pred));
+  if (node.type === 'seq') return node.items.some((x) => some(x, pred));
+  return false;
+}
+
+// A plain character ('=', 'a', '\.') as opposed to a class ('.', '\w', '[^=]'). Text has fewer
+// places where two or more different plain characters match in a row than places where one does, so
+// only such a run ('key', not '==') keeps two repeats on either side from sharing the text (rule 2).
+const isLiteral = (src) => !/^(?:\[|\.$|\\[dDwWsSpP])/.test(src);
+
+/** The different plain characters a part must match (lower-cased; none for classes and optional parts). */
+function literalChars(node, unicode = false) {
+  if (node.q && node.q.min === 0) return [];
+  if (node.type === 'atom') {
+    if (!isLiteral(node.src)) return [];
+    // The character itself, so '=', '\x3d' and '\u{3d}' count as one.
+    const written = writtenChars(node.src, unicode);
+    return [(written.length ? written[0] : node.src).toLowerCase()];
+  }
+  if (node.type !== 'group' || node.look) return [];
+  // A choice: the branch with the fewest.
+  let best = null;
+  for (const a of node.body.alts) {
+    const chars = [...new Set(a.items.flatMap((x) => literalChars(x, unicode)))];
+    if (!best || chars.length < best.length) best = chars;
+  }
+  return best || [];
+}
+
+const distinct = (a, b) => new Set([...a, ...b]).size;
+
+/**
+ * Walks the tree; returns the first risky piece as {start, end, why}, or null. Each node also yields
+ * `{nullable, heads, tails}`: the unbounded repeats it can start or end with (reachable through parts
+ * that may match nothing, or across one required character they can both match), so repeats that
+ * meet across a group boundary are found too.
+ */
+function riskOf(tree, { dotAll = true, unicode = false } = {}) {
+  let found = null;
+  const overlap = overlapTester(dotAll, unicode);
+  // Rule 4: a choice inside a repeated group whose branches can start with the same character.
+  const ambiguousChoice = (node) => node.type === 'alt' && node.alts.length > 1 && node.alts.some((a, k) => {
+    const fa = firstAtoms(a);
+    return fa.length > 0 && node.alts.slice(k + 1).some((b) => overlap(fa, firstAtoms(b)));
+  });
+  // Rule 1, bounded repeats: inside a repeated group, a part with a choice of length (a? a{1,3})
+  // whose characters can also be matched by what follows it (the rest of the body, or the next
+  // round of the group) lets the rounds split the same text in many ways, as in (\s?\s)+.
+  const lastAtoms = (node) => {
+    if (LAST.has(node)) return LAST.get(node);
+    const v = lastRaw(node);
+    LAST.set(node, v);
+    return v;
+  };
+  const lastRaw = (node) => {
+    if (node.type === 'atom') return [node.src];
+    if (node.type === 'backref') return [ANY_ATOM];
+    if (node.type === 'assert') return [];
+    if (node.type === 'group') return node.look ? [] : lastAtoms(node.body);
+    if (node.type === 'alt') return node.alts.flatMap(lastAtoms);
+    const out = [];
+    for (let k = node.items.length - 1; k >= 0; k -= 1) {
+      out.push(...lastAtoms(node.items[k]));
+      if (!nullableOf(node.items[k])) break;
+    }
+    return out;
+  };
+  const choiceMeetsFollow = (node, follow) => {
+    if (node.type === 'seq') {
+      return node.items.some((it, k) => {
+        let next = [];
+        let open = true;
+        for (const later of node.items.slice(k + 1)) {
+          next = next.concat(firstAtoms(later));
+          if (!nullableOf(later)) {
+            open = false;
+            break;
+          }
+        }
+        return choiceMeetsFollow(it, open ? next.concat(follow) : next);
+      });
+    }
+    if (node.type === 'alt') return node.alts.some((a) => choiceMeetsFollow(a, follow));
+    if (node.q && node.q.max > node.q.min && overlap(lastAtoms(node), follow)) return true;
+    if (node.type === 'group' && !node.look) return choiceMeetsFollow(node.body, repeated(node.q) ? follow.concat(firstAtoms(node.body)) : follow);
+    return false;
+  };
+  // Rule 2: a repeat before (p) and a repeat after (hd) can share text when their characters overlap
+  // and each can match every part between them, with at most one plain character between them.
+  const meet = (p, hd) => overlap(p.atoms, hd.atoms) && distinct(p.lits, hd.lits) <= 1 && p.seps.every((sp) => overlap(sp, hd.atoms)) && hd.seps.every((sp) => overlap(sp, p.atoms));
+  // Rule 5: how many ways a bounded optional part can match (1 for a part with no choice).
+  const choices = (node) => {
+    const q = node.q;
+    if (q && q.max > q.min && !wide(q)) return q.max - q.min + 1; // wide ones are rules 1 and 2
+    if (!q && node.type === 'group' && !node.look && ambiguousChoice(node.body)) return node.body.alts.length;
+    return 1;
+  };
+  const visit = (node) => {
+    if (found) return { nullable: true, heads: [], tails: [] };
+    if (node.type === 'alt') {
+      const parts = node.alts.map(visit);
+      return { nullable: parts.some((p) => p.nullable), heads: parts.flatMap((p) => p.heads), tails: parts.flatMap((p) => p.tails) };
+    }
+    if (node.type === 'seq') {
+      let pending = [];
+      const heads = [];
+      // The path from the start of this sequence to the current part: open while every part so far
+      // can match nothing, or is a part the repeats around it could share (see `share` below).
+      let prefix = { lits: [], seps: [] };
+      let nullable = true;
+      let run = null; // rule 5: {start, atoms, ways}
+      for (const it of node.items) {
+        const s = visit(it);
+        if (found) break;
+        for (const hd of s.heads) {
+          const hit = pending.find((p) => meet(p, hd));
+          if (hit) {
+            found = { start: hit.start, end: hd.end, why: hit.seps.length || hd.seps.length ? RISK_WHY.split : RISK_WHY.adjacent };
+            break;
+          }
+        }
+        if (found) break;
+        if (it.type !== 'assert') {
+          // A run goes on through optional parts and parts that can match a character the run can;
+          // a required part that cannot ends it.
+          const atoms = atomsIn(it);
+          const ways = choices(it);
+          if (run && (s.nullable || overlap(run.atoms, atoms))) {
+            run.ways *= ways;
+            run.atoms = run.atoms.concat(atoms);
+          } else run = { start: it.start, atoms, ways };
+          if (run.ways > PATH_LIMIT) {
+            found = { start: run.start, end: it.end, why: RISK_WHY.paths };
+            break;
+          }
+        }
+        if (prefix) {
+          for (const hd of s.heads) {
+            if (distinct(prefix.lits, hd.lits) <= 1) heads.push({ ...hd, lits: [...new Set([...prefix.lits, ...hd.lits])], seps: prefix.seps.concat(hd.seps) });
+          }
+        }
+        nullable = nullable && s.nullable;
+        // Required parts between two repeats that can all be matched by both (X*=X*, .*\d\d.*) still
+        // let the repeats share the text, unless the parts hold two or more plain characters
+        // (.*key.* is kept; .*==.* is not): such a part is a `share`, kept on the repeats on either side.
+        const share = !s.nullable && !s.tails.length && !s.heads.length ? { atoms: atomsIn(it), lits: literalChars(it, unicode) } : null;
+        if (s.nullable) {
+          pending = pending.concat(s.tails);
+        } else if (share && share.atoms.length) {
+          const join = (x) => [...new Set([...x, ...share.lits])];
+          pending = pending.filter((p) => join(p.lits).length <= 1 && overlap(p.atoms, share.atoms)).map((p) => ({ ...p, lits: join(p.lits), seps: p.seps.concat([share.atoms]) }));
+          if (prefix) prefix = join(prefix.lits).length <= 1 ? { lits: join(prefix.lits), seps: prefix.seps.concat([share.atoms]) } : null;
+        } else {
+          pending = s.tails.slice();
+          prefix = null;
+        }
+      }
+      return { nullable, heads, tails: pending };
+    }
+    const q = node.q || null;
+    const optional = Boolean(q && q.min === 0);
+    if (node.type === 'assert') return { nullable: true, heads: [], tails: [] };
+    if (node.type === 'backref') {
+      // A back-reference matches text as long as its group's, so it counts as a repeat of anything.
+      const rep = { start: node.start, end: node.end, atoms: [ANY_ATOM], lits: [], seps: [] };
+      return { nullable: true, heads: [rep], tails: [rep] };
+    }
+    if (node.type === 'atom') {
+      if (wide(q)) {
+        const rep = { start: node.start, end: node.end, atoms: [node.src], lits: [], seps: [] };
+        return { nullable: optional, heads: [rep], tails: [rep] };
+      }
+      return { nullable: optional, heads: [], tails: [] };
+    }
+    // group
+    if (repeated(q) && !node.look) {
+      const inner = node.body;
+      if (some(inner, (x) => wide(x.q)) || (nullableOf(inner) && some(inner, (x) => Boolean(x.q))) || choiceMeetsFollow(inner, firstAtoms(inner))) {
+        found = { start: node.start, end: node.end, why: RISK_WHY.nested };
+        return { nullable: true, heads: [], tails: [] };
+      }
+      if (some(inner, (x) => x.type === 'backref')) {
+        found = { start: node.start, end: node.end, why: RISK_WHY.backref };
+        return { nullable: true, heads: [], tails: [] };
+      }
+      if (some(inner, (x) => !(x.type === 'group' && x.look) && ambiguousChoice(x))) {
+        found = { start: node.start, end: node.end, why: RISK_WHY.choice };
+        return { nullable: true, heads: [], tails: [] };
+      }
+    }
+    const body = visit(node.body);
+    if (node.look) return { nullable: true, heads: [], tails: [] };
+    if (wide(q)) {
+      const rep = { start: node.start, end: node.end, atoms: atomsIn(node.body), lits: [], seps: [] };
+      return { nullable: optional || body.nullable, heads: [rep], tails: [rep] };
+    }
+    if (repeated(q)) return { nullable: optional || body.nullable, heads: [], tails: [] };
+    return { nullable: optional || body.nullable, heads: body.heads, tails: body.tails };
+  };
+  visit(tree);
+  return found;
+}
+
+/**
+ * Whether a regular expression can take seconds on one long line (catastrophic backtracking):
+ * null when it looks safe, else `{ at, length, piece, why, message }` with the offending piece. A
+ * pattern that is not a valid regular expression with `flags` (by default: neither without flags nor
+ * with 'u') gives null, and its syntax error is reported instead. A valid pattern the check cannot
+ * read is refused (why 'cannot be checked'): the check fails closed.
+ */
+export function regexRisk(source, flags) {
+  const src = String(source ?? '');
+  if (!src) return null;
+  const tries = typeof flags === 'string' ? [flags] : ['', 'u'];
+  let valid = false;
+  for (const f of tries) {
+    try {
+      new RegExp(src, f); // eslint-disable-line no-new
+    } catch (_e) {
+      continue; // not valid with these flags
+    }
+    valid = true;
+    // Checked the way it would run with these flags; without explicit flags, every way it compiles.
+    const risk = regexShapeRisk(src, { dotAll: typeof flags !== 'string' || f.includes('s'), unicode: f.includes('u') });
+    if (risk) return risk;
+  }
+  return null;
+}
+
+/**
+ * The shape check of regexRisk without its validity probe, for a pattern already known to compile.
+ * Exported so that tests can check syntax the test engine does not compile yet (such as the
+ * (?i:...) modifier groups that browsers accept). `dotAll`: whether '.' matches line breaks; a
+ * (?s:...) group in the pattern turns it on.
+ */
+export function regexShapeRisk(source, { dotAll = true, unicode = false } = {}) {
+  const src = String(source ?? '');
+  if (!src) return null;
+  let hit;
+  try {
+    if (src.length > REGEX_SOURCE_MAX) throw new RegexTreeError('pattern too long', REGEX_SOURCE_MAX);
+    hit = riskOf(regexTree(src, { unicode }), { dotAll: dotAll || /\(\?[ims]*s[ims]*[-:]/.test(src), unicode });
+  } catch (e) {
+    const at = e instanceof RegexTreeError && Number.isInteger(e.at) ? Math.min(Math.max(e.at, 0), src.length - 1) : 0;
+    const piece = src.slice(at, at + 12);
+    const reason = e instanceof RegexTreeError ? e.message : '';
+    let detail = `it does not read '${piece}'. Write it with plain groups, classes and the quantifiers * + ? {n,m}.`;
+    if (reason === 'pattern too long') detail = `it is longer than ${REGEX_SOURCE_MAX} characters.`;
+    else if (reason === 'groups nested too deeply') detail = `its groups are nested more than ${MAX_GROUP_DEPTH} deep, at '${piece}'.`;
+    else if (reason === 'octal escape') detail = `it does not read the octal escape '${piece}'. Write the character itself, or \\x followed by two hex digits.`;
+    else if (reason === 'escape needs the u flag') detail = `'${piece}' means a letter and a repeat without the u flag. Add the u flag (/.../u), or write the character itself.`;
+    return {
+      at,
+      length: piece.length,
+      piece,
+      why: 'cannot be checked',
+      message: `J-Wicket cannot check this pattern for slow repeats, so it does not run it: ${detail}`,
+    };
+  }
+  if (!hit) return null;
+  const piece = src.slice(hit.start, hit.end);
+  const hint = Object.keys(RISK_WHY).find((k) => RISK_WHY[k] === hit.why);
+  return {
+    at: hit.start,
+    length: hit.end - hit.start,
+    piece,
+    why: hit.why,
+    message: `This pattern can take seconds on one long line: '${piece}' ${hit.why}. ${RISK_HINT[hint] || RISK_HINT_DEFAULT}`,
+  };
+}
+
+// Regular expressions are user input. The text they run over is capped, so one term cannot run over a
+// whole huge line; patterns with nested, back-to-back or ambiguous repeats are refused up front
+// (regexRisk, checked with the flags the pattern will run with); and Logs time-boxes a whole refilter
+// (LOG-02).
 export const REGEX_INPUT_MAX = 2048;
 const capped = (s) => (s.length > REGEX_INPUT_MAX ? s.slice(0, REGEX_INPUT_MAX) : s);
 
@@ -1140,8 +1915,12 @@ function userRegex(v) {
   // Smart case: case-insensitive unless the pattern has capitals or flags were given.
   if (!flags && !/[A-Z]/.test(v.text.replace(/\\[A-Z]/g, ''))) flags = 'i';
   flags = flags.replace(/[gy]/g, '');
+  const risk = regexRisk(v.text, flags);
+  if (risk) throw new RegexRiskError(risk.message);
   return new RegExp(v.text, flags);
 }
+
+const regexError = (e) => (e instanceof RegexRiskError ? e.message : `Invalid regular expression: ${String(e.message || e).replace(/^Invalid regular expression: /, '')}`);
 
 function parseIntValue(text) {
   const s = String(text).trim();
@@ -1159,7 +1938,7 @@ function valueMatcher(def, v, op, ctx) {
     try {
       re = userRegex(v.kind === 'regex' ? v : { text: v.text, flags: '' });
     } catch (e) {
-      throw new Error(`Invalid regular expression: ${String(e.message || e).replace(/^Invalid regular expression: /, '')}`);
+      throw new Error(regexError(e));
     }
     if (op !== '~' && op !== ':' && op !== '=' && op !== '!=') throw new Error(`'${op}' cannot compare with a regular expression`);
     return (item) => re.test(capped(String(item)));
@@ -1289,7 +2068,7 @@ export function validate(ast, fields, ctx) {
             try {
               userRegex(v);
             } catch (e) {
-              err = valueError(v, `Invalid regular expression: ${String(e.message || e).replace(/^Invalid regular expression: /, '')}`);
+              err = valueError(v, regexError(e));
               return;
             }
           }
@@ -1342,7 +2121,12 @@ function ipsOf(h) {
 
 function freeMatcher(v, fields) {
   if (v.kind === 'regex') {
-    const re = userRegex(v);
+    let re;
+    try {
+      re = userRegex(v);
+    } catch (_e) {
+      return () => false; // validate() reports it; compile() never throws
+    }
     return (row) => re.test(capped(haystackOf(row, fields).raw));
   }
   if (v.kind === 'word') {
@@ -1593,17 +2377,28 @@ export function highlightTerms(ast) {
 
 // --- planner ------------------------------------------------------------------------------------------
 
+// What the sessions RPC accepts for each device filter: ports 1..65535 (24.4R2 YANG, verified; 0 is
+// refused); one of the 14 protocol keywords or a number 0..255 (CLI reference "show security flow
+// session", verified; the "show security flow session protocol" page omits icmp6); and for
+// `application` an application-protocol type of the RPC's own list (24.4R2 YANG, verified). Anything
+// else stays in the browser.
+const portValue = (v) => (/^\d{1,5}$/.test(v) && Number(v) >= 1 && Number(v) <= 65535 ? String(Number(v)) : null);
+const PROTO_KEYWORDS = new Set(SESSION_PROTOCOLS);
 const SESSION_DEVICE = {
   src: (v) => (parseNet(v) && !v.includes('*') && !v.includes('-') ? v : null),
   dst: (v) => (parseNet(v) && !v.includes('*') && !v.includes('-') ? v : null),
-  sport: (v) => (/^\d+$/.test(v) && Number(v) <= 65535 ? String(Number(v)) : null),
-  dport: (v) => (/^\d+$/.test(v) && Number(v) <= 65535 ? String(Number(v)) : null),
+  sport: portValue,
+  dport: portValue,
   proto: (v) => {
     const low = v.toLowerCase();
-    if (['tcp', 'udp', 'icmp', 'icmp6', 'gre', 'esp', 'ah', 'sctp', 'pim', 'ospf'].includes(low)) return low;
-    return /^\d+$/.test(low) && Number(low) <= 255 ? String(Number(low)) : null;
+    if (PROTO_KEYWORDS.has(low)) return low;
+    if (low === 'icmpv6') return 'icmp6';
+    return /^\d{1,3}$/.test(low) && Number(low) <= 255 ? String(Number(low)) : null;
   },
-  app: (v) => (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(v) ? v : null),
+  app: (v) => {
+    const low = v.toLowerCase();
+    return SESSION_APP_SET.has(low) ? low : null;
+  },
   iface: (v) => (/^[a-z][a-z0-9-]{1,9}(\d+(\/\d+){0,3})?(\.\d{1,5})?$/.test(v) ? v : null),
 };
 
@@ -1701,6 +2496,8 @@ function bufferTimeText(ms) {
  * to merge into the API query (sessions: src..iface; logs file: contains/exclude newline-joined;
  * report: expression, start, stop; buffer: since). Terms marked `refine` narrow on the device and are
  * also checked in the browser (the device does a superset match).
+ * `opts.browserOnly` (sessions): query keys never pushed to the device, for a filter the device did not
+ * accept; such a term's explain entry carries `note`, which explainText() appends.
  */
 export function plan(ast, view, opts = {}) {
   const { base, source: vs } = viewOf(view);
@@ -1711,8 +2508,14 @@ export function plan(ast, view, opts = {}) {
   const items = ast.type === 'and' ? ast.items : [ast];
   const where = new Map(); // item -> {where, refine}
   const keepInBrowser = new Set();
+  const held = new Set(); // items the device would take but browserOnly keeps in the browser
 
   if (base === 'sessions') {
+    const browserOnly = new Set();
+    for (const k of Array.isArray(opts.browserOnly) ? opts.browserOnly : []) {
+      const hit = resolveKey(fields, k);
+      if (hit) browserOnly.add(hit.name);
+    }
     for (const it of items) {
       const v = single(it);
       if (!v || !it.key || (it.op !== ':' && it.op !== '=') || v.kind === 'regex' || hasWildcard(v)) continue;
@@ -1720,6 +2523,10 @@ export function plan(ast, view, opts = {}) {
       if (!hit || !SESSION_DEVICE[hit.name] || out.device[hit.name] !== undefined) continue;
       const value = SESSION_DEVICE[hit.name](v.text);
       if (value === null) continue;
+      if (browserOnly.has(hit.name)) {
+        held.add(it);
+        continue;
+      }
       out.device[hit.name] = value;
       where.set(it, { where: 'device' });
     }
@@ -1810,6 +2617,7 @@ export function plan(ast, view, opts = {}) {
     const w = where.get(it);
     const e = { text: toQueryString(it), where: w ? 'device' : 'browser', pos: it.gpos ?? it.pos, end: it.gend ?? it.end };
     if (w && w.refine) e.refine = true;
+    if (held.has(it)) e.note = `${e.text} is kept in the browser: the device did not accept it as a filter`;
     out.explain.push(e);
   }
   return out;
@@ -1845,6 +2653,7 @@ export function explainText(p) {
   const parts = [];
   if (dev.length) parts.push(`Device filtered: ${dev.join(', ')}`);
   if (bro.length) parts.push(`Browser filtered: ${bro.join(', ')}`);
+  for (const e of p.explain) if (e.note) parts.push(e.note);
   return parts.join(' \u00b7 ');
 }
 

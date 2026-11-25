@@ -5,12 +5,16 @@
 //   hist.update({ times: [ms, ...], series: [seriesIndex, ...], selection: { lo, hi } | null });
 //   hist.setNote('UTC');  // the clock the axis is in, shown in the legend
 // With `legend: true` the bucket size, clock and brush hint go to `hist.legendEl` (place it above the
-// chart) instead of the top-right corner of the plot, where it covered the newest bars.
+// chart) instead of the top-right corner of the plot, where it covered the newest bars. The legend is a
+// row of two parts: `earlierEl` (left, amber: "3 earlier lines not charted (before 07:58)", hidden when
+// there are none) and `scaleEl` (right: bucket size, clock, brush hint). Without a legend the earlier
+// note is SVG text in a band above the top grid line.
 //
 // Events per bucket over the time span of the data, stacked by series (event family). Bucket size is
 // a "nice" step chosen from the pixel width. Brush (drag) to select a time range, click a bar to
 // select its bucket, double-click (or Escape) to clear; keyboard: arrows move, Shift+arrows extend,
-// Enter selects. Times are shown as the log lines carry them (the device's clock), never re-zoned.
+// Enter selects. Times are drawn as given (the caller picks the clock and names it with setNote());
+// the widget never re-zones them.
 //
 // Strict CSP: SVG through createElementNS (dom.svg), text through textContent, positions through
 // CSSOM. Series colours come from the .fam-<id> classes (fill) in css/app.css.
@@ -22,6 +26,12 @@ const MIN_BAR_PX = 6;
 const MAX_BUCKETS = 150;
 const MIN_SPAN_MS = 60000;
 const PAD = { left: 30, right: 8, top: 8, bottom: 17 };
+// Without a legend, a plot with earlier lines starts lower so the note fits above the top grid line.
+const PAD_TOP_NOTE = 16;
+const NOTE_Y = 10;
+// earlierCut(): only a few stragglers far before the bulk are left out of the axis.
+const CUT_MIN_TIMES = 20;
+const CUT_GAP_SHARE = 0.6;
 const CLICK_DELAY_MS = 240;
 
 function pad2(n) {
@@ -50,6 +60,40 @@ export function chooseStep(spanMs, widthPx) {
   return STEPS_S[STEPS_S.length - 1] * 1000;
 }
 
+/**
+ * A few stragglers long before the bulk (an old line at the top of a file) would squeeze every bar
+ * into a corner: `{ earlier, clipAt }` says how many of the oldest `times` to leave out of the axis,
+ * and the first time that is drawn. A cut needs at least 20 times spanning more than a minute, and a
+ * gap after one of the oldest few (at most max(5, 3 %)) that is over 60 % of the whole span. No cut:
+ * `earlier` 0 and `clipAt` the oldest time (null when there is none). `lastEarlier` is the newest time
+ * left out (null without a cut), for the note's "before HH:MM".
+ */
+export function earlierCut(times) {
+  const n = times ? times.length : 0;
+  if (!n) return { earlier: 0, clipAt: null, lastEarlier: null };
+  let t0 = Infinity;
+  let t1 = -Infinity;
+  for (let i = 0; i < n; i += 1) {
+    const t = times[i];
+    if (t < t0) t0 = t;
+    if (t > t1) t1 = t;
+  }
+  if (!Number.isFinite(t0) || n < CUT_MIN_TIMES || t1 - t0 <= MIN_SPAN_MS) return { earlier: 0, clipAt: Number.isFinite(t0) ? t0 : null, lastEarlier: null };
+  const sorted = Float64Array.from(times).sort();
+  const limit = Math.max(5, Math.floor(n * 0.03));
+  let best = -1;
+  let gap = 0;
+  for (let i = 0; i < Math.min(limit, n - 1); i += 1) {
+    const g = sorted[i + 1] - sorted[i];
+    if (g > gap) {
+      gap = g;
+      best = i;
+    }
+  }
+  if (best >= 0 && gap > CUT_GAP_SHARE * (t1 - t0)) return { earlier: best + 1, clipAt: sorted[best + 1], lastEarlier: sorted[best] };
+  return { earlier: 0, clipAt: t0, lastEarlier: null };
+}
+
 function niceMax(v) {
   if (v <= 4) return Math.max(1, v);
   const p = 10 ** Math.floor(Math.log10(v));
@@ -65,7 +109,10 @@ export class Histogram {
   constructor({ series = [], label = 'Events over time', onBrush = null, unit = 'line', legend = false } = {}) {
     this.series = series;
     this.note = 'UTC';
-    this.legendEl = legend ? h('span', { class: 'hg-legend', 'aria-hidden': 'true' }) : null;
+    // The legend repeats what the SVG's aria-label says, so it is hidden from screen readers.
+    this.earlierEl = legend ? h('span', { class: 'hg-earlier', hidden: true }) : null;
+    this.scaleEl = legend ? h('span', { class: 'hg-scale' }) : null;
+    this.legendEl = legend ? h('span', { class: 'hg-legend', 'aria-hidden': 'true' }, this.earlierEl, this.scaleEl) : null;
     this.label = label;
     this.unit = unit;
     this.onBrush = typeof onBrush === 'function' ? onBrush : null;
@@ -161,30 +208,15 @@ export class Histogram {
       if (t > t1) t1 = t;
     }
     if (!Number.isFinite(t0)) return null;
-    // A few stragglers long before the bulk (an old line at the top of a file) would squeeze every
-    // bar into a corner: leave them out of the axis and say how many there are.
-    let earlier = 0;
-    if (n >= 20 && t1 - t0 > MIN_SPAN_MS) {
-      const sorted = Float64Array.from(this.times).sort();
-      const limit = Math.max(5, Math.floor(n * 0.03));
-      let best = -1;
-      let gap = 0;
-      for (let i = 0; i < Math.min(limit, n - 1); i += 1) {
-        const g = sorted[i + 1] - sorted[i];
-        if (g > gap) {
-          gap = g;
-          best = i;
-        }
-      }
-      if (best >= 0 && gap > 0.6 * (t1 - t0)) {
-        earlier = best + 1;
-        t0 = sorted[best + 1];
-      }
-    }
-    const clipAt = t0;
+    const cut = earlierCut(this.times);
+    const earlier = cut.earlier;
+    const clipAt = earlier ? cut.clipAt : t0;
+    if (earlier) t0 = clipAt;
+    // Without a legend the earlier note needs a band above the plot.
+    const top = earlier && !this.legendEl ? PAD_TOP_NOTE : PAD.top;
     if (t1 - t0 < MIN_SPAN_MS) t0 = t1 - MIN_SPAN_MS;
     const plotW = Math.max(10, width - PAD.left - PAD.right);
-    const plotH = Math.max(8, height - PAD.top - PAD.bottom);
+    const plotH = Math.max(8, height - top - PAD.bottom);
     const step = chooseStep(t1 - t0, plotW);
     const start = Math.floor(t0 / step) * step;
     const end = (Math.floor(t1 / step) + 1) * step;
@@ -207,7 +239,7 @@ export class Histogram {
         peakAt = b;
       }
     }
-    return { width, height, plotW, plotH, step, start, end, buckets, S, counts, totals, peak, peakAt, max: niceMax(peak), bw: plotW / buckets, n: n - earlier, earlier };
+    return { width, height, plotW, plotH, step, start, end, buckets, S, counts, totals, peak, peakAt, max: niceMax(peak), bw: plotW / buckets, n: n - earlier, earlier, clipAt, lastEarlier: cut.lastEarlier, top };
   }
 
   _x(t) {
@@ -249,22 +281,26 @@ export class Histogram {
     L.axis.replaceChildren();
     L.sel.replaceChildren();
     this.empty.hidden = Boolean(this.geo) || width < 60;
-    if (this.legendEl && !this.geo) this.legendEl.textContent = '';
+    if (this.legendEl && !this.geo) {
+      this.scaleEl.textContent = '';
+      this.earlierEl.textContent = '';
+      this.earlierEl.hidden = true;
+    }
     if (!this.geo) {
       this.svg.setAttribute('aria-label', `${this.label}: nothing to chart yet.`);
       this._hideHover();
       return;
     }
     const g = this.geo;
-    const base = PAD.top + g.plotH;
+    const base = g.top + g.plotH;
     // grid: baseline, mid and top lines with the scale
     L.grid.append(
       svg('line', { class: 'hg-gl hg-base', x1: PAD.left, x2: PAD.left + g.plotW, y1: base + 0.5, y2: base + 0.5 }),
-      svg('line', { class: 'hg-gl', x1: PAD.left, x2: PAD.left + g.plotW, y1: PAD.top + 0.5, y2: PAD.top + 0.5 }),
-      svg('line', { class: 'hg-gl', x1: PAD.left, x2: PAD.left + g.plotW, y1: Math.round(PAD.top + g.plotH / 2) + 0.5, y2: Math.round(PAD.top + g.plotH / 2) + 0.5 }),
+      svg('line', { class: 'hg-gl', x1: PAD.left, x2: PAD.left + g.plotW, y1: g.top + 0.5, y2: g.top + 0.5 }),
+      svg('line', { class: 'hg-gl', x1: PAD.left, x2: PAD.left + g.plotW, y1: Math.round(g.top + g.plotH / 2) + 0.5, y2: Math.round(g.top + g.plotH / 2) + 0.5 }),
     );
     L.axis.append(
-      svg('text', { class: 'hg-y', x: PAD.left - 5, y: PAD.top + 4, 'text-anchor': 'end' }, String(g.max)),
+      svg('text', { class: 'hg-y', x: PAD.left - 5, y: g.top + 4, 'text-anchor': 'end' }, String(g.max)),
       svg('text', { class: 'hg-y', x: PAD.left - 5, y: base + 1, 'text-anchor': 'end' }, '0'),
     );
     // bars, stacked bottom-up in series order
@@ -301,28 +337,44 @@ export class Histogram {
         svg('text', { class: 'hg-x', x: Math.round(x), y: height - 4, 'text-anchor': 'middle' }, clock(t, seconds)),
       );
     }
-    if (g.earlier) {
-      L.axis.append(svg('text', { class: 'hg-earlier', x: PAD.left + 4, y: PAD.top + 4, 'text-anchor': 'start' }, `\u25c2 ${plural(g.earlier, this.unit)} earlier, not drawn`));
-    }
     const hint = this.onBrush && !this.sel && g.plotW > (this.legendEl ? 360 : 420) ? ' \u00b7 drag to pick a time range' : '';
-    if (this.legendEl) this.legendEl.textContent = `per ${stepLabel(g.step)} \u00b7 ${this.note}${hint}`;
-    else L.axis.append(svg('text', { class: 'hg-step', x: PAD.left + g.plotW, y: PAD.top + 4, 'text-anchor': 'end' }, `per ${stepLabel(g.step)}${hint}`));
+    if (this.legendEl) {
+      // The earlier note sits in the legend (HTML, left), never over the bars or the scale.
+      this.earlierEl.hidden = !g.earlier;
+      this.earlierEl.textContent = g.earlier ? this._earlierText(g) : '';
+      this.earlierEl.title = g.earlier ? 'These lines are in the window (and in the stream) but far older than the rest, so the axis starts after them.' : '';
+      this.scaleEl.textContent = `per ${stepLabel(g.step)} \u00b7 ${this.note}${hint}`;
+    } else {
+      // No legend: the note goes in the band above the top grid line (PAD_TOP_NOTE), the scale beside it.
+      if (g.earlier) L.axis.append(svg('text', { class: 'hg-earlier-note', x: PAD.left, y: NOTE_Y, 'text-anchor': 'start' }, this._earlierText(g)));
+      L.axis.append(svg('text', { class: 'hg-step', x: PAD.left + g.plotW, y: g.earlier ? NOTE_Y : g.top + 4, 'text-anchor': 'end' }, `per ${stepLabel(g.step)}${hint}`));
+    }
     // selection
     if (this.sel && Number.isFinite(this.sel.lo) && Number.isFinite(this.sel.hi)) {
       const x0 = Math.max(PAD.left, Math.min(PAD.left + g.plotW, this._x(this.sel.lo)));
       const x1 = Math.max(PAD.left, Math.min(PAD.left + g.plotW, this._x(this.sel.hi)));
-      const top = PAD.top - 3;
+      const top = g.top - 3;
       const hh = g.plotH + 3;
       if (x0 > PAD.left) L.sel.append(svg('rect', { class: 'hg-dim', x: PAD.left, y: top, width: (x0 - PAD.left).toFixed(2), height: hh }));
       if (x1 < PAD.left + g.plotW) L.sel.append(svg('rect', { class: 'hg-dim', x: x1.toFixed(2), y: top, width: (PAD.left + g.plotW - x1).toFixed(2), height: hh }));
       L.sel.append(svg('rect', { class: 'hg-sel', x: x0.toFixed(2), y: top + 0.5, width: Math.max(2, x1 - x0).toFixed(2), height: hh - 1, rx: 2 }));
     }
-    const sum = `${plural(g.n, this.unit)}${g.earlier ? ` (and ${g.earlier} earlier, not drawn)` : ''} from ${clock(g.start, seconds)} to ${clock(g.end, seconds)} (${this.note}), ${plural(g.buckets, 'bar')} of ${stepLabel(g.step)}; busiest ${clock(g.start + g.peakAt * g.step)}: ${plural(g.peak, this.unit)}.`;
+    const sum = `${plural(g.n, this.unit)}${g.earlier ? ` (and ${plural(g.earlier, `earlier ${this.unit}`)} not charted, before ${this._earlierAt(g)})` : ''} from ${clock(g.start, seconds)} to ${clock(g.end, seconds)} (${this.note}), ${plural(g.buckets, 'bar')} of ${stepLabel(g.step)}; busiest ${clock(g.start + g.peakAt * g.step)}: ${plural(g.peak, this.unit)}.`;
     const how = this.onBrush ? ' Drag, or use the arrow keys and Enter, to select a time range; Escape clears it.' : '';
     const selText = this.sel ? ` Selected ${clock(this.sel.lo)} to ${clock(this.sel.hi)}.` : '';
     this.svg.setAttribute('aria-label', `${this.label}: ${sum}${selText}${how}`);
     if (this.kb) this._drawCursor();
     if (this.hoverI >= 0 && this.hoverI < g.buckets) this._drawHover(this.hoverI);
+  }
+
+  /** "HH:MM" of the first charted time; "HH:MM:SS" when the last earlier line is in that same minute. */
+  _earlierAt(g) {
+    const sameMinute = g.lastEarlier !== null && Math.floor(g.lastEarlier / 60000) === Math.floor(g.clipAt / 60000);
+    return clock(g.clipAt, sameMinute);
+  }
+
+  _earlierText(g) {
+    return `${plural(g.earlier, `earlier ${this.unit}`)} not charted (before ${this._earlierAt(g)})`;
   }
 
   _niceTick(ms) {
@@ -334,7 +386,7 @@ export class Histogram {
     const g = this.geo;
     const r = this.layers.hover;
     r.setAttribute('x', (PAD.left + i * g.bw).toFixed(2));
-    r.setAttribute('y', String(PAD.top - 3));
+    r.setAttribute('y', String(g.top - 3));
     r.setAttribute('width', Math.max(1, g.bw).toFixed(2));
     r.setAttribute('height', String(g.plotH + 3));
     r.setAttribute('visibility', 'visible');
@@ -350,7 +402,7 @@ export class Histogram {
     const a = Math.min(this.kb.i, this.kb.anchor);
     const b = Math.max(this.kb.i, this.kb.anchor);
     r.setAttribute('x', (PAD.left + a * g.bw).toFixed(2));
-    r.setAttribute('y', String(PAD.top - 3));
+    r.setAttribute('y', String(g.top - 3));
     r.setAttribute('width', Math.max(2, (b - a + 1) * g.bw).toFixed(2));
     r.setAttribute('height', String(g.plotH + 3));
     r.setAttribute('visibility', 'visible');
@@ -375,7 +427,7 @@ export class Histogram {
       rows.push(h('li', null, h('span', { class: `hg-sw fam-${ser.id}`, 'aria-hidden': 'true' }), h('span', { class: 'hg-tl' }, ser.label), h('b', null, c.toLocaleString('en-US'))));
     }
     this.tip.replaceChildren(
-      h('div', { class: 'hg-th' }, `${clock(lo, true)} – ${clock(lo + g.step - 1, seconds || g.step < 3600000)} ${this.note === 'UTC' ? 'UTC' : 'device clock'}`, h('b', null, plural(g.totals[i], this.unit))),
+      h('div', { class: 'hg-th' }, `${clock(lo, true)} – ${clock(lo + g.step - 1, seconds || g.step < 3600000)} ${this.note === 'UTC' ? 'UTC' : /^device clock/.test(this.note) ? 'device clock' : this.note}`, h('b', null, plural(g.totals[i], this.unit))),
       rows.length ? h('ul', null, rows) : h('p', { class: 'hg-tn' }, 'Nothing in this interval'),
     );
     this.tip.hidden = false;
@@ -426,7 +478,7 @@ export class Histogram {
         const b = Math.min(PAD.left + this.geo.plotW, Math.max(this.drag.x0, x));
         const r = this.layers.brush;
         r.setAttribute('x', a.toFixed(2));
-        r.setAttribute('y', String(PAD.top - 3));
+        r.setAttribute('y', String(this.geo.top - 3));
         r.setAttribute('width', Math.max(0, b - a).toFixed(2));
         r.setAttribute('height', String(this.geo.plotH + 3));
         r.setAttribute('visibility', Math.abs(this.drag.x1 - this.drag.x0) >= 3 ? 'visible' : 'hidden');

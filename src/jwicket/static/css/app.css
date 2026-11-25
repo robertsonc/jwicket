@@ -22,7 +22,10 @@
  *   data     .mono .num .ip .port .zone .iface .policy-link .nat .muted .faint .nowrap .ellipsis
  *   tables   .table (thead th, tbody tr[aria-selected=true]) .row-new .row-ended .cell-actions
  *   bars     .bar > i (width via --w) ; .bar.permit/.deny/... ; .meter
- *   states   .state[data-state=denied|unsupported|failed|session-lost|refused|empty|loading]
+ *   states   .state[data-state=denied|unsupported|failed|session-lost|refused|count-unknown|
+ *            filter-rejected|waiting|busy|internal|offline|empty|info|loading]
+ *   device   .ctl-badge (a hidden or direction-changing character, shown by dom.vis/visSvg)
+ *            .dev-text (unicode-bidi: isolate, on containers of device text)
  *   misc     .skeleton .sk-line .cli (code block) .kv (dl grid) .tick .sr-only .view-loading
  *   logs     .tk-* token classes, .fam-* event families (set --fam, color and fill)
  */
@@ -548,6 +551,20 @@ pre {
 .boot .logo-mark {
   width: 44px;
   height: 44px;
+}
+
+/* Shown only when the app has not started after a while (a stylesheet or module failed to load): no
+   script is needed for it, and without this stylesheet it shows at once. */
+.boot-slow {
+  visibility: hidden;
+  font-size: var(--fs-ui);
+  animation: boot-slow 1ms linear 8s forwards;
+}
+
+@keyframes boot-slow {
+  to {
+    visibility: visible;
+  }
 }
 
 /* ---- logo mark (inline SVG, themed) ----------------------------------------------------------- */
@@ -1128,6 +1145,63 @@ button.live-pill:hover {
   height: 6px;
 }
 
+/* The shell's idle pause (SL-08): no operator input, so reads wait; every LIVE dot stops pulsing. */
+:root.is-idle .live-pill .dot,
+:root.is-idle .live-badge .dot {
+  animation: none;
+  background: var(--muted);
+}
+
+:root.is-idle .live-pill .dot::after,
+:root.is-idle .live-badge .dot::after,
+:root.is-idle .rail-item.is-live .live-dot::after {
+  content: none;
+}
+
+:root.is-idle .rail-item.is-live .live-dot {
+  background: var(--muted);
+}
+
+.live-pill.idle {
+  color: var(--muted);
+  border-color: var(--muted-line);
+  background: var(--muted-soft);
+}
+
+.live-pill.idle .dot {
+  border-radius: 50%;
+}
+
+/* ---- device text: hidden and direction-changing characters (POL-SL-02) ---------------------------
+   dom.vis() shows each such character as <span class="ctl-badge">U+202E</span> (dom.visSvg as a
+   <tspan>), so it is seen, not applied. Containers of device text add .dev-text: whatever the text
+   holds, it cannot reorder what is around it. */
+
+.ctl-badge {
+  display: inline-block;
+  margin: 0 1px;
+  padding: 1px;
+  border-radius: var(--radius-xs);
+  background: var(--deny-soft);
+  box-shadow: 0 0 0 1px var(--deny-line);
+  color: var(--deny);
+  font: 600 .86em/1.1 var(--font-mono);
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  vertical-align: baseline;
+  unicode-bidi: isolate;
+}
+
+svg .ctl-badge {
+  fill: var(--deny);
+  font-weight: 600;
+}
+
+.dev-text {
+  unicode-bidi: isolate;
+}
+
 /* ---- the app frame ---------------------------------------------------------------------------- */
 
 .app {
@@ -1502,14 +1576,51 @@ button.live-pill:hover {
   color: var(--text);
 }
 
+/* A scope name stays on one line; the menu is as wide as it needs (280 to 480 px, set by the shell),
+   and a name longer than that ends in an ellipsis (its full text is the option's title). The label
+   takes what the icon, pill and count leave (basis 0), so only a disabled scope's reason wraps, onto
+   a line of its own. */
+.menu [role="option"].opt-blocked {
+  flex-wrap: wrap;
+}
+
 .menu .opt-label {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu [role="option"] > .pill,
+.menu .opt-meta {
+  flex: none;
+  white-space: nowrap;
 }
 
 .menu .opt-meta {
   color: var(--faint);
   font: var(--fs-meta) var(--font-mono);
+}
+
+/* A scope J-Wicket cannot open yet (CRT-13): listed, disabled, with its reason on a line of its own. */
+.menu [role="option"][aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--muted);
+}
+
+/* F8: in the light theme --muted is close to --text, so the name of a scope that cannot be opened
+   uses --faint (AA on the menu surface in both themes). */
+.menu [role="option"][aria-disabled="true"] .opt-label {
+  color: var(--faint);
+}
+
+.menu .opt-reason {
+  flex: 1 0 100%;
+  padding-left: 25px;
+  color: var(--faint);
+  font-size: var(--fs-meta);
+  white-space: normal;
 }
 
 /* left rail */
@@ -1794,6 +1905,18 @@ button.live-pill:hover {
   min-width: 0;
 }
 
+/* Top policies: count, "backup copies not counted" and the age wrap as whole phrases on a phone. */
+.ov-top .tile-meta {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 6px;
+  white-space: normal;
+}
+
+.ov-top .tile-meta > span {
+  white-space: nowrap;
+}
+
 .tile-body {
   flex: 1 1 auto;
   padding: var(--s3) var(--s4) var(--s4);
@@ -1993,6 +2116,11 @@ tr:hover .cell-actions,
 .state[data-state="offline"] { --state: var(--amber); --state-soft: var(--amber-soft); }
 .state[data-state="empty"] { --state: var(--faint); --state-soft: transparent; }
 .state[data-state="info"] { --state: var(--sky); --state-soft: var(--sky-soft); }
+.state[data-state="count-unknown"] { --state: var(--sky); --state-soft: var(--sky-soft); }
+.state[data-state="filter-rejected"] { --state: var(--reject); --state-soft: var(--reject-soft); }
+.state[data-state="waiting"] { --state: var(--muted); --state-soft: var(--muted-soft); }
+.state[data-state="busy"] { --state: var(--amber); --state-soft: var(--amber-soft); }
+.state[data-state="internal"] { --state: var(--deny); --state-soft: var(--deny-soft); }
 
 .state-icon {
   flex: none;
@@ -2294,6 +2422,16 @@ tr:hover .cell-actions,
   max-width: 45%;
 }
 
+.pal-detail mark {
+  background: transparent;
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.pal-group.best {
+  color: var(--gold);
+}
+
 .pal-hint {
   display: inline-flex;
   gap: 3px;
@@ -2433,6 +2571,19 @@ tr:hover .cell-actions,
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* A toast that asks (the export's Save or Cancel): it stays until answered. */
+.toast-confirm .toast-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .toast.leaving {
@@ -3249,6 +3400,22 @@ a.inv-count:hover {
   width: 15px;
   height: 15px;
   color: var(--amber);
+}
+
+/* A deactivated client (CRT-01): listed after the active ones, muted, with a "deactivated" pill. */
+.mg-client.is-off {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--line);
+}
+
+.mg-client.is-off .mg-name {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.mg-client.is-off .mg-name svg {
+  color: var(--faint);
 }
 
 .mg-targets {

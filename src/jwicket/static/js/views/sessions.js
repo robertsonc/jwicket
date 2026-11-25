@@ -13,7 +13,19 @@
 //
 // The table's DOM rows are keyed by session id too (RowWindow below): a poll patches the cells that
 // changed in place, so the focused row, the opener of the detail panel and the selection stay on the
-// session the operator chose while rows re-sort underneath.
+// session the operator chose while rows re-sort underneath. When the table is scrolled, a poll keeps
+// the row the operator is looking at (focused, selected, else the first visible one) where it is.
+//
+// Device text is untrusted: every device string shown as text goes through dom.vis() (hidden and
+// direction-changing characters become visible badges), and through format.plain() in titles,
+// aria-labels, toasts and announcements. A clicked value holding such a character becomes a
+// browser-side wildcard term; a CLI command is offered only when every part of it is plain.
+//
+// States the server reports at HTTP 200 (Spec 004): a failed read, or a session count that could not
+// be read, keeps the last good rows dimmed and retries in 15 s; a count that will not change stops
+// polling until the operator refreshes; a filter the device did not accept keeps the query bar and
+// offers to drop the device filters or to apply them in the browser. A 429 (another read of this
+// session is running) only marks the last-read time: it is not a failure.
 
 import { Gauge } from '../widgets/gauge.js';
 import { Sparkline } from '../widgets/sparkline.js';
@@ -28,7 +40,29 @@ const MAX_TRACKED = 8000;
 const FLASH_MS = 1900;
 const MOBILE_W = 700;
 const RETRY_S = 15;
+// count-unknown "no-count-over-limit": the listing depends on the table-wide gauge, which the server
+// caches for 30 s (GAUGE_TTL_S), so reading more often cannot change the answer.
+const SLOW_S = 30;
+// Consecutive 429s for this long: say why sessions are not refreshing.
+const WAIT_NOTE_MS = 30000;
 const ZONE_KEYS = new Set(['zone', 'from', 'to']);
+// The RPC parameter names in `sessions.filters` and `meta.device_filters`, back to query keys (Spec 004).
+const RPC_KEY = {
+  'source-prefix': 'src',
+  'destination-prefix': 'dst',
+  'source-port': 'sport',
+  'destination-port': 'dport',
+  protocol: 'proto',
+  application: 'app',
+  interface: 'iface',
+};
+// What a device filter can be, for the hints (the planner decides what is sent).
+const DEVICE_KEYS_TEXT = 'src, dst, sport, dport, proto, app (application protocol types such as https, ftp, dns) or iface';
+const LISTED_TITLE = 'Rows the device returned for the device-side filters (and, when the browser-side filter keeps fewer, how many are shown)';
+// A zone name J-Wicket puts in a pasted command (the Junos naming rule is inferred, not verified).
+const ZONE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+// An address as it may go into a pasted command: IPv4 or IPv6 characters only.
+const ADDR_CHARS = /^[0-9A-Fa-f:.]{2,45}$/;
 const SEP = ' · ';
 const ARROW = '→';
 const DASH = '—';
@@ -112,6 +146,13 @@ function nodeOf(location) {
   return m ? m[1] : null;
 }
 
+/** Distinct session ids among rows (a cluster lists each session once per node). */
+function distinctSessions(rows) {
+  const ids = new Set();
+  for (const r of rows || []) if (r) ids.add(String(r.session_id ?? r.id));
+  return ids.size;
+}
+
 const REDUCED = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
 
 /** Set a counter's text; when it changed, replay a short tick (Web Animations: no forced layout). */
@@ -140,17 +181,6 @@ function fileStamp(date) {
 
 function safeName(s) {
   return String(s || 'device').replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60) || 'device';
-}
-
-/** The HA role a row carries, if any: a state-like field with Active/Backup (reply tags vary by release). */
-function haRole(r) {
-  for (const v of [r.state, r.status]) {
-    if (/^\s*(active|backup)\s*$/i.test(String(v || ''))) return String(v).trim().toLowerCase();
-  }
-  for (const [k, v] of Object.entries(r.extra || {})) {
-    if (/state|role|ha|status/i.test(k) && /^\s*(active|backup|stand-?alone|warm)\s*$/i.test(String(v))) return String(v).trim().toLowerCase();
-  }
-  return null;
 }
 
 /**
@@ -369,6 +399,37 @@ class RowWindow {
     if (lostFocus && typeof this.onFocusLost === 'function') this.onFocusLost();
   }
 
+  /**
+   * Where the given rows sit in the viewport before the list is re-ordered: [{key, offset}], offset
+   * in px from the top of the scroller, in the order given. Empty at the very top of the list, so new
+   * rows appear on top there instead of being scrolled away.
+   */
+  anchorsFor(keys) {
+    if (!this.body || this.scrollTop <= 0 || !this.indexOf) return [];
+    const out = [];
+    for (const key of keys) {
+      const i = key ? this.indexOf(key) : -1;
+      if (i >= 0) out.push({ key, offset: this.offset + i * this.rowHeight - this.scrollTop });
+    }
+    return out;
+  }
+
+  /** After a re-order (setCount done, before sync): scroll so the first anchor still listed keeps its offset. */
+  keepAnchor(anchors) {
+    if (!this.body || !anchors || !anchors.length || !this.indexOf) return;
+    for (const a of anchors) {
+      const i = this.indexOf(a.key);
+      if (i < 0) continue;
+      const next = Math.max(0, Math.round(this.offset + i * this.rowHeight - a.offset));
+      if (next !== this.scrollTop) {
+        this.container.scrollTop = next;
+        this.scrollTop = this.container.scrollTop;
+        this.silentScroll = this.scrollTop; // the scroll event this causes is not the operator's
+      }
+      return;
+    }
+  }
+
   /** Patch one row now (selection changed), if it is rendered. */
   patchKey(key) {
     const node = this.nodes.get(key);
@@ -498,6 +559,10 @@ class SessionsView {
     this.fmt = ctx.format;
     this.q = ctx.query;
     this.dead = false;
+    // Device text as nodes with hidden characters shown (names: tab and line feed too), and as plain
+    // text for titles, labels, toasts and announcements.
+    this.V = (value) => ctx.dom.vis(value === null || value === undefined ? '' : value, { all: true });
+    this.P = (value) => ctx.format.plain(value === null || value === undefined ? '' : value, { all: true });
 
     const every = Number(prefGet(PREF.every));
     this.every = INTERVALS.includes(every) ? every : null; // null: the server's suggestion
@@ -518,6 +583,9 @@ class SessionsView {
     this.deviceKey = '{}';
     this.match = () => true;
     this.plan = null;
+    // Device filters the device did not accept, kept in the browser on request: key -> the value it
+    // refused. The planner keeps exactly that value out of the device read (opts.browserOnly).
+    this.rejected = new Map();
     this.queryError = null;
     this.serverError = null;
     this.sort = 'dur';
@@ -530,6 +598,9 @@ class SessionsView {
     this.readAt = 0;
     this.lastOkAt = 0;
     this.failure = null;
+    this.limited = null; // consecutive 429s: { reason, since, n }
+    this.slowS = 0; // the next read waits this long (count-unknown no-count-over-limit)
+    this.idle = Boolean(ctx.ui.isIdle?.()); // the shell's idle pause (no operator input)
     this.inflight = null;
     this.pollSeq = 0;
     this.polls = 0;
@@ -575,6 +646,8 @@ class SessionsView {
       ['keydown', (e) => this.onKey(e)],
     ];
     for (const [type, fn] of this.listeners) document.addEventListener(type, fn);
+    this.onIdleEvent = (e) => this.setIdle(Boolean(e && e.detail && e.detail.idle));
+    window.addEventListener('jwicket:idle', this.onIdleEvent);
     this.ageTimer = setInterval(() => this.renderAge(), 1000);
     ctx.store.inventory().then(() => {
       if (!this.dead) this.onInventory();
@@ -625,6 +698,7 @@ class SessionsView {
     if (this.inflight) this.inflight.abort();
     for (const off of this.offs) off();
     for (const [type, fn] of this.listeners) document.removeEventListener(type, fn);
+    window.removeEventListener('jwicket:idle', this.onIdleEvent);
     if (this.ro) this.ro.disconnect();
     if (this.facetTimer) cancelAnimationFrame(this.facetTimer);
     if (this.list) this.list.destroy();
@@ -714,6 +788,11 @@ class SessionsView {
     this.spark = new Sparkline({ height: 34, label: 'Matching sessions per poll' });
     this.activeNum = h('span', { class: 'sx-big num' }, DASH);
     this.activeOf = h('span', { class: 'sx-of' }, '');
+    this.activeCap = h('span', { class: 'sx-cap' }, 'Active sessions');
+    // A chassis cluster: each node's active count (never a sum), and failed sessions as reported.
+    this.nodesEl = h('span', { class: 'sx-nodes num', hidden: true });
+    this.failedEl = h('span', { class: 'sx-failed num', hidden: true });
+    this.matchCap = h('span', { class: 'sx-cap' }, 'Matching, per poll');
     this.sparkRange = h('span', { class: 'sx-cap-meta num' }, '');
     this.statNew = h('b', { class: 'num' }, DASH);
     this.statEnded = h('b', { class: 'num' }, DASH);
@@ -731,12 +810,12 @@ class SessionsView {
         'div',
         { class: 'sx-gauge' },
         this.gauge.el,
-        h('div', { class: 'sx-gfig' }, h('span', { class: 'sx-cap' }, 'Active sessions'), this.activeNum, this.activeOf),
+        h('div', { class: 'sx-gfig' }, this.activeCap, this.activeNum, this.activeOf, this.nodesEl, this.failedEl),
       ),
       h(
         'div',
         { class: 'sx-trend' },
-        h('div', { class: 'sx-cap-row' }, h('span', { class: 'sx-cap' }, 'Matching, per poll'), this.sparkRange),
+        h('div', { class: 'sx-cap-row' }, this.matchCap, this.sparkRange),
         this.spark.el,
       ),
       h(
@@ -744,7 +823,7 @@ class SessionsView {
         { class: 'sx-stats' },
         stat('up', this.statNew, 'new', 'Sessions in this poll that were not in the previous one'),
         stat('down', this.statEnded, 'ended', 'Sessions in the previous poll that are gone now'),
-        stat('listed', this.statListed, 'listed', 'Rows the device returned for the device-side filters (and, when the browser-side filter keeps fewer, how many are shown)', this.statShown),
+        stat('listed', this.statListed, 'listed', LISTED_TITLE, this.statShown),
       ),
       h('div', { class: 'sx-read' }, h('span', { class: 'sx-cap' }, 'Last read'), this.readTime, this.readAgo),
       h('div', { class: 'sx-next', 'aria-hidden': 'true' }, this.nextBar),
@@ -792,6 +871,8 @@ class SessionsView {
     this.skel = h('div', { class: 'sx-skel', hidden: true, 'aria-hidden': 'true' });
     this.grid = h('div', { class: 'sx-grid', role: 'grid', 'aria-label': 'Flow sessions', 'aria-rowcount': '1', 'aria-colcount': '1', 'aria-describedby': 'sx-grid-keys' }, this.scroller, h('p', { class: 'sr-only', id: 'sx-grid-keys' }, 'Arrow keys, Page Up, Page Down, Home and End move between sessions; Enter opens one. Right and Left arrows move through the values of a row; Enter filters by the value, Alt+Enter excludes it.'));
     this.gridState = h('div', { class: 'sx-gstate', hidden: true });
+    // Before the first read: what the skeleton is waiting for, when it is another read of this session.
+    this.waitNote = h('p', { class: 'sx-waitnote', role: 'status', hidden: true }, 'Waiting for another read on your session…');
     this.hov = h(
       'div',
       { class: 'sx-hov', hidden: true, on: { pointerenter: () => this.keepHover(), pointerleave: () => this.hideHover(true) } },
@@ -799,7 +880,7 @@ class SessionsView {
       h('button', { class: 'sx-hov-b', type: 'button', tabindex: '-1', title: 'Exclude this value', dataset: { act: 'ne' }, on: { click: (e) => this.hoverAct(e, true) } }, '≠'),
       h('button', { class: 'sx-hov-b go', type: 'button', tabindex: '-1', title: 'Open this policy', dataset: { act: 'go' }, on: { click: (e) => this.hoverGo(e) } }, '↗'),
     );
-    this.gridCard = h('section', { class: 'sx-gridcard', 'aria-label': 'Sessions table' }, this.grid, this.gridState, this.hov);
+    this.gridCard = h('section', { class: 'sx-gridcard', 'aria-label': 'Sessions table' }, this.waitNote, this.grid, this.gridState, this.hov);
     this.facets = h('aside', { class: 'sx-facets', id: 'sx-facets', 'aria-label': 'Facets' });
     this.body = h('div', { class: 'sx-body' }, this.gridCard, this.facets);
 
@@ -828,7 +909,15 @@ class SessionsView {
     this.scroller.addEventListener('pointermove', (e) => {
       this.pointer = { x: e.clientX, y: e.clientY };
     }, { passive: true });
-    this.scroller.addEventListener('scroll', () => this.hideHover(false), { passive: true });
+    this.scroller.addEventListener('scroll', () => {
+      // A poll that keeps the viewed rows in place scrolls by exactly the rows added above: the value
+      // under the pointer has not moved, so its = / ≠ buttons stay.
+      if (this.list && this.list.silentScroll === this.scroller.scrollTop) {
+        this.list.silentScroll = null;
+        return;
+      }
+      this.hideHover(false);
+    }, { passive: true });
     this.scroller.addEventListener('keydown', (e) => this.onGridKey(e));
     this.gridHead.addEventListener('click', (e) => this.onHeadClick(e));
 
@@ -1018,7 +1107,7 @@ class SessionsView {
     this.order.clear();
     this.saveRoute(false);
     this.renderHeader();
-    this.recompute({ facets: false });
+    this.recompute({ facets: false, anchor: false });
   }
 
   // ---- query -----------------------------------------------------------------------------------
@@ -1040,7 +1129,7 @@ class SessionsView {
     if (this.bar) this.bar.setError(null);
     this.goodText = this.text;
     this.ast = parsed.ast;
-    this.plan = this.q.plan(parsed.ast, 'sessions');
+    this.plan = this.planFor(parsed.ast);
     this.compileBrowser();
     const key = JSON.stringify(this.plan.device || {});
     if (!fromRoute) this.saveRoute(push);
@@ -1051,6 +1140,17 @@ class SessionsView {
       if (!this.dead && this.list && !this.booting) this.poll(true);
     }
     this.recompute();
+  }
+
+  /**
+   * The query split into device and browser parts. A device filter value the device did not accept,
+   * and that the operator chose to filter in the browser instead, stays in the browser (the planner
+   * says so in the explain sentence); the same key with another value goes to the device again.
+   */
+  planFor(ast) {
+    const base = this.q.plan(ast, 'sessions');
+    const hold = Object.keys(base.device || {}).filter((k) => this.rejected.has(k) && this.rejected.get(k) === base.device[k]);
+    return hold.length ? this.q.plan(ast, 'sessions', { browserOnly: hold }) : base;
   }
 
   compileBrowser() {
@@ -1151,11 +1251,34 @@ class SessionsView {
     }
   }
 
+  /**
+   * A clicked device value as a query value. A value holding a hidden or direction-changing character
+   * never goes into the query as it is: each such character becomes "*", which makes the term a
+   * browser-side wildcard (never sent to the device), as Logs does. A wildcard needs a bare word, so
+   * the other characters a bare word cannot hold become "*" too. null when nothing but "*" is left.
+   */
+  termValue(value) {
+    const s = String(value);
+    if (!this.fmt.hasControls(s, { all: true })) return qv(s);
+    const w = Array.from(s, (c) => (this.fmt.hasControls(c, { all: true }) ? '*' : c))
+      .join('')
+      .replace(/[^A-Za-z0-9._\-/:*]/g, '*')
+      .replace(/^[-!]/, '*')
+      .replace(/\*+/g, '*');
+    return w && w !== '*' ? w : null;
+  }
+
   /** Add key:value (or -key:value) to the query, as clicking a value does. */
   addTerm(key, value, exclude = false) {
     if (!this.q || value === null || value === undefined || value === '') return;
-    const term = `${exclude ? '-' : ''}${key}:${qv(value)}`;
-    const opposite = `${exclude ? '' : '-'}${key}:${qv(value)}`;
+    const v = this.termValue(value);
+    if (v === null) {
+      this.ctx.ui.toast('This value is only hidden characters, so it cannot be added as a filter.', 'warn');
+      return;
+    }
+    const wild = this.fmt.hasControls(String(value), { all: true });
+    const term = `${exclude ? '-' : ''}${key}:${v}`;
+    const opposite = `${exclude ? '' : '-'}${key}:${v}`;
     // While the bar holds a query with an error, a click builds on the filter actually applied.
     let text = (this.queryError ? this.goodText : this.text).trim();
     const parsed = this.q.parse(text, { view: 'sessions' });
@@ -1173,8 +1296,9 @@ class SessionsView {
     text = text ? `${text} ${term}` : term;
     if (this.bar) this.bar.setValue(text);
     this.applyQuery(text, { push: true });
-    const where = this.plan && this.plan.device && Object.keys(this.plan.device).length && /^(src|dst|sport|dport|proto|app|iface)$/.test(key) && !exclude ? ' (device filter: a new read)' : '';
-    this.ctx.ui.announce(`Filter ${term} added${where}.`);
+    const onDevice = Boolean(this.plan && this.plan.explain.some((e) => e.text === term && e.where === 'device'));
+    const where = wild ? ' (its hidden characters match as *, in the browser)' : onDevice ? ' (device filter: a new read)' : '';
+    this.ctx.ui.announce(`Filter ${this.P(term)} added${where}.`);
   }
 
   // ---- polling ---------------------------------------------------------------------------------
@@ -1215,16 +1339,56 @@ class SessionsView {
     this.strip.classList.remove('reading');
     if (res.status === 401) return; // the shell returns to sign-in
     let wait = this.intervalS() * 1000;
+    if (res.status !== 429 && this.limited) {
+      this.limited = null;
+      this.renderNotices();
+    }
     if (res.ok) {
-      this.failure = null;
-      if (key === this.deviceKey) this.apply(res.data);
-      const st = res.data && res.data.sessions && res.data.sessions.status;
-      // A login class that may not list sessions, or a device that cannot, will not change by asking
-      // again every few seconds (and each ask is a logged RPC): stop until the operator refreshes.
-      this.halted = st === 'denied' || st === 'unsupported' ? st : null;
-      if (this.halted) this.renderLive();
+      const data = res.data || {};
+      const table = data.sessions || {};
+      const st = table.status;
+      this.slowS = 0;
+      if (st === 'failed' || (st === 'count-unknown' && table.reason === 'summary-failed')) {
+        // A device failure at HTTP 200, or a session count that could not be read (transient): like
+        // a failed request, the last good rows stay (dimmed, "stale since"), and J-Wicket retries.
+        this.ctx.ui.noteFixture(data.meta);
+        this.halted = null;
+        this.failure = {
+          status: st === 'failed' ? 'failed' : 'count-unknown',
+          reason: table.reason || null,
+          message: table.message || (st === 'failed' ? 'The device could not list the sessions.' : null),
+          at: Date.now(),
+        };
+        wait = Math.max(wait, RETRY_S * 1000);
+        this.renderAll();
+      } else {
+        const recovered = Boolean(this.failure);
+        this.failure = null;
+        if (key === this.deviceKey) this.apply(data, { recovered });
+        // A login class that may not list sessions, or a device that cannot, will not change by
+        // asking again every few seconds (and each ask is a logged RPC): stop until the operator
+        // refreshes. With device filters on, that answer may be about the filter: keep reading.
+        const filtered = Object.keys(this.device).length > 0;
+        if ((st === 'denied' || st === 'unsupported') && !filtered) this.halted = st;
+        // A summary with no count J-Wicket can read does not change by asking again either.
+        else if (st === 'count-unknown' && table.reason === 'no-count') this.halted = 'no-count';
+        else this.halted = null;
+        if (st === 'count-unknown' && table.reason === 'no-count-over-limit') {
+          this.slowS = SLOW_S;
+          wait = Math.max(wait, SLOW_S * 1000);
+        }
+        this.renderLive();
+      }
     } else if (res.status === 429) {
-      wait = Math.max(wait, (res.retryAfter || 2) * 1000);
+      // Another read of this session (another tab, or the inventory) holds the device turn, or this
+      // session read too recently: not a failure. Wait as the server asked; say so quietly.
+      const ra = res.retryAfter || 2;
+      wait = Math.max(wait, ra * 1000);
+      const now = Date.now();
+      this.limited = { reason: res.reason || null, since: this.limited ? this.limited.since : now, n: (this.limited ? this.limited.n : 0) + 1 };
+      this.renderAge();
+      this.renderNotices();
+      this.renderGridState();
     } else if (res.status === 400) {
       // The server refused a filter value (its validation is the contract): show it under the bar.
       this.serverError = (res.data && res.data.error) || 'The device filter was not accepted.';
@@ -1233,14 +1397,20 @@ class SessionsView {
       return; // no retry until the query changes
     } else {
       this.failure = {
-        status: res.status === 0 ? 'offline' : 'failed',
+        status: res.status === 0 ? 'offline' : res.internal ? 'internal' : 'failed',
         message: (res.data && res.data.error) || `The session read failed (HTTP ${res.status}).`,
         at: Date.now(),
       };
-      wait = Math.max(wait, 15000);
+      wait = Math.max(wait, RETRY_S * 1000);
       this.renderAll();
     }
     this.schedule(wait);
+  }
+
+  setIdle(idle) {
+    if (this.dead || idle === this.idle) return;
+    this.idle = idle;
+    this.renderLive();
   }
 
   schedule(wait = this.intervalS() * 1000) {
@@ -1293,11 +1463,14 @@ class SessionsView {
 
   // ---- applying a poll -------------------------------------------------------------------------
 
-  apply(data) {
+  apply(data, { recovered = false } = {}) {
     const ui = this.ctx.ui;
     ui.noteFixture(data.meta);
     this.ctx.store.setSessionsLast(data);
     const now = Date.now();
+    // The read time as the server stamped it (whole seconds), for telling a reused session id apart.
+    const readMs = Date.parse((data.meta && data.meta.read_at) || '');
+    const readAt = Number.isFinite(readMs) ? readMs : now;
     this.payload = data;
     this.readAt = now;
     this.lastOkAt = now;
@@ -1307,6 +1480,13 @@ class SessionsView {
       this.current = [];
       this.match = this.matchBrowser || this.match;
       this.grid.classList.remove('stale');
+    }
+    if (recovered) {
+      // After failed reads, new and ended are not claimed across the gap: this read starts the diff
+      // again (rows and their rate history stay).
+      this.ended.clear();
+      this.prevIds = null;
+      this.prevComplete = false;
     }
     const table = data.sessions || {};
     const idx = this.ctx.store.policyIndex();
@@ -1332,11 +1512,29 @@ class SessionsView {
         const b = raw.out || {};
         const bytes = sum(a.bytes, b.bytes);
         const pkts = sum(a.packets, b.packets);
+        const dur = Number(raw.duration);
+        // When the session started: the device's start time when it sends one, else the read time
+        // minus the session's age (whole seconds on both sides: 2 s of slack).
+        const startKey = raw.start_time !== null && raw.start_time !== undefined && raw.start_time !== '' ? String(raw.start_time) : null;
+        const startCalc = Number.isFinite(dur) ? readAt - dur * 1000 : null;
         let k = this.known.get(id);
+        // The same id for another session: Junos may reuse a session id for a later session (inferred;
+        // how soon is not known, Spec 005). A new
+        // start time, or an age that went down, means a new session: forget the old one's counters
+        // and rate history, and show the row as new with its average rate.
+        if (k && ((startKey !== null && typeof k.startKey === 'string' && startKey !== k.startKey)
+          || (startKey === null && startCalc !== null && Number.isFinite(k.startCalc) && Math.abs(startCalc - k.startCalc) > 2000)
+          || (Number.isFinite(dur) && Number.isFinite(k.dur) && dur < k.dur))) {
+          k = { firstAt: now, lastBytes: null, lastAt: 0, hist: [], newAt: now, polls: 0 };
+          this.known.set(id, k);
+        }
         if (!k) {
           k = { firstAt: now, lastBytes: null, lastAt: 0, hist: [], newAt: this.prevIds !== null && reliable ? now : 0, polls: 0 };
           this.known.set(id, k);
         }
+        if (startKey !== null) k.startKey = startKey;
+        if (startCalc !== null && !Number.isFinite(k.startCalc)) k.startCalc = startCalc;
+        if (Number.isFinite(dur)) k.dur = dur;
         let rate = null;
         let live = false;
         if (k.lastBytes !== null && Number.isFinite(bytes) && now > k.lastAt) {
@@ -1381,7 +1579,9 @@ class SessionsView {
         this.colKey = null; // the node column appears only when rows carry a location
       }
     }
-    const matching = Number.isFinite(data.matching) ? data.matching : table.status === 'ok' ? (table.rows || []).length : null;
+    // Sessions matching the device filters, as the device counts them (the largest node's count on a
+    // cluster): never the number of rows, which counts both copies of each session there.
+    const matching = Number.isFinite(data.matching) ? data.matching : Number.isFinite(table.device_count) ? table.device_count : null;
     if (matching !== null) {
       this.history.push(matching);
       if (this.history.length > POLL_HISTORY) this.history.shift();
@@ -1436,48 +1636,55 @@ class SessionsView {
     r._newAt = k.newAt;
     r._firstAt = k.firstAt;
     r._zones = this.zonesOf(raw.policy, idx);
-    r._role = haRole(raw);
+    r._role = this.q ? this.q.sessionRole(raw) : null;
     r._backup = false;
+    r._backupWhy = null;
     return r;
   }
 
-  /** On a chassis cluster each session is listed by both nodes; mark the backup copies. */
+  /**
+   * On a chassis cluster each session is listed by both nodes; mark the backup copies (the shared
+   * rule, query.sessionCopies: a copy the device marks Backup, or, inferred, the zero-counter copy of
+   * a session whose other copy has traffic).
+   */
   markBackups(rows) {
+    const copies = this.q ? this.q.sessionCopies(rows) : { backups: new Set(), why: new Map() };
     let count = 0;
-    const bySid = new Map();
     for (const r of rows) {
-      if (!r.location) continue;
-      const list = bySid.get(r.session_id) || [];
-      list.push(r);
-      bySid.set(r.session_id, list);
+      r._backup = copies.backups.has(r.id);
+      r._backupWhy = r._backup ? copies.why.get(r.id) || null : null;
+      if (r._backup) count += 1;
     }
-    for (const r of rows) {
-      if (r._role === 'backup') {
-        r._backup = true;
-        r._backupWhy = 'the device marks this copy Backup';
-      }
-    }
-    for (const list of bySid.values()) {
-      if (list.length < 2 || list.some((r) => r._role)) continue;
-      // No role field: a copy with zero counters next to one with traffic is the backup copy.
-      const busy = list.filter((r) => (r._bytes || 0) > 0 || (r._pkts || 0) > 0);
-      if (busy.length >= 1 && busy.length < list.length) {
-        for (const r of list) {
-          if (!busy.includes(r)) {
-            r._backup = true;
-            r._backupWhy = 'inferred: the same session on another node, with zero counters';
-          }
-        }
-      }
-    }
-    for (const r of rows) if (r._backup) count += 1;
     this.backupCount = count;
   }
 
   // ---- filtering, sorting, facets --------------------------------------------------------------
 
-  recompute({ facets = true } = {}) {
+  /**
+   * The rows to keep in place while the table re-sorts under a scrolled viewport, best first: the
+   * focused row, the selected row (each when on screen), then the visible rows from the top. None at
+   * the top of the table, where new rows should appear.
+   */
+  scrollAnchors() {
+    const L = this.list;
+    if (!L || L.scrollTop <= 0 || !this.rows.length) return [];
+    const w = L.range;
+    const onScreen = (id) => {
+      const i = id ? this.indexById.get(id) : undefined;
+      return i !== undefined && i >= w.first && i <= w.last;
+    };
+    const keys = [];
+    const f = L.focusedNode();
+    if (f && onScreen(f.dataset.key)) keys.push(f.dataset.key);
+    if (this.selId && onScreen(this.selId) && !keys.includes(this.selId)) keys.push(this.selId);
+    for (let i = Math.max(0, w.first); i <= w.last && keys.length < 16; i += 1) if (this.rows[i] && !keys.includes(this.rows[i].id)) keys.push(this.rows[i].id);
+    return L.anchorsFor(keys);
+  }
+
+  /** `anchor`: keep the viewed rows in place when scrolled (off for a new sort order, which reorders everything). */
+  recompute({ facets = true, anchor = true } = {}) {
     if (!this.list) return;
+    const anchors = anchor ? this.scrollAnchors() : [];
     const keepBackups = this.showBackups;
     const rows = [];
     let listed = 0;
@@ -1532,6 +1739,7 @@ class SessionsView {
     this.maxRate = maxRate;
     this.grid.setAttribute('aria-rowcount', String(ordered.length + 1));
     this.list.setCount(ordered.length);
+    this.list.keepAnchor(anchors);
     this.list.sync(true);
     this.reshowHover();
     if (this.bar) {
@@ -1602,14 +1810,20 @@ class SessionsView {
   }
 
   renderSub() {
-    const fmt = this.fmt;
     const snap = this.ctx.store.lastInventory;
     const dev = snap && snap.device && snap.device.status === 'ok' ? snap.device : null;
     const meta = this.payload && this.payload.meta;
-    const user = (meta && meta.read_as && meta.read_as.user) || (this.ctx.store.session && this.ctx.store.session.user) || '';
+    const ra = (meta && meta.read_as) || {};
+    const session = this.ctx.store.session || {};
     const root = this.ctx.store.scope === 'root';
-    const parts = [dev && dev.hostname, root ? 'root system' : 'flow sessions are read for the root system', root && meta && `read ${fmt.time(meta.read_at)} UTC`, user && `as ${user}`].filter(Boolean);
-    this.sub.textContent = parts.join(SEP);
+    // The session table is the root system's whatever scope the shell is on (Spec 004).
+    this.ctx.dom.viewSub(this.sub, {
+      host: dev ? dev.hostname : null,
+      scope: this.ctx.ui.scopeLabel('root'),
+      readAt: root && meta ? meta.read_at : null,
+      user: ra.user || session.user || '',
+      backend: ra.backend || session.backend || null,
+    });
   }
 
   renderLive() {
@@ -1618,27 +1832,36 @@ class SessionsView {
     const stopped = Boolean(this.halted) || !scopeOk || Boolean(this.serverError);
     const running = !this.paused && !stopped;
     // What the pill says is what the view is doing: reading for the first time, retrying after a
-    // failed read (every 15 s), live, paused or stopped.
-    const mode = !running ? (stopped ? 'stopped' : 'paused') : this.failure ? 'retry' : !this.payload ? 'reading' : 'live';
-    const s = this.intervalS();
-    const sig = `${mode}|${s}|${this.halted}|${scopeOk}`;
+    // failed read (every 15 s), live, paused by the operator or by the shell's idle pause, or stopped.
+    const mode = !running ? (stopped ? 'stopped' : 'paused') : this.idle ? 'idle' : this.failure ? 'retry' : !this.payload ? 'reading' : 'live';
+    const s = this.slowS || this.intervalS();
+    const countFail = Boolean(this.failure && this.failure.status === 'count-unknown');
+    const sig = `${mode}|${s}|${this.halted}|${scopeOk}|${countFail}`;
     if (sig === this.liveSig) return;
     this.liveSig = sig;
-    const text = { live: 'LIVE', reading: 'READING…', retry: 'RETRY', paused: 'PAUSED', stopped: 'STOPPED' }[mode];
-    const sub = { live: `${s} s`, reading: '', retry: `${Math.max(RETRY_S, s)} s`, paused: 'space', stopped: this.halted || (scopeOk ? 'filter' : 'scope') }[mode];
-    this.livePill.className = ['live-pill', mode !== 'live' && 'paused', mode === 'retry' && 'sx-retry', mode === 'reading' && 'sx-first'].filter(Boolean).join(' ');
+    const text = { live: 'LIVE', reading: 'READING…', retry: 'RETRY', paused: 'PAUSED', idle: 'PAUSED', stopped: 'STOPPED' }[mode];
+    const halted = this.halted === 'no-count' ? 'no count' : this.halted;
+    const sub = { live: `${s} s`, reading: '', retry: `${Math.max(RETRY_S, s)} s`, paused: 'space', idle: 'idle', stopped: halted || (scopeOk ? 'filter' : 'scope') }[mode];
+    this.livePill.className = ['live-pill', mode !== 'live' && 'paused', mode === 'retry' && 'sx-retry', mode === 'reading' && 'sx-first', mode === 'idle' && 'sx-idle'].filter(Boolean).join(' ');
     this.livePill.replaceChildren(...[h('span', { class: 'dot', 'aria-hidden': 'true' }), text, sub ? h('span', { class: 'sub' }, sub) : null].filter(Boolean));
     const label = {
-      live: `Live: the session table is read every ${s} s. Pause (space).`,
+      live: this.slowS
+        ? `Live: the session table is read every ${s} s while the filtered count is not known (the table-wide count it depends on is read at most every ${SLOW_S} s). Pause (space).`
+        : `Live: the session table is read every ${s} s. Pause (space).`,
       reading: 'Reading the session table for the first time. Pause (space).',
-      retry: `The last read failed; J-Wicket tries again every ${Math.max(RETRY_S, s)} s. Pause (space).`,
+      retry: countFail
+        ? `The session count could not be read, so sessions were not listed; J-Wicket tries again every ${Math.max(RETRY_S, s)} s. Pause (space).`
+        : `The last read failed; J-Wicket tries again every ${Math.max(RETRY_S, s)} s. Pause (space).`,
       paused: 'Paused. Resume live updates (space).',
-      stopped: 'Not reading: see the message below. Refresh (r) reads once more.',
+      idle: 'Live reads paused: no activity. Move the pointer or press a key to resume.',
+      stopped: this.halted === 'no-count'
+        ? 'Not reading: this device\'s session summary reports no count J-Wicket can read. Refresh (r) reads once more.'
+        : 'Not reading: see the message below. Refresh (r) reads once more.',
     }[mode];
     this.livePill.setAttribute('aria-pressed', running ? 'false' : 'true');
     this.livePill.setAttribute('aria-label', label);
     this.livePill.title = label;
-    this.ctx.ui.setLive('sessions', mode === 'live' || mode === 'reading');
+    this.ctx.ui.setLive('sessions', mode === 'live' || mode === 'reading' || mode === 'idle');
   }
 
   renderInterval() {
@@ -1678,17 +1901,26 @@ class SessionsView {
     const fmt = this.fmt;
     const data = this.payload;
     const s = data && data.summary;
-    if (s && s.status === 'ok' && Number.isFinite(s.active)) {
+    const table = data && data.sessions;
+    const ok = Boolean(s && s.status === 'ok');
+    // A chassis cluster: each node holds a copy of every session, so the figures are the largest
+    // node's and are never added up across nodes.
+    const nodes = ok && Array.isArray(s.nodes) && s.nodes.length >= 2 ? s.nodes : null;
+    const cluster = Boolean(nodes) || Boolean(table && Array.isArray(table.nodes) && table.nodes.length >= 2);
+    this.activeCap.textContent = nodes ? 'Active sessions (largest node)' : 'Active sessions';
+    this.matchCap.textContent = cluster ? 'Matching (largest node), per poll' : 'Matching, per poll';
+    if (ok && Number.isFinite(s.active)) {
       this.gauge.update(s.active, s.max, { text: Number.isFinite(s.max) ? fmt.pct(s.active, s.max) : DASH, sub: '' });
       tick(this.activeNum, fmt.num(s.active));
-      this.activeOf.textContent = Number.isFinite(s.max) ? `of ${fmt.num(s.max)} maximum` : 'maximum not reported';
-      this.activeOf.title = '';
+      this.renderActiveOf();
     } else {
       this.gauge.update(null, null, { text: DASH, sub: '' });
       this.activeNum.textContent = DASH;
       this.activeOf.textContent = s && s.status && s.status !== 'ok' ? `summary ${s.status}` : '';
-      this.activeOf.title = (s && s.message) || '';
+      this.activeOf.title = s && s.message ? this.P(s.message) : '';
     }
+    this.renderNodes(nodes);
+    this.renderFailed(ok ? s : null, nodes);
     this.spark.update(this.history);
     if (this.history.length) {
       const lo = Math.min(...this.history);
@@ -1700,6 +1932,90 @@ class SessionsView {
     this.renderStats();
     this.renderAge();
     this.renderInterval();
+  }
+
+  /**
+   * "of 524,288 maximum"; when the server answered from its table-wide gauge (a filtered read reuses
+   * it for 30 s), how old that figure is, measured on the server's clock.
+   */
+  renderActiveOf() {
+    const fmt = this.fmt;
+    const s = this.payload && this.payload.summary;
+    if (!s || s.status !== 'ok' || !Number.isFinite(s.active)) return;
+    const max = Number.isFinite(s.max) ? `of ${fmt.num(s.max)} maximum` : 'maximum not reported';
+    let text = max;
+    let title = '';
+    if (s.cached) {
+      const gaugeAt = Date.parse(s.read_at || '');
+      const readAt = Date.parse((this.payload.meta && this.payload.meta.read_at) || '');
+      const lag = Number.isFinite(gaugeAt) && Number.isFinite(readAt) ? Math.max(0, readAt - gaugeAt) : 0;
+      const now = Date.now();
+      text = `${max} · table-wide, ${fmt.ago(new Date(now - lag - (now - this.lastOkAt)), now)}`;
+      title = 'Read without your filters at most every 30 s to keep the device\'s load down';
+    }
+    if (this.activeOf.textContent !== text) this.activeOf.textContent = text;
+    if (this.activeOf.title !== title) this.activeOf.title = title;
+  }
+
+  /** One line under the gauge on a cluster: "node0 12,345 · node1 12,341 active" (never a sum). */
+  renderNodes(nodes) {
+    const { h } = this;
+    const fmt = this.fmt;
+    const sig = nodes ? JSON.stringify(nodes.map((n) => [n.node, n.active, n.max, n.failed])) : '';
+    if (sig === this.sigs.nodes) return;
+    this.sigs.nodes = sig;
+    this.nodesEl.hidden = !nodes;
+    if (!nodes) {
+      this.nodesEl.replaceChildren();
+      this.nodesEl.title = '';
+      return;
+    }
+    const n2 = (v) => (Number.isFinite(v) ? fmt.num(v) : 'not reported');
+    const parts = [];
+    nodes.forEach((n, i) => {
+      const name = n.node || `node ${i + 1}`;
+      const differs = Number.isFinite(n.active) && nodes.some((o) => {
+        if (o === n || !Number.isFinite(o.active)) return false;
+        const big = Math.max(n.active, o.active);
+        return big > 0 && Math.abs(n.active - o.active) / big > 0.01;
+      });
+      if (i) parts.push(SEP);
+      parts.push(h(
+        'span',
+        { class: ['sx-node-n', differs && 'sx-node-diff'], title: differs ? 'This node\'s count differs from the other node\'s by more than 1 %' : null },
+        h('span', { class: 'sx-node-name' }, this.V(name)),
+        ` ${n2(n.active)}`,
+      ));
+    });
+    parts.push(' active');
+    this.nodesEl.replaceChildren(...parts);
+    this.nodesEl.title = nodes.map((n, i) => `${this.P(n.node || `node ${i + 1}`)}: ${n2(n.active)} active of ${n2(n.max)} maximum, ${n2(n.failed)} failed`).join('; ');
+  }
+
+  /** Failed sessions as the device reports them, when any: one node's total, or each node's (never a sum). */
+  renderFailed(s, nodes) {
+    const fmt = this.fmt;
+    let parts = null;
+    if (nodes) {
+      if (nodes.some((n) => Number(n.failed) > 0)) {
+        parts = [];
+        nodes.forEach((n, i) => {
+          if (i) parts.push(SEP);
+          parts.push(...this.V(n.node || `node ${i + 1}`), ` ${Number.isFinite(n.failed) ? fmt.num(n.failed) : DASH}`);
+        });
+        parts.push(' failed');
+      }
+    } else if (s && Number.isFinite(s.failed) && s.failed > 0) {
+      parts = [`${fmt.num(s.failed)} failed`];
+    }
+    const sig = parts ? JSON.stringify(nodes ? nodes.map((n) => [n.node, n.failed]) : s.failed) : '';
+    if (sig === this.sigs.failed) return;
+    this.sigs.failed = sig;
+    this.failedEl.hidden = !parts;
+    this.failedEl.replaceChildren(...(parts || []));
+    this.failedEl.title = parts
+      ? `Failed-sessions as the device reports it (show security flow session summary). J-Wicket does not know why they failed.${nodes ? ' Each node as it reports it, never added up.' : ''}`
+      : '';
   }
 
   renderStats() {
@@ -1717,15 +2033,31 @@ class SessionsView {
     const differs = ok && this.browserActive && this.shownCount !== listed;
     if (differs) set(this.statShown, `· ${fmt.num(this.shownCount)} shown`);
     this.statShown.hidden = !differs;
-    this.statListed.closest('.sx-stat').classList.toggle('filtered', Boolean(differs));
+    const box = this.statListed.closest('.sx-stat');
+    box.classList.toggle('filtered', Boolean(differs));
+    // On a cluster, how many sessions each node counts for the device filters (the device's figure).
+    const tn = ok && Array.isArray(table.nodes) && table.nodes.length >= 2 ? table.nodes : null;
+    const title = tn
+      ? `${LISTED_TITLE}. Per node, as the device counts the matching sessions: ${tn.map((n, i) => `${this.P(n.node || `node ${i + 1}`)} ${Number.isFinite(n.device_count) ? fmt.num(n.device_count) : 'not reported'}`).join(', ')}.`
+      : LISTED_TITLE;
+    if (box.title !== title) box.title = title;
   }
 
   renderAge() {
+    this.renderActiveOf();
     if (!this.payload) return;
     this.readTime.textContent = `${this.fmt.time(this.payload.meta && this.payload.meta.read_at)} UTC`;
-    const stale = this.failure ? ` · ${this.failure.status === 'offline' ? 'no answer' : 'read failed'}` : '';
-    this.readAgo.textContent = `${this.fmt.ago(this.lastOkAt)}${stale}`;
+    let suffix = '';
+    if (this.failure) {
+      suffix = ` · ${this.failure.status === 'offline' ? 'no answer' : this.failure.status === 'count-unknown' ? 'count not read' : 'read failed'}`;
+    } else if (this.limited) {
+      // A 429 is not a failure: the table is not dimmed and the pill does not change.
+      suffix = this.limited.reason === 'busy' ? ' · waiting: another read on your session is running' : ' · waiting: J-Wicket\'s read limit (another tab may be reading)';
+    }
+    const text = `${this.fmt.ago(this.lastOkAt)}${suffix}`;
+    if (this.readAgo.textContent !== text) this.readAgo.textContent = text;
     this.readAgo.classList.toggle('bad', Boolean(this.failure));
+    this.readAgo.classList.toggle('wait', !this.failure && Boolean(this.limited));
   }
 
   renderNotices() {
@@ -1736,7 +2068,8 @@ class SessionsView {
     const sig = [];
     const note = (cls, iconName, text, ...actions) => {
       sig.push(cls, text, actions.filter(Boolean).length);
-      return h('div', { class: ['sx-note', cls] }, icon(iconName), h('span', { class: 'sx-note-t' }, text), ...actions);
+      // Notices may carry device text (a server message): hidden characters are shown.
+      return h('div', { class: ['sx-note', cls] }, icon(iconName), h('span', { class: 'sx-note-t' }, this.ctx.dom.vis(text)), ...actions);
     };
     const btn = (label, fn, fk) => h('button', { class: 'btn sm', type: 'button', dataset: { fk: fk || label }, on: { click: fn } }, label);
     if (this.queryError) {
@@ -1754,12 +2087,21 @@ class SessionsView {
     // A failed read with an earlier one on screen: this banner (the table stays, dimmed). With
     // nothing read yet, the state card in place of the table says it once.
     if (this.failure && this.payload) {
-      const when = ` Showing the read from ${fmt.time(this.payload.meta && this.payload.meta.read_at)} UTC.`;
-      out.push(note('bad', this.failure.status === 'offline' ? 'wifi' : 'alert', `${this.failure.message}${when} Retrying every ${RETRY_S} s.`, btn('Retry now', () => this.poll(true), 'retry')));
+      if (this.failure.status === 'count-unknown') {
+        // The count could not be read (transient): the card says so above the last good rows.
+        sig.push('count-unknown', this.failure.message);
+        out.push(this.failureCard(true));
+      } else {
+        const when = ` Showing the read from ${fmt.time(this.payload.meta && this.payload.meta.read_at)} UTC.`;
+        out.push(note('bad', this.failure.status === 'offline' ? 'wifi' : 'alert', `${this.failure.message}${when} Retrying every ${RETRY_S} s.`, btn('Retry now', () => this.poll(true), 'retry')));
+      }
+    }
+    // Consecutive 429s for a while: another read of this session holds the device turn.
+    if (this.limited && !this.failure && Date.now() - this.limited.since >= WAIT_NOTE_MS) {
+      out.push(note('info', 'clock', 'Another J-Wicket read on your session (for example the policy inventory) is taking long; sessions resume when it finishes.'));
     }
     const table = this.payload && this.payload.sessions;
     if (table && table.status === 'ok' && table.truncated) {
-      const total = Number.isFinite(table.returned) ? table.returned : table.device_count;
       const more = this.limit < LIMITS[LIMITS.length - 1]
         ? btn(`Show up to ${fmt.num(LIMITS[LIMITS.length - 1])}`, () => {
           this.limit = LIMITS[LIMITS.length - 1];
@@ -1768,7 +2110,16 @@ class SessionsView {
           this.poll(true);
         })
         : null;
-      out.push(note('warn', 'filter', `The device returned ${fmt.num(total)} sessions; J-Wicket kept the first ${fmt.num((table.rows || []).length)} (limit ${fmt.num(this.limit)}). New and ended are not tracked while the list is cut; narrow the query with a device filter.`, more));
+      const tail = ' New and ended are not tracked while the list is cut; narrow the query with a device filter.';
+      const tn = Array.isArray(table.nodes) && table.nodes.length >= 2 ? table.nodes : null;
+      if (tn) {
+        // A cluster reply: the limit counts sessions, and both copies of each kept session are listed.
+        const rows = Number.isFinite(table.returned) ? table.returned : (table.rows || []).length;
+        out.push(note('warn', 'filter', `The device returned ${fmt.num(rows)} rows from ${tn.length} nodes (each session is listed by both); J-Wicket kept both copies of the first ${fmt.num(distinctSessions(table.rows))} sessions (limit ${fmt.num(this.limit)}).${tail}`, more));
+      } else {
+        const total = Number.isFinite(table.returned) ? table.returned : table.device_count;
+        out.push(note('warn', 'filter', `The device returned ${fmt.num(total)} sessions; J-Wicket kept the first ${fmt.num((table.rows || []).length)} (limit ${fmt.num(this.limit)}).${tail}`, more));
+      }
     }
     if (this.backupCount && !this.showBackups) {
       out.push(note('info', 'cluster', `Chassis cluster: ${fmt.plural(this.backupCount, 'backup copy', 'backup copies')} hidden (every session is listed by both nodes).`, btn('Show backup copies', () => this.setBackups(true), 'backups')));
@@ -1829,7 +2180,7 @@ class SessionsView {
       card = () => stateCard({
         status: 'unsupported',
         title: 'Sessions are listed for the root system only',
-        message: 'This release reads the session table of the whole device (Spec 004); logical and tenant systems are not separated yet.',
+        message: 'Sessions are read for the root system (Junos\'s default for this read, inferred from the RPC schema); logical and tenant systems are not read yet.',
         hint: null,
         // The shell's scope switcher is the one control that changes scope (a hash without
         // scope=... does not return to root), so the button opens it.
@@ -1843,15 +2194,21 @@ class SessionsView {
       if (this.failure) {
         sig = `fail|${this.failure.status}|${this.failure.message}`;
         solo = true;
-        card = () => stateCard({ status: this.failure.status, message: this.failure.message, hint: `J-Wicket tries again every ${RETRY_S} s.`, actions: [btn('Retry now', () => this.poll(true))] });
+        card = () => this.failureCard(false);
       } else {
         loading = true;
       }
     } else if (!table || table.status !== 'ok') {
       const st = (table && table.status) || 'failed';
-      sig = `table|${st}|${table && table.message}|${st === 'refused' ? JSON.stringify([this.payload.matching, this.narrowing().map((s) => s.term), this.plan && this.plan.explain.map((e) => e.text)]) : ''}`;
+      const t = table || {};
+      const more = st === 'refused'
+        ? [this.payload.matching, t.max_listed, this.narrowing().map((s) => s.term), this.plan && this.plan.explain.map((e) => e.text)]
+        : [t.reason, t.active, t.max_listed, t.summary_status, t.filters, this.device];
+      sig = `table|${st}|${t.message}|${JSON.stringify(more)}`;
       solo = true;
-      hard = st === 'denied' || st === 'unsupported';
+      // Nothing on this view can be read: only when the device refused the unfiltered read. With
+      // device filters on, the answer may be about the filter, and the query bar stays.
+      hard = (st === 'denied' || st === 'unsupported') && !Object.keys(this.device).length;
       card = () => this.stateFor(table || { status: 'failed' }, hard ? [history] : null);
     } else if (!this.rows.length) {
       const listed = this.listedCount || 0;
@@ -1888,7 +2245,30 @@ class SessionsView {
     this.grid.hidden = Boolean(card);
     this.skel.hidden = !loading;
     if (loading && !this.skel.firstChild) this.renderSkeleton();
+    // The first read got a 429: say what the skeleton waits for.
+    this.waitNote.hidden = !(loading && this.limited);
     this.exportBtn.disabled = !this.rows.length;
+  }
+
+  /**
+   * The card for a failed read: in place of the table when nothing was read yet, or (compact, in the
+   * notices) above the last good rows when the session count could not be read.
+   */
+  failureCard(compact) {
+    const { h } = this;
+    const f = this.failure;
+    const retry = h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'retry' }, on: { click: () => this.poll(true) } }, 'Retry now');
+    if (f.status === 'count-unknown') {
+      return this.ctx.dom.stateCard({
+        status: 'count-unknown',
+        title: 'Not listed: the session count could not be read',
+        message: f.message,
+        hint: `J-Wicket tries again in ${RETRY_S} s.`,
+        actions: [retry],
+        compact,
+      });
+    }
+    return this.ctx.dom.stateCard({ status: f.status, message: f.message, hint: `J-Wicket tries again every ${RETRY_S} s.`, actions: [retry], compact });
   }
 
   /** While nothing has been read: the real header and twelve rows shaped like the columns. */
@@ -1948,36 +2328,128 @@ class SessionsView {
     this.applyQuery(text, { push: true });
   }
 
+  /** Drop the terms the device filtered on from the query; the browser terms stay as typed. */
+  removeDeviceFilters() {
+    if (!this.plan || !this.ast) return;
+    const items = this.ast.type === 'and' ? this.ast.items : [this.ast];
+    // plan() lists one explain entry per top-level item, in order.
+    const kept = items.filter((_it, i) => !(this.plan.explain[i] && this.plan.explain[i].where === 'device'));
+    const text = kept.length ? this.q.toQueryString(kept.length === 1 ? kept[0] : { type: 'and', items: kept }) : '';
+    if (this.bar) this.bar.setValue(text);
+    this.applyQuery(text, { push: true });
+    this.ctx.ui.announce(text ? `Device filters removed; still filtering in the browser by ${this.P(text)}.` : 'Device filters removed.');
+  }
+
+  /** Keep the given device filters, but apply them in the browser (the device did not accept them). */
+  filterInBrowser(filters) {
+    for (const [k, v] of Object.entries(filters || {})) this.rejected.set(k, String(v));
+    // The same query, planned again: those values now stay in the browser, and the read changes.
+    this.applyQuery(this.goodText, { push: false });
+    this.ctx.ui.announce(`Filtering ${Object.keys(filters || {}).join(', ')} in the browser; the device reads without ${Object.keys(filters || {}).length === 1 ? 'it' : 'them'}.`);
+  }
+
+  /** The most sessions J-Wicket lists in one read (5,000), as the server states it. */
+  maxListed(table) {
+    const meta = (this.payload && this.payload.meta) || {};
+    if (table && Number.isFinite(table.max_listed)) return table.max_listed;
+    return Number.isFinite(meta.max_listed) ? meta.max_listed : null;
+  }
+
+  /**
+   * The device filters of a read the device did not accept, as query terms ("app=ftp, dport=21"):
+   * from the server's `filters` (RPC parameter names), else the filters this view sent.
+   */
+  rejectedFilters(table) {
+    const out = {};
+    if (table && table.filters && typeof table.filters === 'object') {
+      for (const [k, v] of Object.entries(table.filters)) out[RPC_KEY[k] || k] = String(v);
+    }
+    return Object.keys(out).length ? out : { ...this.device };
+  }
+
   stateFor(table, extra = null) {
     const { h } = this;
     const { stateCard } = this.ctx.dom;
     const fmt = this.fmt;
     const status = table.status || 'failed';
+    const btn = (label, fn, fk) => h('button', { class: 'btn sm', type: 'button', dataset: { fk: fk || label }, on: { click: fn } }, label);
     if (status === 'refused') {
       const matching = this.payload && Number.isFinite(this.payload.matching) ? this.payload.matching : null;
+      const max = this.maxListed(table);
       const sugg = this.narrowing();
       const chips = sugg.map((s) =>
         h(
           'button',
-          { class: 'sx-sugg', type: 'button', dataset: { fk: s.term }, title: `${s.why}. Adds ${s.term} to the query (filtered on the device).`, on: { click: () => this.addTerm(s.key, s.value, false) } },
-          h('span', { class: 'sx-sugg-t' }, s.term),
-          h('span', { class: 'sx-sugg-w' }, s.why),
+          { class: 'sx-sugg', type: 'button', dataset: { fk: s.term }, title: this.P(`${s.why}. Adds ${s.term} to the query (filtered on the device).`), on: { click: () => this.addTerm(s.key, s.value, false) } },
+          h('span', { class: 'sx-sugg-t' }, this.V(s.term)),
+          h('span', { class: 'sx-sugg-w' }, this.V(s.why)),
         ),
       );
       const browserOnly = this.plan && this.plan.explain.filter((e) => e.where === 'browser').map((e) => e.text);
+      let title = 'Too many sessions to list in one go';
+      if (matching !== null && max !== null) title = `${fmt.num(matching)} sessions match: J-Wicket lists at most ${fmt.num(max)} at a time`;
+      else if (matching !== null) title = `${fmt.num(matching)} sessions match: too many to list in one go`;
       return h(
         'div',
         { class: 'sx-refused' },
         stateCard({
           status: 'refused',
-          title: matching !== null ? `${fmt.num(matching)} sessions match: too many to list in one go` : 'Too many sessions to list in one go',
-          message: table.message ? String(table.message).replace(/^[\d,.\s]+sessions match\.\s*/i, '') : null,
+          title,
+          message: table.message || null,
           hint: browserOnly && browserOnly.length
-            ? `${browserOnly.join(', ')} ${browserOnly.length === 1 ? 'is' : 'are'} filtered in the browser, after the device has listed the rows, so ${browserOnly.length === 1 ? 'it does' : 'they do'} not make the list shorter. Add a device filter: src, dst, sport, dport, proto, app or iface.`
-            : 'Add a device filter (src, dst, sport, dport, proto, app or iface). Each one below narrows the read on the device itself.',
+            ? `${browserOnly.join(', ')} ${browserOnly.length === 1 ? 'is' : 'are'} filtered in the browser, after the device has listed the rows, so ${browserOnly.length === 1 ? 'it does' : 'they do'} not make the list shorter. Add a device filter: ${DEVICE_KEYS_TEXT}.`
+            : `Add a device filter: ${DEVICE_KEYS_TEXT}. Each one below narrows the read on the device itself.`,
           actions: chips.length ? [h('div', { class: 'sx-suggs' }, chips)] : null,
         }),
       );
+    }
+    if (status === 'count-unknown') {
+      // Why the count is not known decides what helps (Spec 004): the reason, never the prose.
+      const max = this.maxListed(table);
+      if (table.reason === 'no-count') {
+        return stateCard({
+          status: 'count-unknown',
+          title: 'Not listed: this device\'s session summary reports no count J-Wicket can read',
+          message: table.message || null,
+          hint: 'J-Wicket stops reading until you refresh (r): asking again every few seconds would add a logged RPC each time for a reply that will not change.',
+          actions: [btn('Read again', () => this.poll(true), 'try')],
+        });
+      }
+      if (table.reason === 'no-count-over-limit') {
+        return stateCard({
+          status: 'count-unknown',
+          title: Number.isFinite(table.active)
+            ? `Not listed: the filtered summary has no count, and ${fmt.num(table.active)} sessions are active`
+            : 'Not listed: the filtered summary has no count',
+          message: table.message || null,
+          hint: max !== null
+            ? `On this device the filtered summary returns no count, so J-Wicket lists only while the whole table has at most ${fmt.num(max)} sessions. A narrower filter does not change that.`
+            : 'On this device the filtered summary returns no count, so J-Wicket lists only while the whole table is small enough. A narrower filter does not change that.',
+        });
+      }
+      if (table.reason === 'summary-failed') {
+        return stateCard({ status: 'count-unknown', title: 'Not listed: the session count could not be read', message: table.message || null, hint: `J-Wicket tries again in ${RETRY_S} s.`, actions: [btn('Retry now', () => this.poll(true), 'retry')] });
+      }
+      return stateCard({ status: 'count-unknown', message: table.message || null });
+    }
+    const filtered = Object.keys(this.device).length > 0;
+    if (status === 'filter-rejected' || ((status === 'denied' || status === 'unsupported') && filtered)) {
+      // The device did not accept the filtered read (or refused it, with filters on): the filter is
+      // the likely cause. Whether an invalid value makes Junos answer "syntax error" is inferred.
+      const filters = this.rejectedFilters(table);
+      const terms = Object.entries(filters).map(([k, v]) => `${k}=${v}`).join(', ');
+      // The server's message may already end with the card's hint: say it once.
+      const hint = (this.ctx.dom.STATE_HINTS || {})['filter-rejected'];
+      return stateCard({
+        status: 'filter-rejected',
+        title: `The device did not accept the filter ${terms}`,
+        message: table.message || null,
+        hint: hint && table.message && String(table.message).includes(hint) ? null : undefined,
+        actions: [
+          btn('Remove device filters', () => this.removeDeviceFilters(), 'drop-device'),
+          btn('Filter in the browser instead', () => this.filterInBrowser(filters), 'in-browser'),
+        ],
+      });
     }
     if (status === 'denied') {
       return stateCard({ status: 'denied', message: table.message, hint: 'Listing flow sessions needs the Junos view permission for security operational commands. J-Wicket reads as you and adds no rights.', actions: extra });
@@ -2001,6 +2473,8 @@ class SessionsView {
     const out = [];
     const seen = new Set();
     const add = (key, value, why) => {
+      // A name with hidden characters would become a browser-side wildcard: it cannot narrow the read.
+      if (this.fmt.hasControls(String(value), { all: true })) return;
       const term = `${key}:${qv(value)}`;
       if (seen.has(term) || out.length >= 8 || (this.device && this.device[key] !== undefined)) return;
       seen.add(term);
@@ -2034,19 +2508,21 @@ class SessionsView {
   // ---- rendering: rows -------------------------------------------------------------------------
 
   /** A clickable value (filter by it; Alt excludes). Focusable with the arrow keys inside a row. */
+  /** `display` is device text (a string, shown with its hidden characters badged) or nodes built already. */
   fx(key, value, display, cls) {
-    if (value === null || value === undefined || value === '') return this.h('span', { class: ['faint', cls] }, display ?? DASH);
-    return this.h('span', { class: ['fx', cls], tabindex: '-1', dataset: { k: key, v: String(value), fk: `${key}=${value}` } }, display ?? String(value));
+    const shown = typeof display === 'string' ? this.V(display) : display;
+    if (value === null || value === undefined || value === '') return this.h('span', { class: ['faint', cls] }, shown ?? DASH);
+    return this.h('span', { class: ['fx', cls], tabindex: '-1', dataset: { k: key, v: String(value), fk: `${key}=${value}` } }, shown ?? this.V(String(value)));
   }
 
   /**
    * An address whose middle is cut (never its last group) when the column is too narrow. An IPv4
-   * address (at most 15 characters) always fits its column, so it stays one text node.
+   * address (at most 15 characters) always fits its column, so it stays one text run.
    */
   addr(text) {
-    if (String(text).length <= 15) return String(text);
+    if (String(text).length <= 15) return this.V(String(text));
     const [head, tail] = splitTail(text);
-    return [this.h('span', { class: 'ip-h' }, head), this.h('span', { class: 'ip-t' }, tail)];
+    return [this.h('span', { class: 'ip-h' }, this.V(head)), this.h('span', { class: 'ip-t' }, this.V(tail))];
   }
 
   /** What a cell shows depends only on this string: equal signatures, no DOM work. */
@@ -2097,22 +2573,22 @@ class SessionsView {
     switch (c.id) {
       case 'status': {
         const { cls, label } = this.statusOf(r);
-        return h('span', { class: ['sx-dot', cls], title: label }, h('span', { class: 'sr-only' }, label));
+        return h('span', { class: ['sx-dot', cls], title: this.P(label) }, h('span', { class: 'sr-only' }, this.V(label)));
       }
       case 'id':
-        return h('span', { class: 'sx-id num' }, r.session_id || r.id);
+        return h('span', { class: 'sx-id num' }, this.V(r.session_id || r.id));
       case 'policy':
         return this.fx('policy', r.policy, r.policy || DASH, 'sx-pol');
       case 'zones': {
         const z = r._zones;
-        if (!z) return h('span', { class: 'faint', title: r.policy ? `Policy ${r.policy} is not in the inventory of this scope (a default policy?)` : '' }, DASH);
+        if (!z) return h('span', { class: 'faint', title: r.policy ? this.P(`Policy ${r.policy} is not in the inventory of this scope (a default policy?)`) : '' }, DASH);
         if (z.global && !z.fromAll.length && !z.toAll.length) return h('span', { class: 'faint', title: 'A global policy without from- or to-zones: the zones are not known from the policy' }, 'global');
         return h(
           'span',
-          { class: 'sx-zones', title: z.ambiguous ? `Policy name used in several zone pairs: ${z.fromAll.join(', ')} → ${z.toAll.join(', ')}` : null },
-          z.from ? this.fx('from', z.from, z.from, 'sx-zone') : h('span', { class: 'sx-zone faint' }, z.fromText),
+          { class: 'sx-zones', title: z.ambiguous ? this.P(`Policy name used in several zone pairs: ${z.fromAll.join(', ')} → ${z.toAll.join(', ')}`) : null },
+          z.from ? this.fx('from', z.from, z.from, 'sx-zone') : h('span', { class: 'sx-zone faint' }, this.V(z.fromText)),
           h('span', { class: 'sx-arr' }, ARROW),
-          z.to ? this.fx('to', z.to, z.to, 'sx-zone') : h('span', { class: 'sx-zone faint' }, z.toText),
+          z.to ? this.fx('to', z.to, z.to, 'sx-zone') : h('span', { class: 'sx-zone faint' }, this.V(z.toText)),
         );
       }
       case 'proto':
@@ -2177,7 +2653,7 @@ class SessionsView {
     const ipEl = this.fx(ipKey, ip, this.addr(v6 ? `[${ip}]` : ip), 'ip');
     return h(
       'span',
-      { class: 'sx-ep', title: hp(ip, port) },
+      { class: 'sx-ep', title: this.P(hp(ip, port)) },
       ipEl,
       port !== null && port !== undefined ? [h('span', { class: 'sx-colon' }, ':'), this.fx(portKey, port, String(port), 'port')] : null,
     );
@@ -2189,7 +2665,7 @@ class SessionsView {
     if (!ip) return h('span', { class: 'faint' }, DASH);
     const v6 = String(ip).includes(':');
     const kids = [...this.addr(v6 ? `[${ip}]` : ip)];
-    if (port !== null && port !== undefined && port !== '') kids.push(h('span', { class: 'ip-p' }, `:${port}`));
+    if (port !== null && port !== undefined && port !== '') kids.push(h('span', { class: 'ip-p' }, ':', this.V(String(port))));
     return this.fx(key, ip, kids, 'nat');
   }
 
@@ -2210,7 +2686,7 @@ class SessionsView {
     }
     if (n.source && !n.destination) parts.push(this.natEp('natsrc', b.dst, b.dport));
     else if (n.destination) parts.push(h('span', { class: 'sx-arr' }, ARROW), this.natEp('natdst', b.src, b.sport));
-    return h('span', { class: 'sx-nat', title: tips.join('; ') }, parts);
+    return h('span', { class: 'sx-nat', title: this.P(tips.join('; ')) }, parts);
   }
 
   /** Which row takes Tab: the selected one when it is rendered, else the first visible one. */
@@ -2471,7 +2947,7 @@ class SessionsView {
     this.hover = { k: token.dataset.k, v: token.dataset.v };
     this.hov.hidden = false;
     this.hov.querySelector('[data-act="go"]').hidden = this.hover.k !== 'policy';
-    this.hov.title = `${this.hover.k}:${this.hover.v}`;
+    this.hov.title = this.P(`${this.hover.k}:${this.hover.v}`);
     const w = this.hov.offsetWidth || 48;
     let x = r.right - card.left + 2;
     if (x + w > card.width - 4) x = Math.max(4, r.left - card.left - w - 2);
@@ -2542,7 +3018,9 @@ class SessionsView {
   openPolicy(name) {
     const idx = this.ctx.store.policyIndex();
     const p = idx.get(name);
-    this.ctx.navigate('policies', { q: `name:${qv(name)}`, sel: p && !p.ambiguous ? p.id : null });
+    // A name with hidden characters goes into the query as a wildcard; the selection is exact.
+    const v = this.termValue(name);
+    this.ctx.navigate('policies', { q: v ? `name:${v}` : null, sel: p && !p.ambiguous ? p.id : null });
   }
 
   // ---- facets ----------------------------------------------------------------------------------
@@ -2614,15 +3092,15 @@ class SessionsView {
               class: 'fc-btn',
               type: 'button',
               'aria-pressed': on ? 'true' : null,
-              title: on ? `Already filtering by ${f.key}:${label}` : `Filter by ${f.key}:${label} (Alt-click: exclude)`,
+              title: this.P(on ? `Already filtering by ${f.key}:${label}` : `Filter by ${f.key}:${label} (Alt-click: exclude)`),
               dataset: { fk: `${f.key}=${label}` },
               on: { click: (e) => this.addTerm(f.key, v, e.altKey) },
             },
-            h('span', { class: 'fc-label' }, label),
+            h('span', { class: 'fc-label' }, this.V(label)),
             h('span', { class: 'fc-n num' }, val(n)),
             h('span', { class: ['fc-bar', f.cls], 'aria-hidden': 'true' }, bar),
           ),
-          h('button', { class: 'fc-x', type: 'button', title: `Exclude ${f.key}:${label}`, 'aria-label': `Exclude ${f.key} ${label}`, dataset: { fk: `${f.key}!=${label}` }, on: { click: () => this.addTerm(f.key, v, true) } }, '≠'),
+          h('button', { class: 'fc-x', type: 'button', title: this.P(`Exclude ${f.key}:${label}`), 'aria-label': this.P(`Exclude ${f.key} ${label}`), dataset: { fk: `${f.key}!=${label}` }, on: { click: () => this.addTerm(f.key, v, true) } }, '≠'),
         );
       });
       const empty = !f.top.length
@@ -2782,7 +3260,7 @@ class SessionsView {
       this.order.clear();
       this.saveRoute(false);
       this.renderHeader();
-      this.recompute({ facets: false });
+      this.recompute({ facets: false, anchor: false });
     }, { checked: this.sort === key })));
   }
 
@@ -2873,7 +3351,9 @@ class SessionsView {
     } else {
       const lines = [];
       const title = `# J-Wicket flow sessions from ${st.device || 'unknown device'} read ${st.read_at || '?'} as ${st.read_as || '?'}; exported ${st.exported_at}; query: ${st.query || '(none)'}; device filters: ${Object.entries(st.device_filters).map(([k, v]) => `${k}=${v}`).join(' ') || 'none'}; ${st.rows} rows${st.truncated ? ` (device list cut at ${st.limit})` : ''}${st.fixture ? '; FIXTURE DATA, synthetic' : ''}`;
-      lines.push(csvCell(title));
+      // The title line is for people: device names in it are written plainly ("<U+202E>"); the
+      // cells below keep the device's exact text.
+      lines.push(csvCell(this.P(title)));
       const keys = rows.length ? Object.keys(rows[0]) : Object.keys(this.exportRow({}));
       lines.push(keys.join(','));
       for (const r of rows) lines.push(keys.map((k) => csvCell(r[k])).join(','));
@@ -2907,7 +3387,7 @@ class SessionsView {
       if (i >= 0) this.list.scrollToIndex(i, 'center');
       this.openDetail(id);
     } else {
-      this.ctx.ui.toast(`Session ${id} is not in the current list (it ended, or the filter excludes it).`, 'warn');
+      this.ctx.ui.toast(`Session ${this.P(id)} is not in the current list (it ended, or the filter excludes it).`, 'warn');
       this.selId = null;
       this.saveRoute(false);
     }
@@ -2919,7 +3399,9 @@ class SessionsView {
       return;
     }
     const d = new SessionDetail(this, id);
-    const title = `Session ${d.row ? d.row.session_id : id}`;
+    // A plain string: the shell renders it through dom.vis (hidden characters as badges) and builds
+    // the aria-label with format.plain (OBJ-30).
+    const title = `Session ${String(d.row ? d.row.session_id || d.row.id : id)}`;
     if (this.detail && this.panelHandle && typeof this.panelHandle.setTitle === 'function') {
       // Moving through sessions (j / k) with the panel open: swap the content, keep the focus.
       this.detail.destroy();
@@ -2989,14 +3471,16 @@ class SessionDetail {
     return true;
   }
 
+  /** A device value as a button that filters by it; `label` (device text) defaults to the value. */
   filterBtn(key, value, label, cls) {
     const { h } = this;
+    const { V, P } = this.v;
     if (value === null || value === undefined || value === '') return h('span', { class: 'faint' }, DASH);
     return h(
       'span',
       { class: 'sx-dvw' },
-      h('button', { class: ['sx-dv', cls], type: 'button', dataset: { fk: `${key}=${value}` }, title: `Filter sessions by ${key}:${value} (Alt-click: exclude)`, on: { click: (e) => this.v.addTerm(key, value, e.altKey) } }, label ?? String(value)),
-      h('span', { class: 'sx-dvacts' }, h('button', { class: 'sx-dvx', type: 'button', dataset: { fk: `${key}!=${value}` }, title: `Exclude ${key}:${value}`, 'aria-label': `Exclude ${key} ${value}`, on: { click: () => this.v.addTerm(key, value, true) } }, '≠')),
+      h('button', { class: ['sx-dv', cls], type: 'button', dataset: { fk: `${key}=${value}` }, title: P(`Filter sessions by ${key}:${value} (Alt-click: exclude)`), on: { click: (e) => this.v.addTerm(key, value, e.altKey) } }, V(label ?? String(value))),
+      h('span', { class: 'sx-dvacts' }, h('button', { class: 'sx-dvx', type: 'button', dataset: { fk: `${key}!=${value}` }, title: P(`Exclude ${key}:${value}`), 'aria-label': P(`Exclude ${key} ${value}`), on: { click: () => this.v.addTerm(key, value, true) } }, '≠')),
     );
   }
 
@@ -3103,11 +3587,11 @@ class SessionDetail {
       // Ended is closed, not denied: muted grey, never the deny red.
       else if (state === 'ended') pills.push(h('span', { class: 'pill muted' }, 'ENDED'));
       else pills.push(h('span', { class: 'pill muted' }, 'NOT LISTED'));
-      if (r.state) pills.push(h('span', { class: ['pill', /^valid$/i.test(r.state) ? 'permit' : 'amber'] }, r.state));
-      if (r.status) pills.push(h('span', { class: ['pill', /^normal$/i.test(r.status) ? 'muted' : 'amber'], title: 'Session status: Normal, or a NAT flag (Auth, Transparent, Expired)' }, r.status));
+      if (r.state) pills.push(h('span', { class: ['pill', /^valid$/i.test(r.state) ? 'permit' : 'amber'] }, this.v.V(r.state)));
+      if (r.status) pills.push(h('span', { class: ['pill', /^normal$/i.test(r.status) ? 'muted' : 'amber'], title: 'Session status: Normal, or a NAT flag (Auth, Transparent, Expired)' }, this.v.V(r.status)));
       if (r._role) pills.push(h('span', { class: ['pill', r._role === 'backup' ? 'muted' : 'sky'] }, `HA ${r._role}`));
       else if (r._backup) pills.push(h('span', { class: 'pill muted', title: r._backupWhy }, 'backup copy'));
-      if (r.location) pills.push(h('span', { class: 'pill teal' }, r.location));
+      if (r.location) pills.push(h('span', { class: 'pill teal' }, this.v.V(r.location)));
       return pills;
     });
     const k = this.v.known.get(r.id);
@@ -3158,10 +3642,10 @@ class SessionDetail {
         return h(
           'tr',
           null,
-          h('td', null, h('span', { class: 'sx-wing' }, label), wing.direction ? h('span', { class: 'faint xsmall' }, ` ${wing.direction}`) : null),
+          h('td', null, h('span', { class: 'sx-wing' }, label), wing.direction ? h('span', { class: 'faint xsmall' }, ' ', this.v.V(wing.direction)) : null),
           h('td', { class: 'mono' }, this.filterBtn(srcKey, wing.src, hp(wing.src, wing.sport), 'ip')),
           h('td', { class: 'mono' }, this.filterBtn(dstKey, wing.dst, hp(wing.dst, wing.dport), 'ip')),
-          h('td', { class: 'mono' }, this.filterBtn('iface', wing.iface, wing.iface, 'iface'), wing.tunnel && wing.tunnel !== '0' ? h('span', { class: 'faint xsmall' }, ` tunnel ${wing.tunnel}`) : null),
+          h('td', { class: 'mono' }, this.filterBtn('iface', wing.iface, wing.iface, 'iface'), wing.tunnel && wing.tunnel !== '0' ? h('span', { class: 'faint xsmall' }, ' tunnel ', this.v.V(wing.tunnel)) : null),
           pk,
           by,
         );
@@ -3201,6 +3685,7 @@ class SessionDetail {
 
   renderKv(r) {
     const { h } = this;
+    const { V, P } = this.v;
     const fmt = this.fmt;
     const z = r._zones;
     const pos = this.v.policyPosition(r.policy);
@@ -3210,33 +3695,33 @@ class SessionDetail {
         ? h(
           'span',
           { class: 'sx-dvw' },
-          h('button', { class: 'policy-link', type: 'button', dataset: { fk: 'policy-open' }, title: `Open ${r.policy} in Policies`, on: { click: () => this.v.openPolicy(r.policy) } }, r.policy),
+          h('button', { class: 'policy-link', type: 'button', dataset: { fk: 'policy-open' }, title: P(`Open ${r.policy} in Policies`), on: { click: () => this.v.openPolicy(r.policy) } }, V(r.policy)),
           h(
             'span',
             { class: 'sx-dvacts' },
-            h('button', { class: 'sx-dvx eq', type: 'button', dataset: { fk: 'policy=' }, title: `Filter sessions by policy:${r.policy}`, 'aria-label': `Filter by policy ${r.policy}`, on: { click: () => this.v.addTerm('policy', r.policy, false) } }, '='),
-            h('button', { class: 'sx-dvx', type: 'button', dataset: { fk: 'policy!=' }, title: `Exclude policy:${r.policy}`, 'aria-label': `Exclude policy ${r.policy}`, on: { click: () => this.v.addTerm('policy', r.policy, true) } }, '≠'),
+            h('button', { class: 'sx-dvx eq', type: 'button', dataset: { fk: 'policy=' }, title: P(`Filter sessions by policy:${r.policy}`), 'aria-label': P(`Filter by policy ${r.policy}`), on: { click: () => this.v.addTerm('policy', r.policy, false) } }, '='),
+            h('button', { class: 'sx-dvx', type: 'button', dataset: { fk: 'policy!=' }, title: P(`Exclude policy:${r.policy}`), 'aria-label': P(`Exclude policy ${r.policy}`), on: { click: () => this.v.addTerm('policy', r.policy, true) } }, '≠'),
           ),
         )
         : h('span', { class: 'faint' }, DASH);
       const zones = z
-        ? h('span', null, z.from ? this.filterBtn('from', z.from, z.from, 'zone') : h('span', { class: 'faint' }, z.fromText), h('span', { class: 'sx-arr' }, ` ${ARROW} `), z.to ? this.filterBtn('to', z.to, z.to, 'zone') : h('span', { class: 'faint' }, z.toText))
+        ? h('span', null, z.from ? this.filterBtn('from', z.from, z.from, 'zone') : h('span', { class: 'faint' }, V(z.fromText)), h('span', { class: 'sx-arr' }, ` ${ARROW} `), z.to ? this.filterBtn('to', z.to, z.to, 'zone') : h('span', { class: 'faint' }, V(z.toText)))
         : h('span', { class: 'faint' }, r.policy ? 'not known (the policy is not in this scope’s inventory, or the inventory cannot be read)' : DASH);
       // The policy index is Junos' internal ID; the rule position (evaluation order) is separate.
       const idx = r.policy_index
-        ? h('span', null, h('span', { class: 'mono', title: 'Junos policy index: an internal ID, not the position of the rule' }, `id ${r.policy_index}`),
-          pos ? h('span', { class: 'faint' }, ` · rule ${pos.n} of ${pos.of} in ${pos.where}`) : null)
+        ? h('span', null, h('span', { class: 'mono', title: 'Junos policy index: an internal ID, not the position of the rule' }, 'id ', V(r.policy_index)),
+          pos ? h('span', { class: 'faint' }, ` · rule ${pos.n} of ${pos.of} in `, V(pos.where)) : null)
         : h('span', { class: 'faint' }, DASH);
       this.startEl = h('span', { class: 'mono' }, DASH);
       const pairs = [
-        ['Session ID', h('span', { class: 'mono' }, r.session_id || r.id)],
+        ['Session ID', h('span', { class: 'mono' }, V(r.session_id || r.id))],
         ['Policy', pol],
         ['Policy index', idx],
         ['Zones', zones],
         ['Protocol', this.filterBtn('proto', (r.in || {}).proto, (r.in || {}).proto, 'mono')],
         ['Application', this.filterBtn('app', r.application, r.application, 'mono')],
-        ['State', h('span', null, r.state || DASH)],
-        ['Status', h('span', null, r.status || DASH)],
+        ['State', h('span', null, r.state ? V(r.state) : DASH)],
+        ['Status', h('span', null, r.status ? V(r.status) : DASH)],
         ['Location', r.location ? this.filterBtn('node', r.location, r.location, 'mono') : h('span', { class: 'faint' }, 'not reported (single node)')],
         ['Started', this.startEl],
       ];
@@ -3247,7 +3732,7 @@ class SessionDetail {
     const start = Number.isFinite(readAt) && Number.isFinite(Number(r.duration)) ? new Date(readAt - Number(r.duration) * 1000) : null;
     const text = start ? fmt.stamp(start) : DASH;
     if (rebuilt || this.startEl.textContent !== text) this.startEl.textContent = text;
-    this.startEl.title = `The read time minus the session's age.${r.start_time ? ` The device reports start time ${r.start_time} (seconds since boot on some releases, epoch seconds on others).` : ''}`;
+    this.startEl.title = this.v.P(`The read time minus the session's age.${r.start_time ? ` The device reports start time ${r.start_time} (seconds since boot on some releases, epoch seconds on others).` : ''}`);
   }
 
   renderExtra(r) {
@@ -3258,41 +3743,70 @@ class SessionDetail {
         'section',
         { class: 'panel-section' },
         h('h3', null, 'More from the device'),
-        h('dl', { class: 'kv sx-d-kv' }, extra.flatMap(([k, val]) => [h('dt', { class: 'mono' }, k), h('dd', { class: 'mono' }, val)])),
+        h('dl', { class: 'kv sx-d-kv' }, extra.flatMap(([k, val]) => [h('dt', { class: 'mono' }, this.v.V(k)), h('dd', { class: 'mono' }, this.ctx.dom.vis(val === null || val === undefined ? '' : typeof val === 'object' ? JSON.stringify(val) : String(val)))])),
         h('p', { class: 'xsmall faint' }, 'Fields J-Wicket does not model yet, shown as the device sent them.'),
       )
       : []));
   }
 
+  /**
+   * Next steps: open the policy, the session's logs, and CLI commands to copy. A command is offered
+   * only when every part of it is plain: a session id of digits, node 0 or 1 (or none), host
+   * addresses, ports 1..65535, zone names of the usual characters, and no hidden, control or line
+   * break character anywhere. Device text never reaches the pasted command otherwise.
+   */
   renderActions(r) {
     const { h } = this;
     const { icon } = this.ctx.dom;
+    const fmt = this.fmt;
+    const q = this.ctx.query;
     this.actionsFor = r.id;
-    const sid = r.session_id || r.id;
+    const sid = String(r.session_id ?? r.id ?? '');
+    const unsafe = (v) => v !== null && v !== undefined && v !== '' && (fmt.hasControls(String(v), { all: true }) || fmt.cliUnsafe(String(v)));
     const node = nodeOf(r.location);
-    const cli = `show security flow session session-identifier ${sid}${node !== null ? ` node ${node}` : ''}`;
+    const sidOk = /^\d{1,20}$/.test(sid);
+    const nodeOk = !unsafe(r.location) && (node === null || node === '0' || node === '1');
+    const cli = sidOk && nodeOk ? `show security flow session session-identifier ${sid}${node !== null ? ` node ${node}` : ''}` : null;
     const a = r.in || {};
     const b = r.out || {};
     const z = r._zones;
-    const proto = a.proto && /^(tcp|udp|icmp|icmp6|\d+)$/i.test(a.proto) ? a.proto.toLowerCase() : null;
+    const proto = a.proto && /^(tcp|udp|icmp|icmp6|\d+)$/i.test(a.proto) ? String(a.proto).toLowerCase() : null;
     // Policy lookup happens after destination NAT: the policy sees the original source and the
     // translated destination.
     const dstIp = r.nat && r.nat.destination ? b.src : a.dst;
     const dstPort = r.nat && r.nat.destination ? b.sport : a.dport;
-    const match = z && z.from && z.to && a.src && dstIp
-      ? `show security match-policies from-zone ${z.from} to-zone ${z.to} source-ip ${a.src} destination-ip ${dstIp}${a.sport !== null && a.sport !== undefined ? ` source-port ${a.sport}` : ''}${dstPort !== null && dstPort !== undefined ? ` destination-port ${dstPort}` : ''}${proto ? ` protocol ${proto}` : ''}`
-      : null;
+    const given = (v) => v !== null && v !== undefined && v !== '';
+    const host = (ip) => {
+      if (!ADDR_CHARS.test(String(ip))) return false;
+      const n = q && q.parseNet ? q.parseNet(String(ip)) : null;
+      return Boolean(n) && n.lo === n.hi;
+    };
+    const portOk = (p) => !given(p) || (/^\d{1,5}$/.test(String(p)) && Number(p) >= 1 && Number(p) <= 65535);
+    let match = null;
+    let matchPlain = true;
+    // A row whose own session id or node is not plain gets no command at all.
+    if (cli && z && z.from && z.to && a.src && dstIp) {
+      const parts = [z.from, z.to, a.src, dstIp, a.sport, dstPort, proto];
+      matchPlain = !parts.some(unsafe) && ZONE_NAME.test(z.from) && ZONE_NAME.test(z.to) && host(a.src) && host(dstIp);
+      if (matchPlain && portOk(a.sport) && portOk(dstPort)) {
+        match = `show security match-policies from-zone ${z.from} to-zone ${z.to} source-ip ${a.src} destination-ip ${dstIp}${given(a.sport) ? ` source-port ${a.sport}` : ''}${given(dstPort) ? ` destination-port ${dstPort}` : ''}${proto ? ` protocol ${proto}` : ''}`;
+      }
+    }
+    const notPlain = !cli || !matchPlain;
+    // The Logs query: the session id quoted as the query needs it (a wildcard if it holds hidden characters).
+    const sidTerm = this.v.termValue(sid);
     const copyBtn = (text, label, fk) => h('button', { class: 'btn ghost sm icon', type: 'button', title: label, 'aria-label': label, dataset: { fk }, on: { click: () => this.ctx.ui.copy(text, 'CLI command copied.') } }, icon('copy'));
     swapKeepFocus(this.ctx.dom.put, this.actions,
       r.policy ? h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'act-policy' }, on: { click: () => this.v.openPolicy(r.policy) } }, icon('policies'), 'Open policy') : null,
-      h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'act-logs' }, title: `Logs with session id ${sid} (RT_FLOW create, close, deny)`, on: { click: () => this.ctx.navigate('logs', { q: `session:${sid}` }) } }, icon('logs'), 'Show logs for this session'),
-      h('button', { class: 'btn sm primary', type: 'button', dataset: { fk: 'act-cli' }, on: { click: () => this.ctx.ui.copy(cli, 'CLI command copied.') } }, icon('terminal'), 'Copy as CLI'),
+      sidTerm ? h('button', { class: 'btn sm', type: 'button', dataset: { fk: 'act-logs' }, title: this.v.P(`Logs with session id ${sid} (RT_FLOW create, close, deny)`), on: { click: () => this.ctx.navigate('logs', { q: `session:${sidTerm}` }) } }, icon('logs'), 'Show logs for this session') : null,
+      cli ? h('button', { class: 'btn sm primary', type: 'button', dataset: { fk: 'act-cli' }, on: { click: () => this.ctx.ui.copy(cli, 'CLI command copied.') } }, icon('terminal'), 'Copy as CLI') : null,
     );
     swapKeepFocus(this.ctx.dom.put, this.cliEl,
-      h('p', { class: 'xsmall faint' }, 'This session on the device:'),
-      h('code', { class: 'cli' }, cli, copyBtn(cli, 'Copy this command', 'cli-1')),
+      cli ? h('p', { class: 'xsmall faint' }, 'This session on the device:') : null,
+      cli ? h('code', { class: 'cli' }, cli, copyBtn(cli, 'Copy this command', 'cli-1')) : null,
       match ? h('p', { class: 'xsmall faint' }, 'Which policy matches this flow (Junos evaluates; J-Wicket does not guess):') : null,
       match ? h('code', { class: 'cli' }, match, copyBtn(match, 'Copy this command', 'cli-2')) : null,
+      notPlain ? h('p', { class: 'xsmall sx-cli-no' }, 'Not offered: the device values are not plain (they contain characters J-Wicket will not put in a pasted command).') : null,
     );
   }
 }

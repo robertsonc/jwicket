@@ -13,6 +13,8 @@
 //
 // tokenize(line) is lossless: the token texts concatenate back to the exact input line.
 
+import { CONTROL_RE, controlName, countControls, plain } from './format.js';
+
 export const SEVERITIES = ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'];
 
 const AUTH_RE = /^(SSHD_|JSSHD_|LOGIN_|LIBJNX_LOGIN|UI_AUTH|UI_LOGIN_EVENT|UI_LOGOUT_EVENT|FWAUTH_|PAM_|AUTHD_)/;
@@ -92,6 +94,65 @@ const MONTHS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7,
 
 const isPlaceholder = (v) => v === undefined || v === null || PLACEHOLDER.test(String(v).trim());
 const isInt = (w) => /^\d+$/.test(w || '');
+
+// --- session close reasons -------------------------------------------------------------------------
+
+/**
+ * The 28 session close reasons of Table 2 "Session Close Log Fields" (verified, HPE Junos flow
+ * documentation: security-flow-session-and-error-handling), verbatim. The groups are J-Wicket's own
+ * grouping (inferred, not from Juniper): normal end, reset, timeout, error, administrative, other.
+ */
+export const CLOSE_REASONS = Object.freeze(
+  [
+    ['normal', ['TCP FIN', 'response received']],
+    ['reset', ['TCP CLIENT RST', 'TCP SERVER RST']],
+    ['timeout', ['idle Timeout', 'aged out', 'sess timeout on pending state', 'IKE pass-through child session ageout']],
+    ['error', ['ICMP error', 'ALG', 'auth', 'IDP', 'synproxy failure', 'synproxy limit', 'CP NACK', 'source NAT allocation failure',
+      'error create IKE pass-through template']],
+    ['admin', ['CLI', 'policy delete', 'HA', 'CP delete', 'fwd session', 'parent closed', 'multicast route change',
+      'first path reroute, session recreated']],
+    ['other', ['other', 'unknown', 'unset']],
+  ].flatMap(([group, texts]) => texts.map((text) => Object.freeze({ text, group }))),
+);
+
+const CLOSE_BY_LOWER = new Map(CLOSE_REASONS.map((r) => [r.text.toLowerCase(), r]));
+
+/**
+ * A close reason as Junos documents it: `{text, group, documented: true}` with the documented
+ * spelling (matched case-insensitively), `{text, group: 'other', documented: false}` for anything else
+ * (shown as written; "TCP RST" is not a documented reason), or null for an empty value. The group is
+ * J-Wicket's grouping (inferred).
+ */
+export function closeReason(s) {
+  const text = String(s ?? '').trim();
+  if (!text) return null;
+  const hit = CLOSE_BY_LOWER.get(text.toLowerCase());
+  return hit ? { text: hit.text, group: hit.group, documented: true } : { text, group: 'other', documented: false };
+}
+
+/**
+ * Whether a field value is a placeholder (N/A, None, UNKNOWN, -, ...) to leave out of facets and
+ * summaries. A documented close reason is never a placeholder for the `reason` key: "unknown" is one
+ * of Junos's documented close reasons.
+ */
+export function isPlaceholderValue(key, value) {
+  if (String(key ?? '').trim().toLowerCase() === 'reason') {
+    const r = closeReason(value);
+    if (r && r.documented) return false;
+  }
+  return isPlaceholder(value);
+}
+
+// Deny reasons ("policy deny") are not close reasons; they keep the deny colour.
+const DENY_REASON = /\b(?:deny|denied|drop|dropped|block|blocked)\b/i;
+
+/** Token class for a reason value: "bad" only for the error group (and deny reasons), else "val". */
+function reasonClass(value, { deny = true } = {}) {
+  const r = closeReason(value);
+  if (!r) return 'val';
+  if (r.documented) return r.group === 'error' ? 'bad' : 'val';
+  return deny && DENY_REASON.test(r.text) ? 'bad' : 'val';
+}
 
 /** "192.0.2.2/24" -> "192.0.2.2" (report output appends masks to host addresses). */
 function hostOf(addr) {
@@ -347,7 +408,7 @@ function flowBody(event, msg, base, f, spans) {
     if (!head) return;
     const rs = base + off + head[0].indexOf(head[1]);
     setF(f, 'reason', head[1]);
-    spans.push([rs, rs + head[1].length, wordClass(head[1].split(' ').pop()) === 'bad' ? 'bad' : 'val', 'reason', head[1]]);
+    spans.push([rs, rs + head[1].length, reasonClass(head[1], { deny: false }), 'reason', head[1]]);
   } else if (event === 'create') {
     head = /^(?:AppTrack )?session created /.exec(rest);
   } else if (event === 'deny') {
@@ -421,7 +482,7 @@ function flowBody(event, msg, base, f, spans) {
     if (k > rs) {
       const reason = ws.slice(rs, k).map((x) => x.w).join(' ');
       setF(f, 'reason', reason);
-      spans.push([ws[rs].s, ws[k - 1].e, /deny|drop|denied/i.test(reason) ? 'bad' : 'val', 'reason', reason]);
+      spans.push([ws[rs].s, ws[k - 1].e, reasonClass(reason), 'reason', reason]);
     }
     if (ws[k] && isInt(ws[k].w)) take(ws[k], 'session-id', 'num', 'session');
     return;
@@ -866,7 +927,7 @@ function validV6(s) {
 /** Field types for structured-data and key=value values: returns [tokenType, filterKey]. */
 function valueType(key, value) {
   const kl = key.toLowerCase().trim();
-  if (isPlaceholder(value)) return ['val', null];
+  if (isPlaceholderValue(kl, value)) return ['val', null];
   if (/^nat-(source|destination)-address$/.test(kl)) return ['nat', kl.includes('source') ? 'natsrc' : 'natdst'];
   if (/^nat-.*port$/.test(kl)) return ['nat', null];
   if (/(^|-)address$/.test(kl) || kl === 'ip' || kl === 'src' || kl === 'dst') {
@@ -879,10 +940,13 @@ function valueType(key, value) {
   if (/interface(-name)?$/.test(kl) || kl === 'ifname') return ['iface', 'iface'];
   if (kl === 'username' || kl === 'user') return ['user', 'user'];
   if (kl === 'session-id' || kl === 'session-id-32' || kl === 'session_id') return ['num', 'session'];
-  if (kl === 'reason' || kl === 'action') {
+  // A close reason is "bad" only in the error group (an idle timeout is not a failure); BAD_WORDS does
+  // not decide reasons.
+  if (kl === 'reason') return [reasonClass(value), 'reason'];
+  if (kl === 'action') {
     const last = String(value).split(/\s+/).pop();
     const c = wordClass(last);
-    return [c === 'val' && /deny|drop|block/i.test(value) ? 'bad' : c, kl === 'reason' ? 'reason' : null];
+    return [c === 'val' && /deny|drop|block/i.test(value) ? 'bad' : c, null];
   }
   if (kl === 'application') return ['val', 'app'];
   if (kl === 'service-name') return ['val', 'service'];
@@ -1032,32 +1096,14 @@ function toSet(x) {
   return null;
 }
 
-// Characters that are invisible or change the direction of the text around them (C0 and C1 controls
-// other than tab, bidirectional embeddings, overrides, isolates and marks, zero-width and other
-// format characters, line and paragraph separators). Device text is attacker-influenced (user names,
-// URLs, attack names): a right-to-left override would reorder the rest of a line on screen. tokenize()
-// gives each one its own "ctl" token so a display can show it as a visible escape instead.
-const CONTROL_CLASS = '\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb';
-export const CONTROL_RE = new RegExp(`[${CONTROL_CLASS}]`);
-const CONTROL_ALL = new RegExp(`[${CONTROL_CLASS}]`, 'g');
-
-/** "U+202E" for one character. */
-export function controlName(ch) {
-  return `U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
-}
-
-/** `s` with every control or format character written as "<U+XXXX>" (for copying and plain text). */
-export function escapeControls(s) {
-  const str = String(s ?? '');
-  return CONTROL_RE.test(str) ? str.replace(CONTROL_ALL, (c) => `<${controlName(c)}>`) : str;
-}
-
-/** How many control or format characters `s` holds. */
-export function countControls(s) {
-  const str = String(s ?? '');
-  if (!CONTROL_RE.test(str)) return 0;
-  return (str.match(CONTROL_ALL) || []).length;
-}
+// Characters that are invisible or change the direction of the text around them (CONTROL_CLASS in
+// format.js: C0 and C1 controls other than tab and line feed, bidirectional embeddings, overrides,
+// isolates and marks, zero-width and other format characters, line and paragraph separators). Device
+// text is attacker-influenced (user names, URLs, attack names): a right-to-left override would reorder
+// the rest of a line on screen. tokenize() gives each one its own "ctl" token so a display can show it
+// as a visible escape instead. The helpers live in format.js; they are re-exported here so existing
+// callers (this.lp.CONTROL_RE, controlName, countControls, escapeControls) keep working.
+export { CONTROL_RE, controlName, countControls, plain as escapeControls };
 
 /** Splits tokens around control characters; the pieces keep their type, key and filter value. */
 function splitControls(toks) {
@@ -1398,7 +1444,7 @@ export function summary(parsed, { pad = false, rest = true } = {}) {
     text('DNAT → ');
     endpoint(fl.natDst, fl.natDport, 'natdst', null);
   }
-  if (fl.reason && !isPlaceholder(fl.reason)) {
+  if (fl.reason && !isPlaceholderValue('reason', fl.reason)) {
     sep();
     const [rt] = valueType('reason', fl.reason);
     tok(rt === 'val' ? 'str' : rt, fl.reason, 'reason');
