@@ -28,7 +28,13 @@ const VIEWS = [
 ];
 const VIEW_BY_ID = new Map(VIEWS.map((v) => [v.id, v]));
 const SCOPE_RE = /^(root|lsys:[A-Za-z0-9._-]{1,63}|tenant:[A-Za-z0-9._-]{1,63})$/;
-const PREF = { theme: 'jwicket.theme', density: 'jwicket.density', rail: 'jwicket.rail', announce: 'jwicket.announce' };
+const PREF = { theme: 'jwicket.theme', scheme: 'jwicket.scheme', density: 'jwicket.density', rail: 'jwicket.rail', announce: 'jwicket.announce' };
+// Colour schemes (app.css "colour schemes"); the first is the default and needs no data-scheme.
+const SCHEMES = [
+  { id: 'hpe', label: 'HPE', detail: 'HPE brand: green accents on slate' },
+  { id: 'obsidian', label: 'Obsidian & Phosphor', detail: 'NOC: cyan telemetry, teal healthy, coral critical' },
+  { id: 'nordic', label: 'Nordic Steel', detail: 'Colourblind-safe: ice blue allow, magenta deny' },
+];
 const ANNOUNCE_GAP_MS = 10000;
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
 const SEP = ' · ';
@@ -120,6 +126,7 @@ function applyPrefs() {
   const root = document.documentElement;
   const theme = prefGet(PREF.theme);
   if (theme === 'light' || theme === 'dark') root.dataset.theme = theme;
+  applyScheme(prefGet(PREF.scheme));
   if (prefGet(PREF.density) === 'comfortable') root.dataset.density = 'comfortable';
   const rail = prefGet(PREF.rail);
   if (rail === 'collapsed' || rail === 'expanded') root.dataset.rail = rail;
@@ -137,6 +144,24 @@ function toggleTheme() {
   prefSet(PREF.theme, next);
   updateThemeButton();
   say(`${next === 'light' ? 'Day' : 'Night'} theme`);
+}
+
+function currentScheme() {
+  return document.documentElement.dataset.scheme || SCHEMES[0].id;
+}
+
+function applyScheme(id) {
+  const root = document.documentElement;
+  if (SCHEMES.some((s) => s.id === id) && id !== SCHEMES[0].id) root.dataset.scheme = id;
+  else delete root.dataset.scheme;
+}
+
+function setScheme(id) {
+  const scheme = SCHEMES.find((s) => s.id === id) || SCHEMES[0];
+  applyScheme(scheme.id);
+  prefSet(PREF.scheme, scheme.id === SCHEMES[0].id ? null : scheme.id);
+  if (TB.scheme && TB.scheme.value !== scheme.id) TB.scheme.value = scheme.id;
+  say(`${scheme.label} colour scheme`);
 }
 
 function toggleDensity() {
@@ -1174,6 +1199,12 @@ function buildTopbar() {
   TB.managed = h('button', { id: 'chip-managed', class: 'chip chip-managed', type: 'button', hidden: true, on: { click: openManagedPanel } });
   TB.ctx = h('div', { class: 'tb-ctx', role: 'group', 'aria-label': 'Scope, read-as user and central management' }, TB.scopeWrap, TB.readAs, TB.managed);
   TB.theme = h('button', { id: 'btn-theme', class: 'btn ghost icon', type: 'button', on: { click: toggleTheme } });
+  TB.scheme = h(
+    'select',
+    { id: 'sel-scheme', class: 'tb-scheme', title: 'Colour scheme', 'aria-label': 'Colour scheme', on: { change: () => setScheme(TB.scheme.value) } },
+    SCHEMES.map((s) => h('option', { value: s.id, title: s.detail }, s.label)),
+  );
+  TB.scheme.value = currentScheme();
   TB.search = h(
     'button',
     { id: 'btn-palette', class: 'cmdk', type: 'button', 'aria-label': 'Jump to a view, policy, zone or action (Ctrl K)', on: { click: () => palette.open() } },
@@ -1198,7 +1229,7 @@ function buildTopbar() {
     h('span', { class: 'tb-divider', 'aria-hidden': 'true' }),
     h('div', { class: 'tb-dev' }, TB.device),
     TB.ctx,
-    h('div', { class: 'tb-actions' }, TB.search, TB.theme, TB.signout),
+    h('div', { class: 'tb-actions' }, TB.search, TB.scheme, TB.theme, TB.signout),
   );
   renderTopbar();
 }
@@ -1882,6 +1913,7 @@ function paletteItems() {
     { id: 'action:refresh', group: 'Actions', label: 'Refresh from the device', hint: ['r'], icon: 'refresh', keywords: 'reload read again', run: refresh },
     { id: 'action:live', group: 'Actions', label: anyLive ? 'Pause or resume live updates' : 'Pause or resume live updates (in Sessions and Logs)', hint: ['Space'], icon: 'pause', keywords: 'live poll stop start', run: () => dispatch('toggle-live') },
     { id: 'action:theme', group: 'Actions', label: `Switch to the ${nextTheme} theme`, hint: ['t'], icon: effectiveTheme() === 'light' ? 'moon' : 'sun', keywords: 'theme dark light colour color', run: toggleTheme },
+    ...SCHEMES.filter((s) => s.id !== currentScheme()).map((s) => ({ id: `action:scheme:${s.id}`, group: 'Actions', label: `Use the ${s.label} colour scheme`, detail: s.detail, icon: 'info', keywords: 'theme scheme colour color palette hpe obsidian phosphor nordic steel colourblind colorblind', run: () => setScheme(s.id) })),
     { id: 'action:density', group: 'Actions', label: comfy ? 'Use dense rows' : 'Use comfortable rows', icon: 'rows', keywords: 'density compact spacing', run: toggleDensity },
     { id: 'action:rail', group: 'Actions', label: railCollapsed() ? 'Expand the rail' : 'Collapse the rail', hint: ['['], icon: 'sidebar', keywords: 'sidebar navigation', run: toggleRail },
     { id: 'action:keys', group: 'Actions', label: 'Show keyboard shortcuts', hint: ['?'], icon: 'keyboard', keywords: 'help keys', run: showKeys },

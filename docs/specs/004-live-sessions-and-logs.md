@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Backend and browser engines implemented on synthetic fixtures. Sessions and Logs views built and committed, exercised by hand on the development server; browser acceptance (AC-004-20) not signed off. Never run on a device. Nothing qualified.** |
+| Status | **Backend and browser engines implemented on synthetic fixtures. Sessions and Logs views built and committed, exercised by hand on the development server; browser acceptance (AC-004-20) not signed off. The session table and the `messages` syslog file were read once, live, on a lab SRX4100, Junos 25.2R1-S1.4, as a signed-in super-user ([evidence](../evidence/2026-11-24-srx4100-lab/README.md)); no reply recorded. Nothing qualified.** |
 | Parity priority | `P0`, with Spec 001 (the owner's binding addition to the first slices; see the [charter](../charter.md)). The J-Web rows it covers are in the [parity ledger](../parity/jweb-24.4.csv) |
 | Gate | Part of G1 (foundation exit: Q-LOAD-02, Q-LOAD-03 are G1 tests); qualified at G2 with Q-LOG-01 |
 | Decides scope | Project owner. G1 sign-off: the named security reviewer |
@@ -121,6 +121,7 @@ session` output visible with powerful inline, live filtering. Read-only.
 | `GET /api/logs?source=file:<name>&cursor=&lines=&contains=&exclude=` | Tail a syslog file (`file=<name>` is accepted as a short form; default `messages`) |
 | `GET /api/logs?source=report&type=<t>&start=&stop=&count=&expression=` | Read the on-box reporting database |
 | `GET /api/logs?source=buffer&since=` | Read the routing-engine security log buffer |
+| `GET /api/health` | Routing-engine and data-plane (SPU) health for the Overview (5.7) |
 
 Common responses:
 
@@ -387,6 +388,7 @@ the reply carries `security-logs-disabled`.
 | Report, buffer | 1.5 s per operator per source | 1, plus the sources refresh; 0 for a report on a release before 23.1R1 |
 | Logs while the sources read fails | 1.5 s per operator, one bucket for all sources | 0 within the failure cache (60 s denied or unsupported, 10 s otherwise), else 1 configuration read |
 | Sources | no floor; success cache 60 s, failure cache 60 s or 10 s | 1 configuration read on a cache miss, plus 1 software read at most every 10 min |
+| Health (5.7) | 5 s per operator | 2 (`get-route-engine-information`, `get-performance-summary-information`); the Overview polls every 10 s (`suggested_interval_s` 10) |
 
 The browser polls at `suggested_interval_s` (5 s) by default, offers 2, 5, 10 and 30 s, and never
 goes below `meta.min_interval_s`. Each RPC can add a `UI_NETCONF_CMD` line on the device (7.12). Each
@@ -403,10 +405,38 @@ gets 429 instead of queuing. The session cap (`max_sessions`, default 4) bounds 
   8 hours with four (review measurement with the fixture backend).
 - `read_log` on the first read of a source only (no `cursor`, `start` or `since`): user, source,
   log source, status.
+- `read_health` when the outcome of either health part changes, not on every poll: user, source
+  address, `route_engine` and `spu` status.
 - `session_lost` when the device session ends during a read.
 - Retention: with `[log] audit_file` unset (the default) the audit trail goes to the diagnostic
   log; with it set, it is a rotated file of about 4 MB at the defaults. How long that lasts is
   unmeasured ([SECURITY.md, known gap 9](../../SECURITY.md#known-gaps)).
+
+### 5.7 Device health (Overview)
+
+Added 2026-11-25 at the owner's request ("no CPU, RAM, other basic monitoring charts on the main
+overview page"). The Overview's System health tile shows the routing engine's CPU (busy = 100 minus
+idle, with user and system), memory (the device's own percentage, and used of total MB), load
+average, temperature and uptime, and the data plane's CPU and memory per SPU (the mean when there
+are several, and said so), with 10-minute charts of CPU and memory. J-Wicket computes no figure the
+device did not report, except busy CPU and the mean over SPUs.
+
+- `GET /api/health` answers 200 with `route_engine` and `spu`, each `{status: ok, engines|units}`
+  or an explicit state. The parts fail independently: a class allowed one RPC and denied the other
+  sees the one and a `denied` card for the other.
+- `engines` has one entry per routing engine: `node` (cluster `re-name`), `slot`, `mastership`,
+  `status`, `model`, `cpu {user, background, system, interrupt, idle, busy}`, `memory {total_mb,
+  used_mb, util, buffer_util}`, `load [1, 5, 15]`, `temperature_c`, `cpu_temperature_c`,
+  `uptime_s`, `last_reboot_reason`. The per-element `cpu-user1` to `cpu-idle3` the reply also
+  carries are not interpreted: what they count (cores or threads) is not documented. Any number
+  that is missing or not numeric is `null`.
+- `units` has one entry per SPU: `node`, `fpc`, `pic`, `cpu`, `memory`, `flow_sessions`,
+  `flow_max`, `cp_sessions`, `cp_max`.
+- The browser keeps the samples for 10 minutes in memory for the page (leaving the Overview and
+  coming back keeps them; a reload starts again). Thresholds: 75 % and over is shown amber, 90 % and
+  over red, beside the number.
+- On a cluster, or with two routing engines, the tile shows the master of the first node and says
+  how many there are; each node's figures are in the payload. Per-node charts are not built.
 
 ## 6. Data sources
 
@@ -419,6 +449,8 @@ gets 429 instead of queuing. The session cap (`max_sessions`, default 4) bounds 
 | RE buffer | `get-security-log-information` with `newer-than` | Listed under the `security` and `security-control` bits (**verified**, [security permission](https://networkingdocs.hpe.com/documentation/us/en/software/junos/user-access/topics/concept/access-privilege-permission-bits-security.html)); the CLI page says `view` (**verified**, [show security log](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-security-log.html)) | RPC, inputs, output elements (`security-event`, `security-event-*`, `process/{name,pid}`, `security-logs-disabled`) **verified** in YANG |
 | Log configuration | `get-configuration` committed with `LOGS_FILTER` | as configuration | `system syslog file` tree **verified**; `security log` leaves (`mode`, `report`, `stream/host`, `format`) **verified** in YANG; the XML form of `stream host` (J-Wicket reads `ipaddr`, `name` or text) **inferred** |
 | Model | `get-software-information` | not recorded | as Spec 001 |
+| Routing-engine health | `get-route-engine-information` (`show chassis routing-engine`), no parameters | not recorded; `view` **inferred** (a `show` command) | RPC name **verified** (`\| display xml rpc`) and reply **recorded** on SRX4100 25.2R1-S1.4 ([recorded reply](../../tests/fixtures/recorded-srx4100-25.2R1-S1.4/SOURCE.md)). Cluster wrapper (`multi-routing-engine-item`) and dual-RE `slot`/`mastership-state` **inferred**. Denied-error wording **not recorded** |
+| Data-plane health | `get-performance-summary-information` (`show security monitoring`), no parameters | not recorded; `view` **inferred** | RPC name **verified** and reply **recorded** on SRX4100 25.2R1-S1.4 ([recorded reply](../../tests/fixtures/recorded-srx4100-25.2R1-S1.4/SOURCE.md)). Several SPUs per node **inferred** from the reply's repeated `performance-summary-statistics`. Denied-error wording **not recorded** |
 
 Every RPC above except the configuration read is in `ALLOWED_RPCS`
 ([`session.py`](../../src/jwicket/junos/session.py)), and every entry starts with `get-`. The
@@ -769,11 +801,14 @@ in [`test_live.py`](../../tests/test_live.py) unless another file is named.
 | AC-004-18 | RT_FLOW decoding (structured data, BSD text across releases, buffer), other families, formats | `logparse.test.mjs`: "every documented RT_FLOW line decodes with the right session id, 5-tuple, policy, zones and NAT", "every dev-server RT_FLOW line decodes correctly (structured data, BSD text and buffer)", "RT_FLOW BSD positional bodies across releases (24.4 template, NAT rule types, LSYS)", "RFC 5424: PRI severity and facility, SD-ID, no SD-ID, bracketless, no PRI", "BSD: default, explicit-priority, year and millisecond time formats, year inference", "decode: screen, IDP, commit, configuration mode, login, VPN, link" | Met (unit) |
 | AC-004-19 | Own-read detection: `UI_NETCONF_CMD` lines of the signed-in user only | `logparse.test.mjs`: "isSelfRead: UI_NETCONF_CMD lines of the signed-in user only" | Met (unit); hiding in the view open |
 | AC-004-20 | UI requirements UI-004-01 to UI-004-42 in a browser against the development server (`branch`: event mode, syslog files, buffer; `cluster-lsys`: cluster, stream mode, on-box report; `auditor`), with no console errors or CSP violations, and smooth at 2,000 rows | Browser check against the development server, by hand or driven by an external, development-only browser tool ([CONTRIBUTING, browser rules](../../CONTRIBUTING.md#browser)), screenshots at desktop and phone widths | **Not met**: the views are built and committed and have been exercised by hand on the development server, but this check has not been run against the requirement list and signed off |
-| AC-004-21 | AC-004-01 to -14 pass against recorded replies from a qualified platform, including a cluster and a multi-SPU platform | Q-REL-01 recorded fixtures | **Not met**: no recorded reply exists |
+| AC-004-21 | AC-004-01 to -14 pass against recorded replies from a qualified platform, including a cluster and a multi-SPU platform | Q-REL-01 recorded fixtures | **Not met**: no session or log reply is recorded (the only recorded replies are the two health reads, AC-004-26) |
 | AC-004-22 | On a qualified platform, listing up to `MAX_UNFILTERED` sessions at the default interval keeps RE CPU and mgd within the Q-LOAD-02 pass criterion | Q-LOAD-02 | **Not met** |
 | AC-004-23 | A failed sources read is cached per web session (denied or unsupported 60 s, other failures 10 s); while it fails, `/api/logs` answers 200 with the state and repeats within 1.5 s get 429 | `LogSourcesFailureTests.test_denied_sources_are_read_once_per_ttl`, `.test_other_failures_are_retried_sooner` | Met (fixtures) |
 | AC-004-24 | A configuration reply with no `<configuration>` is a `failed` panel on `/api/logs/sources` and `/api/logs` (and on Spec 001's endpoints), not HTTP 500 | `MalformedReplyTests.test_every_configuration_reader_reports_failed` | Met (fixtures) |
 | AC-004-25 | Repeated session polls with the same filters and outcome write one `read_sessions` audit record | `SessionGuardTests.test_repeated_polls_are_audited_once` | Met (fixtures) |
+| AC-004-26 | Health parsers read the replies recorded on SRX4100 25.2R1-S1.4 exactly (CPU split and busy, memory, load, temperatures, uptime; SPU CPU, memory and sessions); a cluster wrapper, two routing engines and several SPUs keep node, slot and FPC/PIC; missing or non-numeric figures are `null`; an empty reply is `failed` | [`test_health.py`](../../tests/test_health.py) `RecordedReplyTests.*`, `LayoutTests.*` | Met (recorded replies, one platform and release) |
+| AC-004-27 | `/api/health` needs sign-in, allows one read per 5 s per operator with `Retry-After`, and reports each part's state on its own: one part denied leaves the other, a fixture without the replies gives `unsupported` for both, and the device's error text does not reach the browser | `HealthHttpTests.*`, `UnsupportedFixtureTests.*` in [`test_health.py`](../../tests/test_health.py) | Met (fixtures). Denied wording on a device: Q-AUTH-03 |
+| AC-004-28 | The System health tile shows the figures and the two charts with a legend, a crosshair readout on hover and from the keyboard, and a table view, in every colour scheme, night and day | Browser check against the development server | Exercised by hand (HPE day, Obsidian and Nordic night); not signed off. Part of AC-004-20 |
 
 ## 11. Qualification needed
 

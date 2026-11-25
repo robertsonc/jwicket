@@ -1,6 +1,6 @@
 """The documentation set holds together: links resolve, test and spec IDs exist, ledger cells are marked.
 
-Stdlib only, Python 3.9 syntax, no network. What each check covers:
+Stdlib only, Python 3.7 syntax, no network. What each check covers:
 
 * every relative Markdown link in README.md, CONTRIBUTING.md, SECURITY.md and docs/**/*.md (the spike
   evidence in docs/evidence/ is kept unedited and is not checked as a source) points at a file or

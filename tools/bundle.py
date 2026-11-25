@@ -50,8 +50,9 @@ EXCLUDED_MODULES: Tuple[str, ...] = ("jwicket.__main__", "jwicket.devserver", "j
 EMBEDDED_MODULE = "jwicket._embedded"
 BUNDLE_FILENAME_PREFIX = "jwicket-bundle/"
 
-# The on-box Python version is unverified (qualification Q-RT-01); 3.9 is the floor we build for.
-MIN_PYTHON = (3, 9)
+# Junos 25.2R1-S1.4 ships Python 3.7.10 on the SRX4100, and the 26.2R1-S2.3 image carries 3.7 too
+# (Q-RT-01, recorded on a lab SRX4100 on 24 November 2026). 3.7 is the floor we build for.
+MIN_PYTHON = (3, 7)
 B64_LINE = 76
 
 # Both end up in the generated docstring, so only plain characters are accepted.
@@ -126,8 +127,10 @@ def read_version(package_dir: Path) -> str:
         else:
             continue
         if any(isinstance(t, ast.Name) and t.id == "__version__" for t in targets):
-            if isinstance(value, ast.Constant) and isinstance(value.value, str) and _VERSION.match(value.value):
-                return value.value
+            # Python 3.7's parser gives ast.Str for a string literal; 3.8 and later give ast.Constant.
+            text = value.value if isinstance(value, ast.Constant) else getattr(value, "s", None)
+            if isinstance(text, str) and _VERSION.match(text):
+                return text
             raise BuildError(f"{init}: __version__ must be a plain string literal such as '0.1.0'")
     raise BuildError(f"{init} does not assign __version__")
 
@@ -163,12 +166,22 @@ def _imported_names(module: Module, tree: ast.AST) -> List[str]:
     return out
 
 
+def _parse(source: str, filename: str) -> ast.AST:
+    """``ast.parse`` with the oldest supported grammar where this Python can apply one.
+
+    ``feature_version`` is 3.8+; a build on Python 3.7 parses with 3.7's own grammar, which is the floor.
+    """
+    if sys.version_info >= (3, 8):
+        return ast.parse(source, filename=filename, feature_version=MIN_PYTHON)
+    return ast.parse(source, filename=filename)  # type: ignore[unreachable]  # mypy checks as 3.8
+
+
 def _check_module(module: Module) -> None:
     filename = BUNDLE_FILENAME_PREFIX + module.relpath
     try:
         # feature_version is best-effort (it catches e.g. match statements); the CI test matrix on
         # the oldest supported Python is what really proves compatibility.
-        tree = ast.parse(module.source, filename=filename, feature_version=MIN_PYTHON)
+        tree = _parse(module.source, filename)
         compile(module.source, filename, "exec", dont_inherit=True)
     except SyntaxError as exc:
         raise BuildError(
@@ -633,7 +646,7 @@ def build(package_dir: Path = PACKAGE_DIR, source_ref: Optional[str] = None) -> 
     filename = str(DEFAULT_OUT)
     try:
         compile(text, filename, "exec", dont_inherit=True)
-        ast.parse(text, filename=filename, feature_version=MIN_PYTHON)
+        _parse(text, filename)
     except SyntaxError as exc:  # a defect in this tool, not in the source tree
         raise BuildError(f"the generated bundle does not compile (line {exc.lineno}): {exc.msg}") from exc
     return Bundle(version, source_ref, modules, resources, digest, text)

@@ -1,6 +1,7 @@
 // views/overview.js: the console's front page (UI brief, section 6).
 //
-// Incident tiles first: flow sessions (gauge and trend), recent denies (tail of the syslog file that
+// System health first (routing-engine and data-plane CPU and memory, charted over 10 minutes, with
+// load, temperature and uptime), then incident tiles: flow sessions (gauge and trend), recent denies (tail of the syslog file that
 // takes RT_FLOW, or on-box reporting, or the security log buffer), warnings; then top policies by
 // live sessions and a mini zone-pair matrix; then the device card (identity, HA, scope, read-as,
 // source, time zone, central management) and quick links with filters pre-filled. Every tile is
@@ -25,9 +26,15 @@ import { h, icon, put, stateCard, skeleton, setTicking, viewSub, vis } from '../
 import * as fmt from '../format.js';
 import { Gauge } from '../widgets/gauge.js';
 import { Sparkline } from '../widgets/sparkline.js';
+import { TimeChart } from '../widgets/timechart.js';
 
 const SUMMARY_EVERY_S = 30;
 const LIST_EVERY_S = 120;
+const HEALTH_EVERY_S = 10; // two RPCs per read; the server allows one read per 5 s per operator
+const HEALTH_WINDOW_MS = 10 * 60 * 1000;
+// Health samples outlive the view (module scope), so leaving the Overview and coming back keeps the
+// last 10 minutes instead of starting an empty chart. Cleared on sign-out with the page.
+const HEALTH_LOG = [];
 const DENIES_EVERY_S = 15;
 const RETRY_S = 30;
 const HISTORY = 20; // sparkline points: 10 minutes at 30 s
@@ -103,6 +110,41 @@ function policySel(idx, name, from, to) {
   const fits = (list, z) => !list || !list.length || (z !== null && z !== undefined && list.includes(z));
   const hits = (p.all || []).filter((e) => fits(e.from, from) && fits(e.to, to));
   return hits.length === 1 ? hits[0].id || null : null;
+}
+
+function mean(values) {
+  const ok = values.filter((v) => Number.isFinite(v));
+  return ok.length ? ok.reduce((a, b) => a + b, 0) / ok.length : null;
+}
+
+/** The routing engine to show: the master (or the only one) of the first node. */
+function primaryEngine(part) {
+  const list = part && part.status === 'ok' ? part.engines || [] : [];
+  return list.find((e) => e.mastership === 'master') || list[0] || null;
+}
+
+function healthSample(data) {
+  const re = primaryEngine(data.route_engine);
+  const units = data.spu && data.spu.status === 'ok' ? data.spu.units || [] : [];
+  const s = {
+    t: Date.now(), // the browser's clock, like the chart's time axis (read_at has 1 s resolution)
+    reCpu: re && re.cpu ? re.cpu.busy : null,
+    reMem: re && re.memory ? re.memory.util : null,
+    spuCpu: mean(units.map((u) => u.cpu)),
+    spuMem: mean(units.map((u) => u.memory)),
+  };
+  return [s.reCpu, s.reMem, s.spuCpu, s.spuMem].some((v) => Number.isFinite(v)) ? s : null;
+}
+
+function uptime(seconds) {
+  const d = Math.floor(seconds / 86400);
+  const hrs = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return d ? `${d} d ${hrs} h` : hrs ? `${hrs} h ${m} min` : `${m} min`;
+}
+
+function stateWord(status) {
+  return { denied: 'denied for your login class', unsupported: 'not available on this device', failed: 'read failed' }[status] || 'not read';
 }
 
 function tile(cls, title, iconName) {
@@ -264,7 +306,10 @@ class Overview {
     this.denyWait = 0; // no deny read before this time (a 429's Retry-After)
     this.denyWaiting = false; // the last deny read was answered 429
     this.denyDisabled = false; // security log disable
-    this.timers = { sum: 0, list: 0, deny: 0, ago: 0 };
+    this.health = null; // last /api/health payload
+    this.healthError = null;
+    this.healthAt = 0;
+    this.timers = { sum: 0, list: 0, deny: 0, ago: 0, health: 0 };
     this.build();
     this.offs = [
       ctx.store.on('inventory', () => this.renderInventory()),
@@ -290,6 +335,7 @@ class Overview {
     if (this.ctx.store.scope === 'root') this.startSessions();
     else this.renderSessions();
     this.timers.deny = setTimeout(() => this.pollDenies(), 700);
+    this.pollHealth();
   }
 
   /** Start both session reads, from this sign-in's last reads when those are fresh. */
@@ -326,7 +372,7 @@ class Overview {
   destroy() {
     this.dead = true;
     this.ctl.abort();
-    for (const k of ['sum', 'list', 'deny']) clearTimeout(this.timers[k]);
+    for (const k of ['sum', 'list', 'deny', 'health']) clearTimeout(this.timers[k]);
     clearInterval(this.timers.ago);
     for (const off of this.offs) off();
     document.removeEventListener('jwicket:refresh', this.onRefresh);
@@ -356,6 +402,7 @@ class Overview {
     // Incident first: sessions and denies, then what explains them, then who and what the device is.
     this.t = {
       warnings: tile('warnings', 'Warnings', 'alert'),
+      health: tile('health', 'System health', 'server'),
       sessions: tile('sessions', 'Flow sessions', 'sessions'),
       denies: tile('denies', 'Recent denies', 'ban'),
       top: tile('top', 'Top policies by live sessions', 'policies'),
@@ -366,7 +413,26 @@ class Overview {
     this.grid = h('div', { class: 'ov-grid' }, Object.values(this.t).map((t) => t.el));
     put(this.el, this.head, this.grid);
     this.buildSessionsTile();
+    this.buildHealthTile();
     this.renderLivePill();
+  }
+
+  buildHealthTile() {
+    const t = this.t.health;
+    const series = [
+      { id: 're', label: 'Routing engine' },
+      { id: 'spu', label: 'Data plane (SPU)' },
+    ];
+    this.cpuChart = new TimeChart({ title: 'CPU busy', series, windowMs: HEALTH_WINDOW_MS, height: 150, describe: 'percent busy, routing engine and data plane' });
+    this.memChart = new TimeChart({ title: 'Memory used', series, windowMs: HEALTH_WINDOW_MS, height: 150, describe: 'percent used, routing engine and data plane' });
+    this.hStats = h('dl', { class: 'hl-stats' });
+    this.hNote = h('p', { class: 'hl-note' });
+    this.healthContent = h('div', { class: 'hl-body' }, this.hStats, h('div', { class: 'hl-charts' }, this.cpuChart.el, this.memChart.el), this.hNote);
+    this.healthAgo = h('span', null, '');
+    const cmds = h('span', { class: 'hl-cmds mono', title: 'The Junos commands these figures come from' }, 'show chassis routing-engine \u00b7 show security monitoring');
+    put(t.foot, this.healthAgo, h('span', { class: 'spacer' }), cmds);
+    t.foot.hidden = false;
+    this.renderHealthCharts();
   }
 
   buildSessionsTile() {
@@ -422,7 +488,11 @@ class Overview {
 
   /** A live read is failing for a reason that may pass. */
   retrying() {
-    return this.sessFailing() || Boolean(this.denyError && !FINAL.has(this.denyError.status));
+    return (
+      this.sessFailing() ||
+      Boolean(this.denyError && !FINAL.has(this.denyError.status)) ||
+      Boolean(this.healthError && !FINAL.has(this.healthError.status))
+    );
   }
 
   renderLivePill() {
@@ -445,7 +515,7 @@ class Overview {
           ? IDLE_LABEL
           : retrying
             ? `Live, but a read is failing; trying again every ${RETRY_S} s. Pause (space).`
-            : `Live: the session gauge every ${SUMMARY_EVERY_S} s, the session list every ${LIST_EVERY_S / 60} min, denies every ${DENIES_EVERY_S} s. Pause (space).`,
+            : `Live: health every ${HEALTH_EVERY_S} s, the session gauge every ${SUMMARY_EVERY_S} s, the session list every ${LIST_EVERY_S / 60} min, denies every ${DENIES_EVERY_S} s. Pause (space).`,
     );
     this.livePill.title = idle ? IDLE_LABEL : live ? 'Pause live updates (space)' : 'Resume live updates (space)';
     this.ctx.ui.setLive('overview', live);
@@ -473,9 +543,10 @@ class Overview {
     this.ctx.ui.announce(this.paused ? 'Overview paused.' : 'Overview live.');
     if (!this.paused) {
       if (this.ctx.store.scope === 'root') this.startSessions();
+      this.pollHealth();
       this.timers.deny = setTimeout(() => this.pollDenies(), 400);
     } else {
-      for (const k of ['sum', 'list', 'deny']) clearTimeout(this.timers[k]);
+      for (const k of ['sum', 'list', 'deny', 'health']) clearTimeout(this.timers[k]);
     }
   }
 
@@ -485,6 +556,7 @@ class Overview {
     if (this.dead) return;
     this.pollSummary(true);
     this.pollList(true);
+    this.pollHealth(true);
     this.timers.deny = setTimeout(() => this.pollDenies(true), 400);
   }
 
@@ -504,6 +576,7 @@ class Overview {
   renderAges() {
     if (this.summary) this.sessAgo.textContent = `updated ${fmt.ago(this.summary.at)}`;
     if (this.topAgo && this.listAt) this.topAgo.textContent = `updated ${fmt.ago(this.listAt)}`;
+    if (this.healthAt && this.healthAgo) this.healthAgo.textContent = `updated ${fmt.ago(this.healthAt)}`;
     if (this.denyAgo && this.denyAt) this.denyAgo.textContent = `updated ${fmt.ago(this.denyAt)}`;
     const snap = this.ctx.store.lastInventory;
     if (snap && this.readAgo) this.readAgo.textContent = fmt.ago(snap.meta.read_at);
@@ -1103,6 +1176,114 @@ class Overview {
       this.renderLinks();
     }
     this.renderWarnings();
+  }
+
+  // -- health --
+
+  async pollHealth(now = false) {
+    if (this.dead) return;
+    if (this.paused && !now) return;
+    if (this.inflightHealth) return;
+    clearTimeout(this.timers.health);
+    this.inflightHealth = true;
+    const res = await this.ctx.api.get('/api/health', null, { signal: this.ctl.signal });
+    this.inflightHealth = false;
+    if (this.dead || res.status === 401) return;
+    let next = HEALTH_EVERY_S * 1000;
+    if (res.ok) {
+      const hadError = Boolean(this.healthError);
+      this.healthError = null;
+      this.health = res.data;
+      this.healthAt = Date.now();
+      this.ctx.ui.noteFixture(res.data.meta);
+      const sample = healthSample(res.data);
+      if (sample) {
+        HEALTH_LOG.push(sample);
+        while (HEALTH_LOG.length && sample.t - HEALTH_LOG[0].t > HEALTH_WINDOW_MS) HEALTH_LOG.shift();
+      }
+      const final = ['route_engine', 'spu'].every((k) => FINAL.has((res.data[k] || {}).status));
+      this.renderHealth();
+      this.renderAges();
+      if (hadError) this.renderLivePill();
+      if (final) return; // neither part can be read by this login class: nothing to poll for
+    } else if (res.status === 429) {
+      next = Math.max(next, (res.retryAfter || 5) * 1000);
+    } else {
+      this.healthError = errorState(res, 'System health');
+      this.renderHealth();
+      this.renderLivePill();
+      next = RETRY_S * 1000;
+    }
+    if (!this.paused && !this.dead) this.timers.health = setTimeout(() => this.pollHealth(), next);
+  }
+
+  renderHealth() {
+    const t = this.t.health;
+    if (this.healthError) {
+      t.meta.replaceChildren();
+      put(t.body, stateCard({ ...this.healthError, compact: true }));
+      return;
+    }
+    const data = this.health;
+    if (!data) return;
+    const reP = data.route_engine || {};
+    const spuP = data.spu || {};
+    if (reP.status !== 'ok' && spuP.status !== 'ok') {
+      t.meta.replaceChildren();
+      put(t.body, stateCard({ status: reP.status || 'failed', message: reP.message || spuP.message, compact: true }));
+      return;
+    }
+    if (t.body.firstChild !== this.healthContent) put(t.body, this.healthContent);
+    const re = primaryEngine(reP);
+    const units = spuP.status === 'ok' ? spuP.units || [] : [];
+    const spuCpu = mean(units.map((u) => u.cpu));
+    const spuMem = mean(units.map((u) => u.memory));
+    const spuNote = units.length > 1 ? `mean of ${units.length} SPUs` : '';
+    const stat = (label, value, sub, cls) => h('div', { class: ['hl-stat', cls] }, h('dt', null, label), h('dd', null, h('span', { class: 'hl-val num' }, value), sub ? h('span', { class: 'hl-sub' }, sub) : null));
+    const pct = (v) => (Number.isFinite(v) ? `${Math.round(v)}%` : DASH);
+    const level = (v) => (Number.isFinite(v) && v >= 90 ? 'is-crit' : Number.isFinite(v) && v >= 75 ? 'is-warn' : null);
+    const items = [];
+    if (re) {
+      const mem = re.memory || {};
+      items.push(
+        stat('RE CPU', pct(re.cpu && re.cpu.busy), re.cpu ? `user ${pct(re.cpu.user)} · system ${pct(re.cpu.system)}` : '', level(re.cpu && re.cpu.busy)),
+        stat('RE memory', pct(mem.util), Number.isFinite(mem.used_mb) && Number.isFinite(mem.total_mb) ? `${fmt.num(mem.used_mb)} of ${fmt.num(mem.total_mb)} MB` : '', level(mem.util)),
+      );
+    } else {
+      items.push(stat('Routing engine', DASH, reP.status === 'ok' ? 'no figures' : stateWord(reP.status)));
+    }
+    if (units.length) {
+      const flows = units.reduce((a, u) => a + (u.flow_sessions || 0), 0);
+      items.push(
+        stat('Data-plane CPU', pct(spuCpu), spuNote, level(spuCpu)),
+        stat('Data-plane memory', pct(spuMem), spuNote || `${fmt.compact(flows)} flow sessions`, level(spuMem)),
+      );
+    } else {
+      items.push(stat('Data plane', DASH, stateWord(spuP.status)));
+    }
+    if (re) {
+      const load = (re.load || []).map((v) => (Number.isFinite(v) ? v.toFixed(2) : DASH));
+      items.push(
+        stat('Load average', load[0] || DASH, load.length ? `5 min ${load[1]} · 15 min ${load[2]}` : ''),
+        stat('RE temperature', Number.isFinite(re.temperature_c) ? `${re.temperature_c} °C` : DASH, Number.isFinite(re.cpu_temperature_c) ? `CPU ${re.cpu_temperature_c} °C` : ''),
+        stat('Uptime', Number.isFinite(re.uptime_s) ? uptime(re.uptime_s) : DASH, re.status ? `status ${re.status}` : ''),
+      );
+    }
+    put(this.hStats, items);
+    const engines = (reP.engines || []).length;
+    const notes = [];
+    if (engines > 1) notes.push(`${engines} routing engines; showing ${re && re.node ? `${re.node} ` : ''}${re && re.mastership ? re.mastership : 'the first'}.`);
+    if (reP.status !== 'ok') notes.push(`Routing engine: ${reP.message || stateWord(reP.status)}`);
+    if (spuP.status !== 'ok') notes.push(`Data plane: ${spuP.message || stateWord(spuP.status)}`);
+    this.hNote.textContent = notes.join(' ');
+    this.hNote.hidden = !notes.length;
+    t.meta.textContent = re && re.model ? re.model : '';
+    this.renderHealthCharts();
+  }
+
+  renderHealthCharts() {
+    this.cpuChart.update(HEALTH_LOG.map((s) => ({ t: s.t, v: { re: s.reCpu, spu: s.spuCpu } })));
+    this.memChart.update(HEALTH_LOG.map((s) => ({ t: s.t, v: { re: s.reMem, spu: s.spuMem } })));
   }
 
   renderSessions() {

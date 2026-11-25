@@ -1,4 +1,5 @@
 {
   "*:get-chassis-cluster-status": "unsupported",
-  "auditor:get-configuration": "denied"
+  "auditor:get-configuration": "denied",
+  "auditor:get-performance-summary-information": "denied"
 }

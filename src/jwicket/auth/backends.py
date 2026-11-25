@@ -17,7 +17,7 @@ import hmac
 import os
 import pwd
 import re
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable
 
 from jwicket.junos.errors import LoginRejected
 from jwicket.junos.session import DeviceSession, PyEzLocalSession, PyEzUserSession
@@ -25,6 +25,13 @@ from jwicket.junos.session import DeviceSession, PyEzLocalSession, PyEzUserSessi
 # Junos local user names are short; remote (RADIUS/TACACS+) names may carry a realm.
 _USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@\-]{0,63}\Z")
 MAX_SECRET_LEN = 512
+
+if TYPE_CHECKING:
+    from typing_extensions import Protocol
+else:
+    # typing.Protocol is 3.8+; Junos 25.2 and 26.2 ship Python 3.7 (Q-RT-01). At run time nothing
+    # checks the protocol, so a plain base class is enough.
+    Protocol = object
 
 
 class AuthBackend(Protocol):

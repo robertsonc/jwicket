@@ -7,6 +7,8 @@ dist/
 build/
 *.egg-info/
 # Local settings, tokens, keys and logs never belong in the repository.
+.env
+.env.*
 *.ini
 !tests/fixtures/*.ini
 !docs/examples/*.ini
@@ -16,4 +18,5 @@ build/
 !tests/fixtures/*/logs/*.log
 *.jsonl
 .playwright/
+.playwright-mcp/
 screenshots/

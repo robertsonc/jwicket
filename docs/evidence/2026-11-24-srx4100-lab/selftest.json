@@ -1,0 +1,49 @@
+{
+  "assets": {
+    "css/app.css": "ok (78682 bytes)",
+    "css/logs.css": "ok (39942 bytes)",
+    "css/policies.css": "ok (54667 bytes)",
+    "css/querybar.css": "ok (13375 bytes)",
+    "css/sessions.css": "ok (33532 bytes)",
+    "index.html": "ok (4988 bytes)",
+    "js/api.js": "ok (11006 bytes)",
+    "js/dom.js": "ok (22613 bytes)",
+    "js/format.js": "ok (4295 bytes)",
+    "js/logparse.js": "ok (58365 bytes)",
+    "js/main.js": "ok (77683 bytes)",
+    "js/query.js": "ok (89007 bytes)",
+    "js/views/logs.js": "ok (168265 bytes)",
+    "js/views/objects.js": "ok (79823 bytes)",
+    "js/views/overview.js": "ok (58466 bytes)",
+    "js/views/policies.js": "ok (131152 bytes)",
+    "js/views/sessions.js": "ok (148679 bytes)",
+    "js/widgets/flowdiagram.js": "ok (24103 bytes)",
+    "js/widgets/gauge.js": "ok (3579 bytes)",
+    "js/widgets/histogram.js": "ok (21209 bytes)",
+    "js/widgets/palette.js": "ok (9484 bytes)",
+    "js/widgets/querybar.js": "ok (29234 bytes)",
+    "js/widgets/sparkline.js": "ok (5159 bytes)",
+    "logo.svg": "ok (587 bytes)"
+  },
+  "bundle": "jwicket",
+  "failures": [],
+  "foreign_modules": [],
+  "modules": 22,
+  "modules_imported": 22,
+  "not_shipped": [
+    "jwicket.__main__",
+    "jwicket.devserver",
+    "jwicket.fixtures"
+  ],
+  "ok": true,
+  "path_removed": [
+    "/var/db/scripts/jet",
+    "/var/run/scripts/jet/"
+  ],
+  "payload_ok": true,
+  "payload_sha256": "323d357d3b01ce8529d3192214c3c5dc116824c3f7d643b540fad45f95e8fee2",
+  "python": "3.7.10",
+  "source_ref": "892e4eef591e-py37-ri",
+  "static_files": 24,
+  "version": "0.1.0.dev0"
+}

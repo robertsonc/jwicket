@@ -1,0 +1,13 @@
+<!-- SYNTHETIC. Shaped like the reply recorded on SRX4100 25.2R1-S1.4 (recorded-srx4100-25.2R1-S1.4/); values invented. The development server varies CPU, memory and sessions over time. -->
+<performance-summary-information>
+  <performance-summary-statistics>
+    <fpc-number>0</fpc-number>
+    <pic-number>0</pic-number>
+    <spu-cpu-utilization>12</spu-cpu-utilization>
+    <spu-memory-utilization>38</spu-memory-utilization>
+    <spu-current-flow-session>70</spu-current-flow-session>
+    <spu-max-flow-session>524288</spu-max-flow-session>
+    <spu-current-cp-session>0</spu-current-cp-session>
+    <spu-max-cp-session>0</spu-max-cp-session>
+  </performance-summary-statistics>
+</performance-summary-information>

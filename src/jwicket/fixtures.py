@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import json
+import math
 import random
 import time
 from pathlib import Path
@@ -13,7 +15,7 @@ from xml.etree import ElementTree
 from jwicket.junos.errors import RpcDenied, RpcFailed, RpcUnsupported
 from jwicket.junos.session import check_rpc
 from jwicket.junos.sessions import APPLICATIONS
-from jwicket.junos.xmlutil import Element
+from jwicket.junos.xmlutil import Element, local, text
 
 # IANA protocol numbers (verified, IANA protocol-numbers registry) for the keywords the session filter
 # accepts, so a numeric protocol filter matches the same sessions as its keyword. ipip has none here:
@@ -83,6 +85,8 @@ class FixtureSession:
                 raise RpcUnsupported("fixture has no session table", "This fixture has no session table.")
         if self._live is not None and name == "get-security-log-information":
             return self._live.buffer_xml(str(params.get("newer_than") or ""))
+        if self._live is not None and name in HEALTH_RPCS:
+            return self._live.health_xml(self._load(f"{name}.xml"))
         if name == "get-log":
             filename = str(params.get("filename", ""))
             base_file = self._dir / "logs" / f"{filename}.log"
@@ -420,6 +424,10 @@ class LiveModel:
             out.append((ts, f"{_bsd_time(ts)} {line}"))
         return out
 
+    def health_xml(self, reply: Element) -> Element:
+        """A health reply whose CPU, memory, load and session figures move with the clock."""
+        return _vary_health(self, copy.deepcopy(reply))
+
     def log_text(self, name: str, base: str) -> str:
         now = self.clock()
         if name == self.spec.get("traffic_file", "traffic-log"):
@@ -444,6 +452,48 @@ class LiveModel:
 def _bsd_sort_key(line: str) -> str:
     # "Nov 24 06:47:16 ..." sorts correctly within one month, which is all a 15-minute window needs.
     return line[:15]
+
+
+HEALTH_RPCS = frozenset({"get-route-engine-information", "get-performance-summary-information"})
+# Health figures the development server moves over time: (element, swing, period in seconds). The
+# fixture's value is the midpoint; each moves on its own slow wave plus a little deterministic noise.
+_HEALTH_WAVES = {
+    "cpu-user": (6.0, 180.0), "cpu-system": (4.0, 140.0), "cpu-interrupt": (1.0, 60.0),
+    "memory-system-total-util": (3.0, 600.0), "memory-buffer-utilization": (2.0, 420.0),
+    "load-average-one": (0.35, 120.0), "load-average-five": (0.2, 300.0), "load-average-fifteen": (0.1, 900.0),
+    "spu-cpu-utilization": (9.0, 150.0), "spu-memory-utilization": (2.0, 500.0),
+    "spu-current-flow-session": (25.0, 90.0),
+}
+
+
+def _wave(seed: str, name: str, now: float, swing: float, period: float) -> float:
+    phase = (sum(map(ord, f"{seed}:{name}")) % 997) / 997 * 2 * math.pi
+    noise = random.Random(f"{seed}:{name}:{int(now // 5)}").uniform(-.25, .25)  # noqa: S311 - synthetic fixture data
+    return swing * (math.sin(2 * math.pi * now / period + phase) + noise)
+
+
+def _vary_health(model: LiveModel, reply: Element) -> Element:
+    now = model.clock()
+    for el in reply.iter():
+        tag = local(el.tag)
+        if tag in _HEALTH_WAVES and el.text and el.text.strip():
+            base = float(el.text)
+            value = max(0.0, base + _wave(model.seed, tag, now, *_HEALTH_WAVES[tag]))
+            if "." in el.text:
+                el.text = f"{value:.2f}"
+            else:
+                el.text = str(int(round(value if tag == "spu-current-flow-session" else min(value, 100.0))))
+    # Idle is what is left; used memory follows the percentage.
+    for item in (e for e in reply.iter() if local(e.tag) == "route-engine"):
+        busy = sum(float(text(item, k) or 0) for k in ("cpu-user", "cpu-background", "cpu-system", "cpu-interrupt"))
+        idle = next((e for e in item if local(e.tag) == "cpu-idle"), None)
+        if idle is not None:
+            idle.text = str(int(max(0.0, 100.0 - busy)))
+        fields = ("memory-system-total", "memory-system-total-used", "memory-system-total-util")
+        total, used, util = (next((e for e in item if local(e.tag) == k), None) for k in fields)
+        if total is not None and used is not None and util is not None:
+            used.text = str(int(float(total.text or 0) * float(util.text or 0) / 100))
+    return reply
 
 
 def live_model_for(directory: Path, clock: Optional[Callable[[], float]] = None) -> Optional[LiveModel]:

@@ -1,4 +1,4 @@
-"""Shared helpers for the J-Wicket test suite (stdlib only, Python 3.9 syntax).
+"""Shared helpers for the J-Wicket test suite (stdlib only, Python 3.7 syntax).
 
 Nothing here talks to a device. Device sessions are fakes or ``jwicket.fixtures.FixtureSession``
 over the synthetic fixtures in tests/fixtures.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -41,9 +42,21 @@ def xml(text: str) -> Any:
 
 def xml_with_comments(text: str) -> Any:
     """Parse XML keeping comments as Comment nodes, to prove helpers skip them."""
-    parser = ElementTree.XMLParser(target=ElementTree.TreeBuilder(insert_comments=True))
+    if sys.version_info >= (3, 8):
+        parser = ElementTree.XMLParser(target=ElementTree.TreeBuilder(insert_comments=True))
+    else:  # TreeBuilder(insert_comments=) is 3.8+; 3.7 needs a builder that keeps comments itself
+        parser = ElementTree.XMLParser(target=_CommentKeepingBuilder())
     parser.feed(text)
     return parser.close()
+
+
+class _CommentKeepingBuilder(ElementTree.TreeBuilder):
+    """Python 3.7: a TreeBuilder that adds Comment nodes, like ``TreeBuilder(insert_comments=True)``."""
+
+    def comment(self, data: str) -> Any:
+        self.start(ElementTree.Comment, {})  # type: ignore[arg-type]
+        self.data(data)
+        return self.end(ElementTree.Comment)  # type: ignore[arg-type]
 
 
 def config(security: str = "", extra: str = "", applications: str = "") -> Any:

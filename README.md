@@ -3,7 +3,7 @@
 **J-Web, the SRX's built-in web UI, is thin where operators need it most. J-Wicket is an alternative designed to run on the firewall itself, starting read-only: live sessions filtered as you type, logs highlighted as log syntax, policies in the order Junos checks them.**
 
 [![ci](https://github.com/robertsonc/jwicket/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/robertsonc/jwicket/actions/workflows/ci.yml)
-![Python 3.9 | 3.11 | 3.13 tested in CI](https://img.shields.io/badge/python-3.9%20%7C%203.11%20%7C%203.13-3776ab)
+![Python 3.7 | 3.9 | 3.11 | 3.13 tested in CI](https://img.shields.io/badge/python-3.7%20%7C%203.9%20%7C%203.11%20%7C%203.13-3776ab)
 ![Node 22 tested in CI](https://img.shields.io/badge/node-22-339933)
 ![stage: foundation, not for production](https://img.shields.io/badge/stage-foundation%2C%20not%20for%20production-e9b44c)
 ![device access: read-only](https://img.shields.io/badge/device%20access-read--only-2ea44f)
@@ -18,12 +18,12 @@ In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids h
 
 **Stage: foundation, not installable on a production SRX.**
 
-- Everything here is read-only and proven against synthetic fixtures only. J-Wicket's own code has not yet run on a device, and nothing has run on a customer platform; a separate spike daemon ran on one lab vSRX.
+- Everything here is read-only. **Tested on one lab SRX4100** (Junos 25.2R1-S1.4, Python 3.7.10, 24 November 2026): the bundle ran under Junos, served TLS on fxp0, signed in an operator over NETCONF and read that device's policies, live sessions and syslog ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)). Nothing has run on a customer platform, no other platform or release has been tried, and the automated tests still use synthetic fixtures.
 - It is a web server on the routing engine, so it has to earn trust: its security review and external penetration test have not happened yet ([governance](docs/governance.md#3-gates-g0-to-g5)).
 - The prototype is not an installer, and the project does not ask anyone to enable a listener, disable J-Web or change a firewall.
 - Watch or star the repository to follow the qualification gates; G1 is next.
 
-Try it on a workstation. You need Python 3.9 or later, `make` and `git`; no packages and no device. CI runs on Linux; other operating systems are not tested in CI.
+Try it on a workstation. You need Python 3.7 or later, `make` and `git`; no packages and no device. CI runs on Linux; other operating systems are not tested in CI.
 
 ```sh
 git clone https://github.com/robertsonc/jwicket.git && cd jwicket
@@ -57,7 +57,7 @@ J-Wicket is a spec-driven project to replace J-Web for customers who want to man
 
 ## Try it without a firewall
 
-You need Python 3.9 or later, `make`, `git` and a browser. The development server needs no packages and talks to no device; run it from the repository root, because the fixture path is relative.
+You need Python 3.7 or later, `make`, `git` and a browser. The development server needs no packages and talks to no device; run it from the repository root, because the fixture path is relative.
 
 ```sh
 git clone https://github.com/robertsonc/jwicket.git && cd jwicket
@@ -90,7 +90,7 @@ The same checks CI runs (Node 22 is needed only for the JavaScript tests):
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # ruff and mypy, pinned
 make test                                  # Python unit and HTTP integration tests
 make lint RUFF=.venv/bin/ruff              # ruff check src tests tools
-make typecheck MYPY=.venv/bin/mypy         # mypy --strict, Python 3.9 target
+make typecheck MYPY=.venv/bin/mypy         # mypy --strict, Python 3.8 target (oldest mypy accepts)
 node --test tests/js/*.test.mjs            # query language and log parser, no packages
 make bundle                                # build dist/jwicket.py, then self-test it isolated
 ```
@@ -119,7 +119,7 @@ Central managers (Security Director, Security Director Cloud and Mist) run off t
 
 | Status tag | Means |
 | --- | --- |
-| `built` | The code exists. The daemon, the query language and the log parser have automated tests that pass against synthetic fixtures. Browser-only views (for example the Overview, command palette, session drawer, histogram, themes and phone layout) have been exercised by hand on the development server, with no automated UI tests. Formal browser acceptance (AC-001-21, AC-004-20) is not signed off, and nothing has run on a device. |
+| `built` | The code exists. The daemon, the query language and the log parser have automated tests that pass against synthetic fixtures. Browser-only views (for example the Overview, command palette, session drawer, histogram, themes and phone layout) have been exercised by hand on the development server, with no automated UI tests. Formal browser acceptance (AC-001-21, AC-004-20) is not signed off. The daemon, the Policies, Sessions and Logs reads, and sign-in have run once on a lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); that is not qualification. |
 | `specified` | A spec covers it; nothing is built. |
 | `planned` | On the roadmap, with no spec. |
 
@@ -249,19 +249,19 @@ Zones, address books and applications, each with where it is used, detail panels
 
 *The Overview: session gauge and 10-minute trend, top policies, recent denies folded by flow, zone pairs, jump-to links built from the data. Synthetic fixture data.*
 
-An Overview, a command palette, keyboard-first navigation, cross-links between every view, shareable URLs, day and night themes and a phone layout.
+An Overview with system health charts, a command palette, keyboard-first navigation, cross-links between every view, shareable URLs, three colour schemes in day and night, and a phone layout.
 
 <details>
 <summary>All 11 console features, and two more screenshots</summary>
 
-- `built` **Overview** with a LIVE, PAUSED or RETRYING pill: flow-session gauge and trend, recent denies (repeats folded into one row with ×N), top policies by live sessions, a zone-pair mini-matrix, warnings word for word, the device card and "jump to" links computed from what was read.
+- `built` **Overview** with a LIVE, PAUSED or RETRYING pill: system health (routing-engine and data-plane CPU and memory charted over 10 minutes, with load, temperature and uptime, from `show chassis routing-engine` and `show security monitoring`, read on a lab SRX4100), flow-session gauge and trend, recent denies (repeats folded into one row with ×N), top policies by live sessions, a zone-pair mini-matrix, warnings word for word, the device card and "jump to" links computed from what was read.
 - `built` **Command palette** (Ctrl+K or Cmd+K): views, actions, incident presets, scopes, every policy and zone; paste an address, port or session ID to get the matching look-ups. Its footer says "Nothing here is sent anywhere."
 - `built` **Keyboard first:** `g` then `o`, `p`, `s`, `l` or `b` for each view, `/` for the query bar, `j`/`k` and Enter, Space to pause live reads, `r` to refresh, `t` for the theme, `?` for the list.
 - `built` **Query bar** coloured as you type, with autocomplete from the current rows and the inventory, errors that point at the column, built-in help, and up to 20 saved queries per view (query text only, never device data).
 - `built` **Cross-links everywhere:** from a session to its policy and its logs, from a log line to the live session, from a policy or object to Sessions and Logs.
 - `built` **Copyable read-only show commands** for policies, objects, sessions and logs, built from the Junos hierarchy for you to paste; J-Wicket never runs them.
 - `built` **Shareable URLs** that keep view, query, selection and scope, so Back, Forward and copy-link land on the same view.
-- `built` **Day and night themes** that follow the operating system until you pick one, dense or comfortable rows, and reduced motion honoured.
+- `built` **Colour schemes:** HPE (the default), Obsidian & Phosphor for NOC screens, and Nordic Steel, colourblind-safe (allow is ice blue and deny magenta, never green against red); each in day and night, which follow the operating system until you pick one; every text colour measured at 4.5:1 or better. Dense or comfortable rows, and reduced motion honoured.
 - `built` **Phone layout:** bottom tab bar, session and log cards, full-screen detail sheet. Checked in emulated Chrome only, not on a real phone.
 - `built` **Accessibility aids:** skip link, throttled live announcements, ARIA listbox, combobox and grid roles, visible focus. Not tested with a screen reader and AA contrast not measured (UI-001-17 open), so no compliance is claimed.
 - `built` **Quiet when unattended:** live reads pause on a hidden tab and before the idle timeout, so an unattended console stops polling and its session can end.
@@ -293,7 +293,7 @@ Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with
 <details>
 <summary>All 11 sign-in and security features, and the cluster fixture</summary>
 
-- `built` **Sign-in delegated to Junos:** your user name and password go to Junos in a NETCONF session to the device's own loopback, so Junos applies its authentication order (local, RADIUS, TACACS+) and your login class to every read. J-Wicket stores no password and has no roles ([ADR 0002](docs/adr/0002-junos-delegated-sign-in.md)). Never run on a device (Q-AUTH-01, Q-AUTH-02, Q-AUTH-03).
+- `built` **Sign-in delegated to Junos:** your user name and password go to Junos in a NETCONF session to the device's own loopback, so Junos applies its authentication order (local, RADIUS, TACACS+) and your login class to every read. J-Wicket stores no password and has no roles ([ADR 0002](docs/adr/0002-junos-delegated-sign-in.md)). Worked for a super-user account on a lab SRX4100; least-privilege and remote-authentication users not tried yet (Q-AUTH-01, Q-AUTH-02, Q-AUTH-03).
 - `built` **Password only:** the daemon account's SSH keys and `~/.ssh/config` are never used; the NETCONF target must be a loopback address on a port below 1024.
 - `built` **Read-only RPC allowlist:** 15 `get-*` RPCs plus a separate configuration read with three constant filters that never fetch the whole configuration (password hashes) or all of `[edit security]` (IKE pre-shared keys). A test requires every allowlisted name to start with `get-` and checks that write RPCs are absent.
 - `built` **No request value becomes command text:** scopes, filters, log files, report expressions, times and cursors are validated before any read; session filters travel as RPC parameters.
@@ -342,7 +342,7 @@ A development server on synthetic fixtures with error injection and synthetic li
 - `built` **Fixtures:** synthetic `branch/` (standalone branch firewall) and `cluster-lsys/` (two-node chassis cluster with a logical system and a deactivated tenant system), a CSV-injection case and a synthetic log sample, with addresses from RFC 1918 and RFC 5737 only; plus a parser corpus of log lines copied verbatim from Juniper documentation (`log-samples/juniper-docs.txt`), which also carries other addresses ([tests/fixtures/README.md](tests/fixtures/README.md), [log-samples/README.md](tests/fixtures/log-samples/README.md)).
 - `built` **Error injection** per user and RPC (denied, unsupported, failed) and **deterministic synthetic live traffic** that follows the fixture's policies.
 - `built` **Tests:** 441 Python `unittest` tests and 56 Node tests for the query language and log parser pass on 2026-11-24; static-asset tests ban `innerHTML`, `eval`, inline script and external URLs.
-- `built` **CI:** ruff and strict mypy, tests plus an isolated bundle self-test on Python 3.9, 3.11 and 3.13, Node tests on Node 22, and a reproducible bundle build with read-only permissions.
+- `built` **CI:** ruff and strict mypy, tests plus an isolated bundle self-test on Python 3.7, 3.9, 3.11 and 3.13, Node tests on Node 22, and a reproducible bundle build with read-only permissions.
 
 </details>
 
@@ -409,9 +409,9 @@ flowchart TB
   RE -.->|"Junos authentication order"| AAA
 ```
 
-The routing-engine half is the design: J-Wicket's own code has not run on a device yet.
+The routing-engine half has run once, on a lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); it is not qualified anywhere.
 
-- **Who runs it:** one Python process on the routing engine, started and restarted by Junos as an extension-service application. The spike daemon showed that mechanism on one vSRX; J-Wicket's own bundle has not run there yet (Q-RT-02).
+- **Who runs it:** one Python process on the routing engine, started and restarted by Junos as an extension-service application. J-Wicket's bundle ran that way on a lab SRX4100 (Q-RT-02, partial). Where fxp0 is in `mgmt_junos`, `[server] routing_instance` creates the listener there and keeps the NETCONF sessions in the default instance.
 - **Who it reads as:** each operator signs in with their Junos user name and password, and J-Wicket opens one NETCONF session per operator to the device's own loopback, as that operator, so Junos decides who they are and what they may see.
 - **What it may send:** only RPCs on a read-only allowlist; configuration is read through constant filters from the committed database, and no request value becomes CLI text.
 - **The browser path:** the browser receives JSON and assets from J-Wicket alone; in the lab it reaches the loopback listener through an SSH tunnel.
@@ -433,7 +433,7 @@ Version 0.1.0.dev0, unreleased: no release or tag yet. Expanding the parity inve
 | Gate | Means | Status |
 | --- | --- | --- |
 | G0 spike | Unsigned Python runs under Junos, listens and reads the device | **Passed** on vSRX 24.4R2-S3.5, 2026-11-23, by the spike daemon, not J-Wicket's code |
-| G1 foundation exit | Least-privilege, TLS-protected on-box reads proven (Q-RT-01 to Q-RT-03, Q-AUTH-01 to Q-AUTH-03, Q-TLS-01, Q-REL-01, Q-LOAD-01 to Q-LOAD-03, Q-SEC-01) | Not reached; no qualification test has run |
+| G1 foundation exit | Least-privilege, TLS-protected on-box reads proven (Q-RT-01 to Q-RT-03, Q-AUTH-01 to Q-AUTH-03, Q-TLS-01, Q-REL-01, Q-LOAD-01 to Q-LOAD-03, Q-SEC-01) | Not reached. On a lab SRX4100: Q-RT-01 passed; Q-RT-02, Q-AUTH-01 and Q-TLS-01 partial ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)) |
 | G2 read parity | Every P0 and P1 ledger row implemented and qualified; hardware and HA tests pass; SEs choose J-Wicket over J-Web for look-ups on real labs | Not reached |
 | G3 preview-only builder | The Firewall Policy Builder ships; nothing that changes the device is sent | Not reached |
 | G4 live writes | Spec 002 built, external penetration test passed, product sponsor named | Not reached |
@@ -441,7 +441,7 @@ Version 0.1.0.dev0, unreleased: no release or tag yet. Expanding the parity inve
 
 **Parity ledger, 2026-11-24:** 881 J-Web 24.4 pages and operations tracked; 0 `implemented`, 0 `qualified`, 70 `specified`, 739 `planned`, 32 `replace` and 23 `out-of-scope` (each pending owner approval), 17 `unassessed` ([summary](docs/parity/jweb-24.4.md)). No row is `implemented` until its browser acceptance check passes, so no J-Web task is claimed at parity yet.
 
-**Next, in order** ([governance, section 8](docs/governance.md#8-what-ships-next)): browser acceptance of the Specs 001 and 004 views (AC-001-21, AC-004-20); the first lab qualification run on a disposable vSRX 24.4 (Q-RT-01, Q-RT-02, Q-RT-03, Q-NET-03, Q-AUTH-01, and the first recorded replies); then TLS and the G1 security review.
+**Next, in order** ([governance, section 8](docs/governance.md#8-what-ships-next)): browser acceptance of the Specs 001 and 004 views (AC-001-21, AC-004-20); finish the lab runs started on the SRX4100 (Q-AUTH-01 with a read-only-class account, Q-RT-02's kill and memory checks, Q-RT-03) and add a vSRX 24.4 cell, with the first recorded replies (Q-REL-01); then TLS provisioning and the G1 security review.
 
 ## Start here
 
@@ -466,10 +466,10 @@ The documentation map: which document answers which question.
 
 | Path | What it is | State |
 | --- | --- | --- |
-| `src/jwicket/` | The daemon: bounded HTTP(S) server, Junos-delegated sign-in, read adapters (policy inventory, device facts, sessions, logs), JSON API | Built and tested on fixtures; **not yet run on a device** |
+| `src/jwicket/` | The daemon: bounded HTTP(S) server, Junos-delegated sign-in, read adapters (policy inventory, device facts, sessions, logs), JSON API | Built and tested on fixtures; run once on a lab SRX4100 |
 | `src/jwicket/static/` | The browser UI: vanilla JavaScript and CSS, no build step, no packages | Built; browser acceptance pending |
 | `tools/bundle.py` | Builds `dist/jwicket.py`, the single file Junos would run | Built and self-tested in CI |
-| `tests/` | Python and Node tests; synthetic fixtures and a corpus of Juniper documentation log lines | CI on Python 3.9, 3.11, 3.13 and Node 22 |
+| `tests/` | Python and Node tests; synthetic fixtures and a corpus of Juniper documentation log lines | CI on Python 3.7, 3.9, 3.11, 3.13 and Node 22 |
 | `docs/` | Charter, parity ledger, catalog, architecture, specs, ADRs, governance, lab procedure | Living documents |
 | `docs/evidence/` | The spike packet, unedited | Evidence, not product |
 

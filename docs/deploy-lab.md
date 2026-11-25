@@ -1,18 +1,26 @@
-# Lab deployment: the J-Wicket bundle on a disposable vSRX
+# Lab deployment: the J-Wicket bundle on a lab SRX
 
 > [!WARNING]
-> **Lab vSRX only. Never a production firewall.**
+> **Lab devices only. Never a production firewall.**
 >
 > J-Wicket is at the foundation stage and is **not installable on a production SRX**. This project
 > does not ask you to enable a listener, disable J-Web or change a production firewall. Use this
-> procedure only on a disposable virtual SRX (a vLabs sandbox, or an isolated lab VPC) that carries
-> no traffic you care about and that you are allowed to change and then delete.
+> procedure only on a disposable virtual SRX (a vLabs sandbox, or an isolated lab VPC), or on lab
+> hardware whose owner approves the run, that carries no traffic you care about and that you are
+> allowed to change.
 >
 > Even on a lab box, `set system scripts language python3` lets unsigned Python run on the routing
 > engine, which is a security posture change in its own right. Every configuration change below is
 > made with `commit confirmed 5`, so Junos rolls it back by itself unless you confirm it.
 
-This procedure puts one build of `dist/jwicket.py` on a lab vSRX so that qualification tests can be
+**Where this has run.** Written for a disposable vSRX. Run once end to end, on 24 November 2026, on
+the project owner's lab SRX4100 (hardware, Junos 25.2R1-S1.4), at the owner's direction
+([evidence](evidence/2026-11-24-srx4100-lab/README.md)). That run is the source of every "verified on SRX4100" mark below, and it
+added the [TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused), because the SSH
+tunnel was refused on 25.2. The separate hardware procedure that governance asks for (D12) is still
+not written: on hardware, the lab owner decides.
+
+This procedure puts one build of `dist/jwicket.py` on a lab SRX so that qualification tests can be
 run against a real Junos: the interpreter and module probe (Q-RT-01), the per-operator NETCONF
 sign-in (Q-AUTH-01) and the read-only policy inventory. It does not cover TLS (Q-TLS-01), a listener
 off loopback, a security-zone change or configuration writes; J-Wicket has no write path. It does
@@ -39,6 +47,8 @@ through an SSH tunnel (step 7).
 The spike record is in [`docs/evidence/2026-11-23-vsrx-spike/`](evidence/2026-11-23-vsrx-spike/README.md):
 one vSRX, Junos 24.4R2-S3.5, 24 November 2026 UTC, with the file name `wicket_spike.py`.
 
+- **Verified on SRX4100**: the 24 November 2026 run on a lab SRX4100, Junos 25.2R1-S1.4
+  ([evidence](evidence/2026-11-24-srx4100-lab/README.md)), ran this with J-Wicket's own bundle and recorded the result.
 - **Verified**: the spike ran this command or statement and recorded the result. Here the file name
   is `jwicket.py` (or one of its two copies); the syntax is otherwise the same.
 - **From the spike packet's run instructions**: written in the packet's
@@ -56,9 +66,11 @@ Shell steps (`ls`, `chmod`, `mkdir`, `rm`, `openssl`, `sysctl`) run in the Junos
 
 You need:
 
-- A disposable vSRX with veriexec enforcing. In the shell, `sysctl security.mac.veriexec.state`
-  should print `loaded active enforce` (verified). A box without enforcement makes every result
-  meaningless for hardware.
+- A disposable vSRX, or a lab SRX the lab owner has approved, with veriexec enforcing. In the
+  shell, `sysctl security.mac.veriexec.state` should print `loaded active enforce` (verified; also
+  on SRX4100). A box without enforcement makes every result meaningless for hardware.
+- A Junos release whose Python is 3.7 or later. 25.2R1-S1.4 ships 3.7.10 (verified on SRX4100);
+  the probe in step 4 records it for any other release.
 - A Junos account, written `<user>` below, in the super-user class. It copies the files, owns them,
   and is the extension-service `username`, so the daemon runs as this account (verified: the spike's
   daemon ran as the `username` account and class). With the `netconf` backend, reads run as whoever
@@ -72,7 +84,11 @@ operational commands):
 show configuration system scripts
 show configuration system extensions
 show configuration system services
+show configuration system management-instance
 ```
+
+If `system management-instance` is set, fxp0 is in the `mgmt_junos` routing instance; that
+matters only for the [TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused).
 
 ## 1. Build and record the bundle (workstation)
 
@@ -145,10 +161,14 @@ mkdir -m 700 /var/db/jwicket
 ls -ld /var/db/jwicket
 ```
 
-Expect `drwx------` and `<user>`. Unverified (Q-RT-02 records it): whether a super-user-class
-account may create a directory under `/var/db`. If `mkdir` is refused, the lab fallback (also
-unverified) is to become root in the shell with the lab's root password, create the directory, and
-`chown <user> /var/db/jwicket`.
+Expect `drwx------` and `<user>`. On SRX4100 25.2R1-S1.4 a super-user-class account may **not**
+create a directory under `/var/db`: both this `mkdir` and the CLI's `file make-directory` were
+refused with `Permission denied` (verified on SRX4100). The fallback works (verified on SRX4100):
+as root, in the shell,
+
+```
+mkdir -m 700 /var/db/jwicket && chown <user> /var/db/jwicket
+```
 If neither works, stop and record it: moving the settings file elsewhere is a code change, not a lab
 workaround.
 
@@ -174,6 +194,10 @@ tls_key =
 # uses through the step 7 tunnel; anything else gets HTTP 421. This blocks DNS-rebinding pages on
 # the workstation from reaching the tunnel. Change the port here if you change the tunnel's port.
 allowed_hosts = 127.0.0.1:8443, localhost:8443
+# Junos routing instance to create the listening socket in. Default: unset (the default
+# instance). Set it to mgmt_junos to listen on fxp0 when "system management-instance" is on; only
+# the listener goes there, NETCONF stays in the default instance. Needs the on-box jcs module.
+routing_instance =
 # Concurrent connections, 2..64. Default 8. Over the cap, new connections are closed at once.
 max_connections = 8
 # Seconds, 2..60. Default 10. Each socket read times out after this long, and the TLS handshake,
@@ -274,14 +298,18 @@ request extension-service start jwicket_probe.py
 
 `request extension-service start` is verified, and output prints to the terminal. The bundle picks
 its mode from its own file name: `jwicket_selftest.py` runs the bundle self-test, `jwicket_probe.py`
-runs the interpreter probe, and both exit without listening. That mechanism is new and has not yet
-run on a device (unverified; Q-RT-01 and Q-RT-02 record it). Expect:
+runs the interpreter probe, and both exit without listening (verified on SRX4100). Expect:
 
 - self-test: JSON ending in `"ok": true`, with `payload_sha256` equal to the value from step 1;
 - probe: JSON with the Python and OpenSSL versions and, for each module the daemon needs
   (`http.server`, `ssl`, `jnpr.junos`, `lxml`, `ncclient`, `paramiko` and others), `ok` or
   `missing: <reason>`. Keep the whole output: it is the Q-RT-01 record for this release. The probe's
-  exit status is non-zero if any module is missing.
+  exit status is non-zero if any module is missing. On SRX4100 25.2R1-S1.4: Python 3.7.10, OpenSSL
+  1.1.1zb, every module `ok` (verified on SRX4100).
+
+If the self-test fails with an `ImportError` naming a `typing` or standard-library name, the
+bundle uses something newer than the device's Python: record the version and the error, and stop.
+That is how the 3.9-era bundle failed on 25.2 before the floor moved to 3.7.
 
 The argument form, `request extension-service start jwicket.py --bundle-self-test` (or `--probe`),
 is unverified (Q-RT-01 records it if tried), and spike finding F1 suggests it fails: Junos's script
@@ -302,7 +330,8 @@ commit
 
 This is a configuration change with reach beyond J-Wicket: it starts NETCONF over SSH on TCP 830 for
 every path that can reach the routing engine, including fxp0, and vLabs forwards port 830 to the vSRX
-from outside (verified). J-Wicket needs it on loopback only; restricting it to loopback is a
+from outside (verified). Check step 0's output first: the SRX4100 already had
+`netconf ssh` configured, so there was nothing to add. J-Wicket needs it on loopback only; restricting it to loopback is a
 firewall-filter change that this procedure does not cover. Do this on a lab box only.
 
 To skip NETCONF, use the `lab-token` backend instead (see "Variant" below). Q-AUTH-01 is then not
@@ -329,7 +358,7 @@ file show /var/db/jwicket/jwicket.log
 ```
 
 Expect `TLS is off; listening on loopback only (127.0.0.1)` and
-`listening on 127.0.0.1:8443 tls=False backend=netconf`. If those lines are there, confirm with
+`listening on 127.0.0.1:8443 tls=False backend=netconf routing_instance=default` (verified on SRX4100). If those lines are there, confirm with
 `commit`. If not, do not confirm: let the change roll back, and use "Debugging" below. A refused start
 writes its reason (`startup refused: ...`) to stderr, and also to `/var/db/jwicket/startup-refused.txt`
 when that directory exists, because the log file is opened only after the settings are accepted:
@@ -337,7 +366,13 @@ when that directory exists, because the log file is opened only after the settin
 if a module was loaded from the bundle's own directory, the bundle prints `jwicket: refusing to
 start: code was loaded from this file's directory: ...` to stderr only and exits with status 2;
 remove the file it names from `/var/db/scripts/jet/`. Junos stops restarting an application that
-keeps exiting ("thrashing, not restarted", verified).
+keeps exiting ("thrashing, not restarted", verified; also on SRX4100). After fixing the cause, it
+stays stopped until its statements change: `deactivate system extensions extension-service
+application file jwicket.py`, commit, then `activate` it and commit again (verified on SRX4100).
+
+To restart the daemon after editing `jwicket.ini`, find its PID with `ps ax | grep jwicket` (it
+shows as `cscript -mjet -Q3 -j -f jwicket.py -J<user>`) and `kill <pid>`; `respawn-on-normal-exit`
+brings it back within seconds (verified on SRX4100). `pkill` is not on the box.
 
 ## 7. Open the UI through an SSH tunnel only
 
@@ -359,10 +394,12 @@ session cookie. Use a browser profile that opens nothing else on `127.0.0.1` dur
 The cookie's name (`jwicket-<8 hex>`) changes at each daemon start, so two J-Wicket tunnels do not
 overwrite each other's cookie, and a restart signs everyone out.
 
-Unverified: whether this release's SSH service allows TCP forwarding (Q-NET-03 records it). If the
-tunnel reports `administratively prohibited`, the statement to look for is
-`set system services ssh tcp-forwarding` (unverified, Q-NET-03; check it with `?`; a configuration
-change; lab box only; `commit confirmed 5`, then `commit`).
+Whether the SSH service allows TCP forwarding depends on the release (Q-NET-03). On SRX4100
+25.2R1-S1.4 it does not: the tunnel reports `channel 1: open failed: administratively prohibited`,
+and `set system services ssh tcp-forwarding` is a syntax error there (verified on SRX4100). On
+another release, check that statement with `?` (a configuration change; lab box only;
+`commit confirmed 5`, then `commit`). If the tunnel cannot work, use the
+[TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused).
 
 Sign in with a Junos user name and password. Each operator's login class decides what they see: a
 panel their class may not read shows "denied" instead of data. For Q-AUTH-01, sign in once with a
@@ -373,7 +410,71 @@ used nowhere else: in vLabs, SSH (22) and NETCONF (830) are forwarded to the vSR
 (step 5), so any account on the box can be tried from outside for as long as it exists. Step 9
 deletes the lab-only account.
 
+A wrong password shows "Sign-in failed. Check the user name and password." and is audited as
+`login_failed` with a `user_hash`, never the name; the device logs `SSHD_LOGIN_FAILED ... from
+host '127.0.0.1'` (verified on SRX4100). A good one logs `Accepted password for <user> from
+127.0.0.1` on the device and `login` in the audit trail (verified on SRX4100).
+
+## Variant: TLS on fxp0 (when the tunnel is refused)
+
+Verified on SRX4100 25.2R1-S1.4. This listens off loopback, on the management port, so it needs
+TLS (J-Wicket refuses to start without it) and the lab owner's approval. It does not touch a
+security zone: fxp0 is not in one. It does not cover revenue interfaces, which need a zone change
+and are Q-NET-01's.
+
+1. **Make a certificate on the box**, so the private key never leaves it. In the shell, as
+   `<user>`:
+
+   ```
+   cd /var/db/jwicket && umask 077
+   openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 90 -keyout tls.key -out tls.crt \
+       -subj /CN=<fxp0 address> -addext subjectAltName=IP:<fxp0 address>
+   chmod 600 tls.key; chmod 644 tls.crt
+   openssl x509 -in tls.crt -noout -fingerprint -sha256
+   ```
+
+   Keep the fingerprint: it is how the browser's self-signed-certificate warning can be checked.
+   Choosing a provisioning path for real certificates is Q-TLS-01's.
+
+2. **Set the listener** in `jwicket.ini`:
+
+   ```ini
+   [server]
+   bind = <fxp0 address>
+   port = 9443
+   tls_cert = /var/db/jwicket/tls.crt
+   tls_key = /var/db/jwicket/tls.key
+   allowed_hosts = <fxp0 address>:9443
+   # Only if step 0 showed "system management-instance":
+   routing_instance = mgmt_junos
+   ```
+
+   With `system management-instance`, fxp0's address is in `mgmt_junos`. Without
+   `routing_instance`, the start is refused with `cannot listen on <address>:9443: Can't assign
+   requested address`. Binding `0.0.0.0` instead starts, but a browser's connection times out: the
+   SYN arrives, and the reply goes out through the default instance's table. The extension-service
+   statement `routing-instance mgmt_junos` does not help (all verified on SRX4100). The port is
+   your choice; the run used 9443.
+
+3. **Restart the daemon** (`kill <pid>`, step 6) and check the log for
+   `listening on <fxp0 address>:9443 tls=True backend=netconf routing_instance=mgmt_junos`.
+
+4. **Browse** to `https://<fxp0 address>:9443/` from a host on the management network, accept the
+   certificate after checking its fingerprint, and sign in as in step 7. TLS 1.2 and 1.3 were
+   offered (verified on SRX4100); plain HTTP to the port gets no answer.
+
 ## Debugging a start failure (verified procedure)
+
+Two symptoms from the SRX4100 run, before the procedure below:
+
+- `startup refused: cannot listen on <address>:<port>: Can't assign requested address`: the address
+  is not in the instance the daemon creates its socket in, usually fxp0 under
+  `system management-instance`. Set `routing_instance = mgmt_junos` (see the variant above).
+- The daemon logs `listening on ...` but a browser times out (no refusal, no answer): the socket is
+  in the wrong routing instance. It is not a port collision.
+- Running test code: `python3` from the shell is "Operation not permitted" under veriexec (verified
+  on SRX4100). Copy the script to `/var/db/scripts/jet/`, register it like `jwicket_probe.py`, and
+  run it with `request extension-service start`.
 
 A daemonized application cannot be started by hand (`request extension-service start` answers
 "Can't start daemonize app", verified). Remove `daemonize`, then run it in the foreground, where its
@@ -462,7 +563,7 @@ not restart it (verified). Then remove the files:
 
 ```
 rm /var/db/scripts/jet/jwicket.py /var/db/scripts/jet/jwicket_selftest.py /var/db/scripts/jet/jwicket_probe.py
-rm -r /var/db/jwicket
+rm -r /var/db/jwicket        # also removes tls.key and tls.crt from the TLS variant
 ls /var/db/scripts/jet/
 ```
 
