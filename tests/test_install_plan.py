@@ -17,6 +17,7 @@ from typing import Optional
 import install_support as s
 from install_support import plan, state
 
+from jwicket import __version__ as daemon_version
 from jwicket import settings as jwicket_settings
 
 D = plan.Layout.DIRECT
@@ -103,7 +104,8 @@ class ConstantsTests(unittest.TestCase):
                 ),
             ):
                 line = match.group(1) % (*args, found.version, s.PAYLOAD_SHA[:16])
-                runtime = s.plan_for(name, **options).stage("runtime")
+                bundle_id = dataclasses.replace(s.bundle(), version=found.version)
+                runtime = s.plan_for(name, bundle_id=bundle_id, **options).stage("runtime")
                 assert runtime is not None
                 c4 = next(c for c in runtime.checks if c.id == "C4")
                 with self.subTest(name=name, options=options):
@@ -119,7 +121,7 @@ class ConstantsTests(unittest.TestCase):
     def test_version_and_schemas(self) -> None:
         import jwicket_install
 
-        self.assertEqual(jwicket_install.__version__, "0.1.0.dev1")
+        self.assertEqual(jwicket_install.__version__, daemon_version)
         self.assertEqual(plan.PLAN_SCHEMA, 2)
         self.assertEqual(plan.RECEIPT_SCHEMA, 3)
 

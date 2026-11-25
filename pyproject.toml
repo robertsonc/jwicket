@@ -4,7 +4,7 @@
 # PyEZ that Junos ships on the device.
 [project]
 name = "jwicket"
-version = "0.1.0.dev1"
+version = "0.1.0.dev2"
 description = "On-box, read-first web UI for Juniper SRX firewalls (foundation stage, not for production)"
 requires-python = ">=3.7"
 dependencies = []

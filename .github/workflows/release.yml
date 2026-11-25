@@ -330,54 +330,110 @@ jobs:
             echo "::error::expected six files (four assets, SHA256SUMS, RELEASE-NOTES.md), found $count"
             exit 1
           fi
-      - name: Create the pre-release as a draft, with its assets
+      - name: Create the pre-release as a draft
+        id: draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          repo="repos/$GITHUB_REPOSITORY"
+          timeout 120 gh api "$repo/git/ref/tags/$RELEASE_TAG" --silent
+          tagged_sha=$(timeout 120 gh api "$repo/commits/$RELEASE_TAG" --jq .sha)
+          [[ "$tagged_sha" == "$GITHUB_SHA" ]]
+          existing=$(timeout 120 gh api --paginate --slurp "$repo/releases?per_page=100")
+          if ! jq -e --arg tag "$RELEASE_TAG" 'all(.[][]; .tag_name != $tag)' <<< "$existing" > /dev/null; then
+            echo "::error::A release or draft already exists for $RELEASE_TAG; refusing to write."
+            exit 1
+          fi
+          # Never infer ownership from a tag lookup. Record the ID from the create response.
+          draft=$(jq -n --arg tag "$RELEASE_TAG" --arg sha "$GITHUB_SHA" --rawfile body dist/RELEASE-NOTES.md \
+            '{tag_name: $tag, target_commitish: $sha, name: ("J-Wicket " + $tag + " (lab only, pre-release)"),
+              body: $body, draft: true, prerelease: true, make_latest: "false"}' |
+            timeout 120 gh api --method POST "$repo/releases" --input -)
+          release_id=$(jq -er --arg tag "$RELEASE_TAG" '
+            select(.draft == true and .prerelease == true and .tag_name == $tag)
+            | .id | numbers | select(. > 0)' <<< "$draft")
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload and check assets on the owned draft
+        id: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
           version="${RELEASE_TAG#v}"
-          timeout 600 gh release create "$RELEASE_TAG" \
-            dist/jwicket.py dist/jwicket-install-op.py "dist/jwicket_install-$version-py3-none-any.whl" \
-            dist/requirements-install.txt dist/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --prerelease --verify-tag --latest=false --draft \
-            --title "J-Wicket $RELEASE_TAG (lab only, pre-release)" --notes-file dist/RELEASE-NOTES.md
-      - name: Publish, then verify the release attestation; delete the release if it does not verify
+          for asset in jwicket.py jwicket-install-op.py "jwicket_install-$version-py3-none-any.whl" \
+            requirements-install.txt SHA256SUMS; do
+            digest=$(sha256sum "dist/$asset" | cut -d ' ' -f 1)
+            # No redirects or retries: send the token only to GitHub's release upload host.
+            uploaded=$(curl --disable --fail-with-body --silent --show-error --max-time 120 \
+              --header "Authorization: Bearer $GH_TOKEN" --header 'Content-Type: application/octet-stream' \
+              --data-binary "@dist/$asset" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$asset")
+            jq -e --arg name "$asset" --arg digest "sha256:$digest" \
+              '.name == $name and .state == "uploaded" and .digest == $digest' <<< "$uploaded" > /dev/null
+          done
+
+      - name: Publish, then verify the owned release
+        id: publish_owned
         if: ${{ needs.attest.result == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
         run: |
-          # Reads only are retried; the writes (edit, delete) run once.
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          repo="repos/$GITHUB_REPOSITORY"
+          release="$repo/releases/$RELEASE_ID"
+          # Check again for a conflicting release before publishing, including another draft.
+          existing=$(timeout 120 gh api --paginate --slurp "$repo/releases?per_page=100")
+          jq -e --arg tag "$RELEASE_TAG" --argjson id "$RELEASE_ID" \
+            '[.[][] | select(.tag_name == $tag)] | length == 1 and .[0].id == $id and .[0].draft == true' \
+            <<< "$existing" > /dev/null
+          published=$(printf '%s\n' '{"draft":false,"make_latest":"false"}' |
+            timeout 120 gh api --method PATCH "$release" --input -)
+          jq -e --argjson id "$RELEASE_ID" --arg tag "$RELEASE_TAG" \
+            '.id == $id and .tag_name == $tag and .draft == false and .prerelease == true' \
+            <<< "$published" > /dev/null
+
           retry_read() {
             local delay
             for delay in 5 10 20 40; do
-              if timeout 120 "$@"; then
+              if timeout 45 "$@"; then
                 return 0
               fi
               sleep "$delay"
             done
             return 1
           }
+          # The CLI verification commands take a tag, so bind that lookup to our ID first.
+          actual_id=$(retry_read gh api "$repo/releases/tags/$RELEASE_TAG" --jq .id)
+          [[ "$actual_id" == "$RELEASE_ID" ]]
+          retry_read gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          live_immutable=$(retry_read gh api "$release" --jq .immutable)
+          [[ "$live_immutable" == true ]]
           version="${RELEASE_TAG#v}"
-          timeout 120 gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
-          verified=false
-          if retry_read gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
-            verified=true
-            for asset in jwicket.py jwicket-install-op.py "jwicket_install-$version-py3-none-any.whl" \
-              requirements-install.txt SHA256SUMS; do
-              if ! retry_read gh release verify-asset "$RELEASE_TAG" "dist/$asset" --repo "$GITHUB_REPOSITORY"; then
-                verified=false
-              fi
-            done
-          fi
-          if [ "$verified" != true ]; then
-            echo "::error::gh release verify failed for $RELEASE_TAG (are immutable releases on?); deleting the release, the tag stays"
-            timeout 120 gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes
-            exit 1
-          fi
+          for asset in jwicket.py jwicket-install-op.py "jwicket_install-$version-py3-none-any.whl" \
+            requirements-install.txt SHA256SUMS; do
+            retry_read gh release verify-asset "$RELEASE_TAG" "dist/$asset" --repo "$GITHUB_REPOSITORY"
+          done
+          actual_id=$(retry_read gh api "$repo/releases/tags/$RELEASE_TAG" --jq .id)
+          [[ "$actual_id" == "$RELEASE_ID" ]]
           {
             echo "### Published $RELEASE_TAG (LAB ONLY pre-release)"
             echo
             echo "Release attestation verified for every asset. Next: make release-record TAG=$RELEASE_TAG REPO=$GITHUB_REPOSITORY, then a reviewed pull request to main."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up only the release created by this run
+        if: ${{ failure() && steps.draft.outputs.release_id != '' && (steps.upload.outcome == 'failure' || steps.publish_owned.outcome == 'failure') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          timeout 120 gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --silent
+
       - name: No attestation (private repository without Enterprise Cloud); leave the draft for the owner
         if: ${{ needs.attest.result == 'skipped' }}
         run: |

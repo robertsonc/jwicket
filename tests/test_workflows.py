@@ -270,7 +270,7 @@ class TextChecks(unittest.TestCase):
         writers = [
             line
             for line, script in run_blocks(text)
-            if re.search(r"gh release (create|edit|delete|upload)", without_strings(script))
+            if re.search(r"gh api --method (POST|PATCH|DELETE)|curl --disable", without_strings(script))
         ]
         self.assertTrue(writers)
         for line in writers:
@@ -521,38 +521,42 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(writers, ["publish"])
         self.assertTrue(self.jobs["publish"]["if"].startswith("${{ !cancelled() && github.event_name == 'push' &&"))
 
-    def test_publish_creates_a_draft_then_publishes_verifies_or_deletes(self) -> None:
+    def test_publish_creates_a_draft_then_publishes_verifies_or_deletes_by_id(self) -> None:
         job = self.jobs["publish"]
         check = step_named(job, "Check the tag and the assets")["run"]
         self.assertIn('[ "$RELEASE_TAG" != "$GITHUB_REF_NAME" ]', check)
         self.assertIn("sha256sum -c SHA256SUMS", check)
         create = step_named(job, "Create the pre-release as a draft")
         self.assertNotIn("if", create)
-        for flag in (
-            'gh release create "$RELEASE_TAG"',
-            '--repo "$GITHUB_REPOSITORY"',
-            "--prerelease",
-            "--verify-tag",
-            "--latest=false",
-            "--draft",
-            "--notes-file dist/RELEASE-NOTES.md",
-        ):
-            self.assertIn(flag, create["run"])
+        self.assertEqual(create["id"], "draft")
+        script = create["run"]
+        self.assertLess(script.index("all(.[][]; .tag_name != $tag)"), script.index("--method POST"))
+        self.assertIn('draft: true, prerelease: true, make_latest: "false"', script)
+        self.assertIn('printf \'release_id=%s\\n\' "$release_id" >> "$GITHUB_OUTPUT"', script)
+        upload = step_named(job, "Upload and check assets")
+        self.assertIn("/releases/$RELEASE_ID/assets?name=$asset", upload["run"])
+        self.assertIn(".digest == $digest", upload["run"])
         verify = step_named(job, "Publish, then verify")
         self.assertEqual(verify["if"], "${{ needs.attest.result == 'success' }}")
         script = verify["run"]
         order = [
             script.index(s)
             for s in (
-                "--draft=false",
+                'release="$repo/releases/$RELEASE_ID"',
+                '--method PATCH "$release"',
+                '[[ "$actual_id" == "$RELEASE_ID" ]]',
                 'gh release verify "$RELEASE_TAG"',
                 "gh release verify-asset",
-                'gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes',
-                "exit 1",
             )
         ]
         self.assertEqual(order, sorted(order))
-        self.assertNotIn("--cleanup-tag", script)
+        self.assertIn('[[ "$live_immutable" == true ]]', script)
+        cleanup = step_named(job, "Clean up only the release")
+        self.assertIn("failure() && steps.draft.outputs.release_id != ''", cleanup["if"])
+        self.assertIn('--method DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"', cleanup["run"])
+        for step in (upload, verify, cleanup):
+            self.assertEqual(step["env"]["RELEASE_ID"], "${{ steps.draft.outputs.release_id }}")
+        self.assertNotRegex(read(RELEASE), r"gh release (create|edit|delete|upload)")
         draft = step_named(job, "leave the draft for the owner")
         self.assertEqual(draft["if"], "${{ needs.attest.result == 'skipped' }}")
         self.assertNotIn("gh release", without_strings(draft["run"]))
@@ -561,7 +565,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for name, job in self.jobs.items():
             self.assertNotIn("GH_TOKEN", job.get("env") or {}, name)
             for step in steps(job):
-                uses_gh = "gh release" in without_strings(str(step.get("run", "")))
+                script = str(step.get("run", ""))
+                uses_gh = "gh release" in without_strings(script) or "gh api" in script or "curl --disable" in script
                 token = (step.get("env") or {}).get("GH_TOKEN")
                 with self.subTest(job=name, step=step.get("name")):
                     if uses_gh:
