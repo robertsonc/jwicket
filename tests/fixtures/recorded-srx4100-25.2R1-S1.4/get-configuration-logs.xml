@@ -1,0 +1,66 @@
+<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:junos="http://xml.juniper.net/junos/25.2R1-S1.4/junos" message-id="8">
+<configuration xmlns="http://yang.juniper.net/junos-es/conf/root" junos:commit-seconds="1795568376" junos:commit-localtime="2026-11-24 18:59:36 CST" junos:commit-user="ed209">
+    <system xmlns="http://yang.juniper.net/junos-es/conf/system">
+        <syslog>
+            <user>
+                <name>*</name>
+                <contents>
+                    <name>any</name>
+                    <emergency/>
+                </contents>
+            </user>
+            <file>
+                <name>interactive-commands</name>
+                <contents>
+                    <name>interactive-commands</name>
+                    <any/>
+                </contents>
+            </file>
+            <file>
+                <name>messages</name>
+                <contents>
+                    <name>any</name>
+                    <notice/>
+                </contents>
+                <contents>
+                    <name>authorization</name>
+                    <info/>
+                </contents>
+            </file>
+            <file>
+                <name>sdcloud-messages</name>
+                <contents>
+                    <name>any</name>
+                    <any/>
+                </contents>
+                <match>(UI_COMMIT_COMPLETED)|ifAdminStatus|ifOperStatus|(FRU power)|(FRU removal)|(FRU insertion)|(link UP)|(vc add)|(vc delete)|transitioned|Transferred|transfer-file|(license add)|(license delete)|JSRPD_HA_HEALTH_WEIGHT|PKID_PV_CERT_LOAD|PKID_PV_CERT_DEL|JSRPD_HA_SRG_STATE_CHANGE|JSRPD_BFD_STATE_DOWN|JSRPD_BFD_STATE_UP|JSRPD_ICD_BFD_STATE_DOWN|JSRPD_ICD_BFD_STATE_UP|JSRPD_HA_PEER_FAILOVER_READY|JSRPD_HA_COLD_SYNC_COMPLETE</match>
+                <structured-data>
+                </structured-data>
+            </file>
+        </syslog>
+    </system>
+    <security xmlns="http://yang.juniper.net/junos-es/conf/security">
+        <log>
+            <utc-timestamp/>
+            <mode>stream</mode>
+            <source-interface>ae0.999</source-interface>
+            <stream>
+                <name>sd-cloud-logs</name>
+                <format>sd-syslog</format>
+                <category>
+                    <name>all</name>
+                </category>
+                <host>
+                    <ipaddr>srx.sdcloud.juniperclouds.net</ipaddr>
+                    <port>6514</port>
+                </host>
+                <transport>
+                    <undocumented><division>line-based</division></undocumented>
+                    <protocol>tls</protocol>
+                    <tls-profile>syslog-profile</tls-profile>
+                </transport>
+            </stream>
+        </log>
+    </security>
+</configuration>
+</nc:rpc-reply>

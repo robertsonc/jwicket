@@ -1,0 +1,5 @@
+<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:junos="http://xml.juniper.net/junos/25.2R1-S1.4/junos" message-id="9">
+<security-log-information junos:style="brief">
+<security-logs-disabled/>
+</security-log-information>
+</nc:rpc-reply>
