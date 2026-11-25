@@ -1096,12 +1096,6 @@ pre {
   margin-bottom: 4px;
 }
 
-.signin-tagline {
-  color: var(--muted);
-  font-size: var(--fs-lead);
-  max-width: 34ch;
-}
-
 .signin-card {
   background: var(--panel);
   background-image: linear-gradient(180deg, var(--topline), transparent 30%);
