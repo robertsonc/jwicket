@@ -22,12 +22,14 @@ BACKENDS = ("netconf", "lab-token")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 MIN_LAB_TOKEN_LEN = 32
 _HOST_RE = re.compile(r"^(?=.{1,253}\Z)[A-Za-z0-9.\-\[\]:]+\Z")
+# Junos routing-instance names: letters, digits, '-', '_' and '.', up to 128 characters.
+_INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}\Z")
 
 
 KNOWN_KEYS = {
     "server": frozenset({
         "bind", "port", "tls_cert", "tls_key", "allowed_hosts", "max_connections", "socket_timeout_s",
-        "max_body_bytes",
+        "max_body_bytes", "routing_instance",
     }),
     "auth": frozenset({
         "backend", "netconf_host", "netconf_port", "rpc_timeout_s", "session_idle_s", "session_absolute_s",
@@ -52,6 +54,9 @@ class ServerSettings:
     max_connections: int = 8
     socket_timeout_s: float = 10.0
     max_body_bytes: int = 8192
+    # Junos routing instance the listening socket is created in, e.g. mgmt_junos when
+    # "system management-instance" puts fxp0 there. Unset: the default instance.
+    routing_instance: Optional[str] = None
 
     @property
     def tls_enabled(self) -> bool:
@@ -181,7 +186,7 @@ def check_directories(path: Path, *, label: str) -> None:
             if hops > MAX_SYMLINK_HOPS:
                 raise ConfigError(f"too many symbolic links above {label} {path}")
             try:
-                link = candidate.readlink()
+                link = Path(os.readlink(candidate))  # Path.readlink() is 3.9+
             except OSError as exc:
                 raise ConfigError(f"{candidate} above {label} cannot be read: {exc.strerror or exc}") from exc
             if link.is_absolute():
@@ -303,6 +308,9 @@ def parse_settings(text: str, source: Optional[Path] = None) -> Settings:
     for host in hosts:
         if not _HOST_RE.match(host):
             raise ConfigError(f"[server] allowed_hosts entry {host!r} is not a host name or address")
+    instance = (s.get("routing_instance") or "").strip() or None
+    if instance is not None and not _INSTANCE_RE.match(instance):
+        raise ConfigError(f"[server] routing_instance {instance!r} is not a Junos routing-instance name")
     server = ServerSettings(
         bind=_get_ip(s, "bind", "127.0.0.1"),
         port=_get_int(s, "port", 8443, 1024, 65535),
@@ -312,6 +320,7 @@ def parse_settings(text: str, source: Optional[Path] = None) -> Settings:
         max_connections=_get_int(s, "max_connections", 8, 2, 64),
         socket_timeout_s=float(_get_int(s, "socket_timeout_s", 10, 2, 60)),
         max_body_bytes=_get_int(s, "max_body_bytes", 8192, 1024, 65536),
+        routing_instance=instance,
     )
 
     a = cp["auth"]

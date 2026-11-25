@@ -789,7 +789,7 @@ names the places it could not reach. A fixture with a functional zone and `tcp-r
 ### 12.2 Criteria
 
 Node tests run with `node --test tests/js/*.test.mjs`; Python tests with the standard library on
-Python 3.9 (`make test`). No criterion runs against recorded replies: the layer reads nothing
+Python 3.7 or later (`make test`). No criterion runs against recorded replies: the layer reads nothing
 (section 8), so there is nothing to record. Recorded replies matter here only for upgrading
 inferred entries and settling 9.9 (section 13, Q-REL-01). The browser criterion is AC-005-10.
 

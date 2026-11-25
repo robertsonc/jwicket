@@ -1,0 +1,14 @@
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1-S1.4/junos">
+    <performance-summary-information xmlns="http://xml.juniper.net/junos/25.2R0/junos-spu-mon">
+        <performance-summary-statistics>
+            <fpc-number>0</fpc-number>
+            <pic-number>0</pic-number>
+            <spu-cpu-utilization>0</spu-cpu-utilization>
+            <spu-memory-utilization>42</spu-memory-utilization>
+            <spu-current-flow-session>76</spu-current-flow-session>
+            <spu-max-flow-session>10485760</spu-max-flow-session>
+            <spu-current-cp-session>0</spu-current-cp-session>
+            <spu-max-cp-session>0</spu-max-cp-session>
+        </performance-summary-statistics>
+    </performance-summary-information>
+</rpc-reply>

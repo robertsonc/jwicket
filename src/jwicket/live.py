@@ -5,6 +5,7 @@
 * ``GET /api/logs?source=file:<name>&cursor=<n:digest>&lines=&contains=&exclude=``
 * ``GET /api/logs?source=report&type=<report type>&start=&stop=&count=&expression=``
 * ``GET /api/logs?source=buffer&since=<YYYY-MM-DD.HH:MM:SS>``
+* ``GET /api/health``: routing-engine and SPU CPU, memory, load and temperature (the Overview)
 
 Every device read runs on the signed-in operator's own Junos session. ``/api/sessions`` and
 ``/api/logs`` are rate-limited per endpoint (and per log source); ``/api/logs/sources`` is bounded by
@@ -16,7 +17,8 @@ time forward.
 RPCs per poll: a sessions poll costs 2 (a summary and the list; 1 when the list is refused), plus
 1 unfiltered summary for the gauge at most every 30 s when the poll is filtered. A log poll costs 1,
 plus the sources refresh: 1 configuration read at most every 60 s and 1 software read at most every
-10 min. Junos logs each RPC (UI_NETCONF_CMD), which is why the browser defaults to a 5 s interval.
+10 min. A health poll costs 2 (routing engine, security monitoring), at most every 5 s per operator.
+Junos logs each RPC (UI_NETCONF_CMD), which is why the browser defaults to a 5 s interval.
 Request parameters are checked before any device read, so a malformed request costs no RPC and no
 read slot.
 """
@@ -39,6 +41,7 @@ from jwicket.api import (
 )
 from jwicket.auth.sessions import WebSession
 from jwicket.junos import facts
+from jwicket.junos import health as healthmod
 from jwicket.junos import logs as logmod
 from jwicket.junos import sessions as sessmod
 from jwicket.junos.errors import JunosError, SessionLost
@@ -49,6 +52,8 @@ from jwicket.web.server import Router
 
 SESSIONS_INTERVAL_S = 1.5
 LOGS_INTERVAL_S = 1.5
+HEALTH_INTERVAL_S = 5.0
+HEALTH_SUGGESTED_S = 10
 SUGGESTED_INTERVAL_S = 5
 GAUGE_TTL_S = 30.0
 SOURCES_TTL_S = 60.0
@@ -440,7 +445,50 @@ def log_lines(app: App, req: Request) -> Response:
     return Response.json(200, {"meta": meta, "log": body})
 
 
+# --- health ---------------------------------------------------------------------------------------
+
+
+def health(app: App, req: Request) -> Response:
+    """Routing-engine and SPU health. Each part fails on its own: a class that may not run one RPC
+    still sees the other, and the panel says which part is denied."""
+    sess = _session(app, req)
+    if sess is None:
+        return Response.error(401, "sign-in required")
+    limited = throttle_read(app, sess, "health", HEALTH_INTERVAL_S)
+    if limited is not None:
+        return limited
+    parts: Json = {}
+    try:
+        with device_turn(sess):
+            for key, rpc, parse, what in (
+                ("route_engine", "get-route-engine-information", healthmod.route_engines, "routing-engine health"),
+                ("spu", "get-performance-summary-information", healthmod.spus, "SPU health"),
+            ):
+                try:
+                    parts[key] = parse(sess.device.rpc(rpc))
+                except SessionLost:
+                    raise
+                except JunosError as err:
+                    parts[key] = _panel_error(err, what)
+    except SessionLost as err:
+        return session_lost(app, sess, req, err)
+    except SessionBusy:
+        return busy()
+
+    mark = f"{parts['route_engine']['status']}|{parts['spu']['status']}"
+    if sess.audit_marks.get("health") != mark:  # one line per change of outcome, not per poll
+        sess.audit_marks["health"] = mark
+        app.audit.record(
+            "read_health", user=sess.user, source=req.client,
+            route_engine=parts["route_engine"]["status"], spu=parts["spu"]["status"],
+        )
+    meta = _meta(app, sess, min_interval_s=HEALTH_INTERVAL_S)
+    meta["suggested_interval_s"] = HEALTH_SUGGESTED_S
+    return Response.json(200, {"meta": meta, **parts})
+
+
 def register(router: Router, app: App) -> None:
     router.add("GET", "/api/sessions", lambda r: sessions(app, r))
     router.add("GET", "/api/logs/sources", lambda r: log_sources(app, r))
     router.add("GET", "/api/logs", lambda r: log_lines(app, r))
+    router.add("GET", "/api/health", lambda r: health(app, r))

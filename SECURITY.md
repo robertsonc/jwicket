@@ -44,7 +44,7 @@ documented way to run J-Wicket on a device is the lab procedure in
 
 ## Security properties and their tests
 
-Every test below runs in CI on Python 3.9, 3.11 and 3.13 (`make test` locally), **against synthetic
+Every test below runs in CI on Python 3.7, 3.9, 3.11 and 3.13 (`make test` locally), **against synthetic
 fixtures**. A passing test shows what the code does; it proves nothing about a device. The device
 tests that will are named in the last column and defined in [governance.md](docs/governance.md).
 
@@ -74,21 +74,24 @@ tests that will are named in the last column and defined in [governance.md](docs
 These are known and open. A report that adds an exploit path or a device result is welcome; a
 report that only restates one is not needed.
 
-1. **No TLS on a device yet.** The on-box `ssl` module has never been exercised, and how a
-   certificate gets onto the device is undecided (Q-TLS-01). Until then the only access path is a
-   loopback bind reached through an SSH tunnel, with plain HTTP between the two loopback ends.
-   `Secure` cookies and HSTS apply only under TLS.
-2. **Per-operator NETCONF sign-in is unproven.** Whether on-box Python can open a NETCONF-over-SSH
-   session to loopback as another user, and whether the on-box PyEZ refuses a wrong password even
-   when the daemon account holds an SSH key that user accepts (Q-AUTH-01); whether RADIUS and
-   TACACS+ users get their mapped class (Q-AUTH-02); what least-privilege classes see and whether
-   Junos omits or refuses hidden configuration (Q-AUTH-03); and how Junos lockout interacts with
-   J-Wicket's sign-in limits (Q-AUTH-04) are all open. The fallback options are in
-   [docs/architecture.md](docs/architecture.md#13-if-per-operator-sign-in-fails-q-auth-01).
+1. **TLS on a device is lightly tested.** On one lab SRX4100 the on-box `ssl` module served TLS
+   1.2 and 1.3 with a self-signed certificate made on the box ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)). Refusal of
+   TLS 1.0 and 1.1 was not tested, and how a trusted certificate gets onto a device is undecided
+   (Q-TLS-01). `Secure` cookies and HSTS apply only under TLS. Without TLS the only access path is
+   a loopback bind reached through an SSH tunnel, and on Junos 25.2 the SSH service refused to
+   forward (Q-NET-03).
+2. **Per-operator NETCONF sign-in is only partly proven.** On the lab SRX4100 a super-user account
+   signed in over NETCONF to loopback, and Junos refused a wrong password. Still open: whether the
+   on-box PyEZ refuses a wrong password even when the daemon account holds an SSH key that user
+   accepts (Q-AUTH-01); whether RADIUS and TACACS+ users get their mapped class (Q-AUTH-02); what
+   least-privilege classes see and whether Junos omits or refuses hidden configuration (Q-AUTH-03);
+   and how Junos lockout interacts with J-Wicket's sign-in limits (Q-AUTH-04). The fallback options
+   are in [docs/architecture.md](docs/architecture.md#13-if-per-operator-sign-in-fails-q-auth-01).
 3. **No penetration test.** No external test (Q-SEC-02, required before live writes at G4) and no
    internal review against the J-Web advisory classes yet (Q-SEC-01, required at G1).
-4. **Nothing has run on a device.** Every reply J-Wicket parses is synthetic, and the error texts it
-   uses to tell `denied` from `failed` are unverified (Q-REL-01). The device's error text now
+4. **One device run, no recorded replies.** J-Wicket's reads worked on one lab SRX4100, but no
+   reply has been recorded as a fixture: the tests still parse synthetic replies, and the error
+   texts used to tell `denied` from `failed` are unverified (Q-REL-01). The device's error text now
    reaches the diagnostic log (INFO), so lab runs can record it.
 5. **The password passes through process memory.** J-Wicket keeps no copy, but PyEZ's `Device`
    object holds it for the life of the operator's device session, and Python cannot guarantee it is

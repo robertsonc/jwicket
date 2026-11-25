@@ -71,8 +71,8 @@ Spec first, then code. The decision rights are in
 
 ## Set up and run
 
-You need Python 3.9 or later (CI tests 3.9, 3.11 and 3.13; 3.9 is the floor because the on-box
-version is unverified, Q-RT-01) and Node 22 for the browser-module tests. Nothing here talks to a
+You need Python 3.7 or later (CI tests 3.7, 3.9, 3.11 and 3.13; 3.7 is the floor because Junos
+25.2 ships Python 3.7.10 on the SRX, Q-RT-01) and Node 22 for the browser-module tests. Nothing here talks to a
 device.
 
 ```
@@ -81,15 +81,15 @@ python3 -m venv .venv
 
 make test                                      # unit and HTTP integration tests (unittest)
 make lint RUFF=.venv/bin/ruff                  # ruff check src tests tools
-make typecheck MYPY=.venv/bin/mypy             # mypy --strict, Python 3.9 target
+make typecheck MYPY=.venv/bin/mypy             # mypy --strict, Python 3.8 target (oldest mypy accepts)
 node --test tests/js/*.test.mjs                # query language and log parser (no packages)
 make bundle                                    # build dist/jwicket.py, then self-test it isolated
 make bundle-check                              # fail if dist/jwicket.py differs from a fresh build
-make test PYTHON=python3.9                     # the floor interpreter, if you have it
+make test PYTHON=python3.7                     # the floor interpreter, if you have it
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same checks on every pull
-request: ruff and mypy; the tests and an isolated bundle self-test on Python 3.9, 3.11 and 3.13;
+request: ruff and mypy; the tests and an isolated bundle self-test on Python 3.7, 3.9, 3.11 and 3.13;
 the Node tests; and a bundle job that builds twice, fails if the builds differ, and publishes the
 bundle with its SHA-256. The JS tests have no Makefile target; run the `node` command above.
 
@@ -115,11 +115,18 @@ ADR first.
 
 ### Python
 
-- **Python 3.9 syntax** ([ADR 0001](docs/adr/0001-on-box-pure-python-single-file.md)): modules with
-  code start with `from __future__ import annotations`; no `match`; no `X | Y` unions evaluated at
-  runtime; no `dataclass(slots=..., kw_only=...)`; typing spelled `List`, `Dict`, `Optional`
-  (ruff's `UP006`, `UP007` and `UP035` are off for this reason, [`pyproject.toml`](pyproject.toml)).
-  CI's Python 3.9 job is the check.
+- **Python 3.7 syntax and library** ([ADR 0001](docs/adr/0001-on-box-pure-python-single-file.md)):
+  modules with code start with `from __future__ import annotations`; no `match`; no `X | Y` unions
+  evaluated at runtime; no `dataclass(slots=..., kw_only=...)`; typing spelled `List`, `Dict`,
+  `Optional` (ruff's `UP006`, `UP007` and `UP035` are off for this reason,
+  [`pyproject.toml`](pyproject.toml)). Also none of what 3.8 and 3.9 added: no walrus operator
+  (`:=`), no positional-only parameters, no f-string `=`; `typing.Protocol`, `Literal`, `TypedDict`
+  and `Final` only under `TYPE_CHECKING`; no `Path.readlink`, `str.removeprefix`,
+  `functools.cached_property`, `shlex.join` or `ast.parse(feature_version=)` without a guard.
+  mypy cannot target 3.7 and checks as 3.8, so CI's Python 3.7 job is the check.
+- **Routing instances.** Code that opens a socket must not assume the default instance. Only the
+  listener follows `[server] routing_instance`; `jcs.set_routing_instance()` is process-wide, so
+  anything that switches it must switch back (`app.routing_instance()`).
 - **Standard library plus the PyEZ Junos ships** (`jnpr.junos`, with the `lxml` and `ncclient` it
   brings), nothing else. `pyproject.toml` has `dependencies = []` and must keep it. No C
   extensions. When you import a standard-library module the shipped code does not already use,

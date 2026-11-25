@@ -6,12 +6,12 @@
 name = "jwicket"
 version = "0.1.0.dev0"
 description = "On-box, read-first web UI for Juniper SRX firewalls (foundation stage, not for production)"
-requires-python = ">=3.9"
+requires-python = ">=3.7"
 dependencies = []
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py37"
 src = ["src", "tests", "tools"]
 # The spike daemon is preserved verbatim as evidence; it is not product code.
 extend-exclude = ["docs/evidence"]
@@ -20,7 +20,7 @@ extend-exclude = ["docs/evidence"]
 select = ["E", "F", "W", "B", "S", "UP", "N", "BLE", "A", "C4", "RET", "SIM", "PTH", "TRY", "RUF"]
 ignore = [
   "TRY003",  # explicit messages at raise sites are the point: errors must say what failed and why
-  "UP006", "UP007", "UP035",  # keep 3.9-compatible typing spellings (on-box Python version is unverified)
+  "UP006", "UP007", "UP035",  # keep 3.7-compatible typing spellings (Junos ships Python 3.7, Q-RT-01)
   "N818",    # exception names are domain terms (RpcDenied, SessionLost), not *Error
   "TRY400",  # startup refusals are expected outcomes: log the reason, not a stack trace
 ]
@@ -30,12 +30,13 @@ ignore = [
 "tools/bundle.py" = ["S102"]  # the bundle template exec()s its own embedded, build-time source
 
 [tool.mypy]
-python_version = "3.9"
+# mypy 1.11 cannot target 3.7, so it checks as 3.8; the CI test job on Python 3.7 proves 3.7.
+python_version = "3.8"
 mypy_path = "src"
 strict = true
 warn_unreachable = true
 files = ["src/jwicket", "tools"]
 
 [[tool.mypy.overrides]]
-module = ["jnpr.*", "lxml.*"]
+module = ["jnpr.*", "lxml.*", "jcs"]
 ignore_missing_imports = true

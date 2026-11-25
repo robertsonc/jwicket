@@ -38,18 +38,26 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: ruff
         run: ruff check src tests tools
-      - name: mypy (strict, Python 3.9 target; see pyproject.toml)
+      - name: mypy (strict, Python 3.8 target, the oldest mypy 1.11 accepts; see pyproject.toml)
         run: mypy
 
   test:
     name: test (Python ${{ matrix.python }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the floor: the on-box Python version is not yet qualified (Q-RT-01).
-        python: ["3.9", "3.11", "3.13"]
+        # 3.7 is the floor: Junos 25.2 and 26.2 ship Python 3.7 on the SRX (Q-RT-01). setup-python
+        # has no 3.7 for ubuntu-24.04, so that one job runs on ubuntu-22.04.
+        python: ["3.7", "3.9", "3.11", "3.13"]
+        os: [ubuntu-24.04]
+        exclude:
+          - python: "3.7"
+            os: ubuntu-24.04
+        include:
+          - python: "3.7"
+            os: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:

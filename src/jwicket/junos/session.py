@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Dict, FrozenSet, Protocol
+from typing import TYPE_CHECKING, Any, Dict, FrozenSet
 
 from jwicket.junos.errors import (
     JunosError,
@@ -34,6 +34,13 @@ from jwicket.junos.errors import (
     classify,
 )
 from jwicket.junos.xmlutil import Element
+
+if TYPE_CHECKING:
+    from typing_extensions import Protocol
+else:
+    # typing.Protocol is 3.8+; Junos 25.2 and 26.2 ship Python 3.7 (Q-RT-01). At run time nothing
+    # checks the protocol, so a plain base class is enough.
+    Protocol = object
 
 LOG = logging.getLogger("jwicket.junos")
 
@@ -46,6 +53,9 @@ ALLOWED_RPCS: FrozenSet[str] = frozenset(
         "get-flow-session-information",  # show security flow session [filters] / summary
         "get-log",  # show log <file>
         "get-security-log-information",  # show security log (event-mode RE buffer)
+        # Overview health, recorded on SRX4100 25.2R1-S1.4.
+        "get-route-engine-information",  # show chassis routing-engine
+        "get-performance-summary-information",  # show security monitoring
     }
     | {f"get-sec-log-report-detail-{t}" for t in (
         # show security log report in-detail <type> (on-box reporting database)
