@@ -1,0 +1,9 @@
+{
+  "description": "A commit script is configured.",
+  "needs": [
+    "--ack-commit-scripts"
+  ],
+  "refusals": [
+    "R-COMMIT-SCRIPTS"
+  ]
+}

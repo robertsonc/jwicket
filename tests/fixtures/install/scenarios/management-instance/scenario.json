@@ -1,0 +1,4 @@
+{
+  "description": "A fresh vSRX with 'system management-instance': fxp0 is in mgmt_junos, so --access tls renders [server] routing_instance = mgmt_junos (the setting verified on SRX4100 25.2R1-S1.4).",
+  "refusals": []
+}

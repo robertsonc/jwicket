@@ -1,0 +1,9 @@
+# An allowlist (Spec 006 section 6.4): nothing enters the build context unless a line below lets it
+# in, so no jwicket.ini, lab token, key, receipt, evidence directory or stray file in build/ can
+# reach an image layer. The last line that matches a path decides.
+*
+!Dockerfile
+!entrypoint.py
+!build/SHA256SUMS
+!build/requirements-install.txt
+!build/jwicket_install-*-py3-none-any.whl

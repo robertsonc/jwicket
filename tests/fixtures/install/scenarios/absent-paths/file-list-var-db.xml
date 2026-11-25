@@ -1,0 +1,30 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- /var/db without jwicket: the one-time root step (R-STATEDIR) has not been done. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <directory-list>
+    <directory>
+      <directory-name>/var/db</directory-name>
+      <file-information>
+        <file-name>scripts</file-name>
+        <file-directory/>
+        <file-permissions format="drwxrwxr-x">775</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>root</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>512</file-size>
+        <file-date junos:format="Nov 20 09:12">1795000000</file-date>
+      </file-information>
+      <file-information>
+        <file-name>config</file-name>
+        <file-directory/>
+        <file-permissions format="drwxr-xr-x">755</file-permissions>
+        <file-links>1</file-links>
+        <file-owner>root</file-owner>
+        <file-group>wheel</file-group>
+        <file-size>512</file-size>
+        <file-date junos:format="Nov 20 09:12">1795000000</file-date>
+      </file-information>
+      <total-files>2</total-files>
+    </directory>
+  </directory-list>
+</rpc-reply>

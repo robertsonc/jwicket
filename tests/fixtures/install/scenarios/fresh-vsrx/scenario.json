@@ -1,0 +1,4 @@
+{
+  "description": "A fresh lab vSRX: host name, an admin account, no J-Wicket, NETCONF off. The base files unchanged.",
+  "refusals": []
+}

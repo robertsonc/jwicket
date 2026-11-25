@@ -1,0 +1,9 @@
+{
+  "description": "Absent-path errors: /var/db/jwicket raised (RpcErrorReply) and the receipt file-show answered with an error. Both mean absent, not unreadable; the absent directory is R-STATEDIR (the one-time root step).",
+  "refusals": [
+    "R-STATEDIR"
+  ],
+  "rpc_errors": {
+    "file-list-var-db-jwicket": "error: could not list /var/db/jwicket: No such file or directory"
+  }
+}

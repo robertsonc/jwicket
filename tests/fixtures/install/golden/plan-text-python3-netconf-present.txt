@@ -1,0 +1,55 @@
+This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
+
+Device: model vsrx, release 24.4R2-S3.5, serial FIXTURE-SN-0001
+
+LAB ONLY. 'set system scripts language python3' is already set on this device; this install relies on it. It lets any unsigned Python script owned by a super-user-class account run on this device's routing engine, not only J-Wicket: a change to the device's security posture that someone made before. J-Wicket is not qualified for production (gate G1 has not passed). Continue only on a disposable lab device you are allowed to change.
+LAB ONLY. With --access tls the runtime commit opens a new HTTPS listener on this device's management address: the --listen-address, by default --host, which the installer does not check is the management address (an address of a revenue interface would put the listener there; in the mgmt_junos routing instance when 'system management-instance' is set). It is reachable by anything that reaches that address: J-Wicket's sign-in page becomes one more way into this device, beside SSH and NETCONF. Its certificate is self-signed; compare its SHA-256 fingerprint in the browser with the one the installer prints. J-Wicket has not passed gate G1 or a security review (Q-SEC-01). Continue only on a lab device whose management network you control.
+The netconf backend's reach to the device's own NETCONF ('show configuration system services netconf') rests on the probe (check C3) only: it is not checked end to end, because no check uses an SSH channel (SSH forwarding was refused on the lab SRX4100). Sign in once to prove it.
+
+Shown, not judged (a production device would show these):
+  model: vsrx
+  release: 24.4R2-S3.5
+  serial: FIXTURE-SN-0001
+  active flow sessions: 12
+  outbound-ssh clients: 0
+  distinct committers in history: 1
+  committers: admin
+  last commit: 2026-11-20 09:12:00 UTC
+
+The plan's change (patch form, from the committed configuration):
+# stage diagnostics: commit confirmed 5 (comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install)
+[edit system extensions extension-service application file jwicket_probe.py]
++    username labadmin;
+[edit system extensions extension-service application file jwicket_probe.py checksum]
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+[edit system extensions extension-service application file jwicket_selftest.py]
++    username labadmin;
+[edit system extensions extension-service application file jwicket_selftest.py checksum]
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+# stage runtime: commit confirmed 5 (comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install)
+[edit system extensions extension-service application file jwicket.py]
++    daemonize;
++    respawn-on-normal-exit;
++    username labadmin;
+[edit system extensions extension-service application file jwicket.py checksum]
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+
+Files:
+  keep     /var/db/jwicket mode 0700
+  stage    /var/db/scripts/jet/jwicket-next.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from workstation
+  copy     /var/db/scripts/jet/jwicket.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from /var/db/scripts/jet/jwicket-next.py
+  copy     /var/db/scripts/jet/jwicket_selftest.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from /var/db/scripts/jet/jwicket-next.py
+  copy     /var/db/scripts/jet/jwicket_probe.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from /var/db/scripts/jet/jwicket-next.py
+  delete   /var/db/scripts/jet/jwicket-next.py mode 0644
+  write    /var/db/jwicket/jwicket.ini mode 0600 sha256 8971fabcc10e8b5373b5f7f2ea6472bccbb2ccaf3af9070a745e0fc4d78384e2 from workstation
+  write    /var/db/jwicket/tls.key mode 0600 from in-memory
+  write    /var/db/jwicket/tls.crt mode 0644 from in-memory
+
+Already present and kept (never removed by this tool):
+  set system scripts language python3
+  set system services netconf ssh
+
+The runtime commit starts J-Wicket, listening with TLS on 192.0.2.10:9443: browse to https://192.0.2.10:9443/ and compare the certificate's SHA-256 fingerprint with the one the installer prints.
+
+Blast radius: posture: language python3 already set; listener: HTTPS on 192.0.2.10:9443, reachable by anything that reaches that address; NETCONF: netconf ssh already set or not needed; account: J-Wicket will run with the rights of labadmin, a super-user-class account that can commit configuration ('username labadmin' under 'system extensions extension-service application file jwicket.py'). A compromise of J-Wicket is a compromise of this device.
+Confirm windows: diagnostics 5 min, runtime 5 min

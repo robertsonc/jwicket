@@ -1,0 +1,6 @@
+{
+  "description": "Multinode high availability configured.",
+  "refusals": [
+    "R-MNHA"
+  ]
+}

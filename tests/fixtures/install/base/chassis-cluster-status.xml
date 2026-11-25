@@ -1,0 +1,7 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- A standalone SRX answers with a Junos <error>, which PyEZ 2.8.3 treats as 'not a cluster' (verified, facts/get_chassis_cluster_status.py). The message text is inferred. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <error>
+    <message>Chassis cluster is not enabled.</message>
+  </error>
+</rpc-reply>

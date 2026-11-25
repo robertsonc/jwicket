@@ -1,0 +1,220 @@
+This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
+Rendered for lab-vsrx-1 at 2026-11-24T21:00:00Z, after the lab gate on its own facts. Before unit 1, check that your CLI prompt shows labadmin@lab-vsrx-1.
+LAB ONLY. 'set system scripts language python3' is already set on this device; this install relies on it. It lets any unsigned Python script owned by a super-user-class account run on this device's routing engine, not only J-Wicket: a change to the device's security posture that someone made before. J-Wicket is not qualified for production (gate G1 has not passed). Continue only on a disposable lab device you are allowed to change.
+LAB ONLY. With --access tls the runtime commit opens a new HTTPS listener on this device's management address: the --listen-address, by default --host, which the installer does not check is the management address (an address of a revenue interface would put the listener there; in the mgmt_junos routing instance when 'system management-instance' is set). It is reachable by anything that reaches that address: J-Wicket's sign-in page becomes one more way into this device, beside SSH and NETCONF. Its certificate is self-signed; compare its SHA-256 fingerprint in the browser with the one the installer prints. J-Wicket has not passed gate G1 or a security review (Q-SEC-01). Continue only on a lab device whose management network you control.
+J-Wicket will run with the rights of labadmin, a super-user-class account that can commit configuration ('username labadmin' under 'system extensions extension-service application file jwicket.py'). A compromise of J-Wicket is a compromise of this device.
+The netconf backend's reach to the device's own NETCONF ('show configuration system services netconf') rests on the probe (check C3) only: it is not checked end to end, because no check uses an SSH channel (SSH forwarding was refused on the lab SRX4100). Sign in once to prove it.
+In an SSH or console session on the lab device (the shell is outside Juniper support; this is the one read the installers make there):
+Unit 1 (device-shell): veriexec state
+Status: verified (spike ran exactly this command; 'loaded active enforce' also on SRX4100 25.2R1-S1.4)
+```
+start shell sh
+sysctl security.mac.veriexec.state
+exit
+```
+STOP unless it printed 'loaded active enforce'. Otherwise results from this device are not qualification evidence.
+
+Unit 2 (device-operational): pending commits and the state directory
+Status: commands documented (F10, CMT-01); not recorded on a device; output shapes unverified (Q-INST-01)
+```
+show system commit | no-more
+file list /var/db detail
+file list /var/db/scripts/jet detail
+```
+STOP if, in 'show system commit', the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01).
+In 'file list /var/db detail', jwicket must be listed as 'drwx------' and 'labadmin'. If it is listed otherwise, stop: the installer's dry run reports R-STATEDIR and the root step.
+
+In the directory holding the verified jwicket.py (SHA-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f):
+Unit 3 (workstation): copy the bundle (workstation)
+Status: verified (spike: OpenSSH scp -O into /var/db/scripts/jet)
+```
+scp -O jwicket.py labadmin@<device>:/var/db/scripts/jet/jwicket-next.py
+```
+
+Unit 4 (device-operational): check the files
+Status: 'file checksum sha-256' and 'file list ... detail' verified (F05, F10)
+```
+file checksum sha-256 /var/db/scripts/jet/jwicket-next.py
+file list /var/db/scripts/jet detail
+file list /var/db/jwicket detail
+```
+Expect SHA256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f for each J-Wicket file, '-rw-r--r--' and 'labadmin' for each in /var/db/scripts/jet, and '-rw-------' and 'labadmin' for jwicket.ini. The same for tls.key, and '-rw-r--r--' and 'labadmin' for tls.crt. If a mode is wrong: 'file change-permission /var/db/scripts/jet/jwicket.py permission 644' (and the same for the others); outside Juniper support, the shell's 'chmod' does the same.
+
+Stage diagnostics: 2 configuration line(s), one 'commit confirmed 5', confirmed only after the checks.
+Unit 5A (device-configuration): stage diagnostics: open configuration mode
+Status: 'run' verified ([run-cmd]); '| no-more' inferred
+```
+configure exclusive
+run show system commit | no-more
+```
+STOP if the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01): type 'exit' and wait until it is settled. Otherwise paste the next unit.
+
+Unit 5B (device-configuration): stage diagnostics: the configuration change
+Status: statements: see each line's status in Spec 006 section 7.3
+```
+set system extensions extension-service application file jwicket_selftest.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+set system extensions extension-service application file jwicket_probe.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+show | compare | no-more
+```
+STOP unless 'show | compare' shows exactly these statements and nothing else. Junos prints each change under the deepest level that already exists, and a new level as a braced block; the grouping below is rendered from the configuration the installer read, a select-only read, so a level it cannot see may make Junos print a deeper header for the same statements (illustrative; real samples are recorded by lab test Q-INST-01):
+    [edit system extensions extension-service application file jwicket_selftest.py checksum]
+    -    sha-256 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d;
+    +    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+    [edit system extensions extension-service application file jwicket_probe.py checksum]
+    -    sha-256 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d;
+    +    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+If it shows anything else, type 'rollback 0' and 'exit'.
+
+Unit 5B1 (device-configuration): stage diagnostics: overwrite a file before the commit
+Status: 'file copy' verified (F01); overwrite behaviour unknown (Q-INST-01): stop if prompted
+```
+run file copy /var/db/scripts/jet/jwicket-next.py /var/db/scripts/jet/jwicket_selftest.py
+```
+STOP if 'file copy' prompts or refuses: paste nothing more, answer the prompt so that nothing is overwritten, then type 'rollback 0' and 'exit'; a file an earlier unit already overwrote is put back by the 'On failure' line of unit D. Whether 'file copy' overwrites an existing file, refuses or prompts is unknown (Q-INST-01). Otherwise paste the next unit.
+
+Unit 5B2 (device-configuration): stage diagnostics: overwrite a file before the commit
+Status: 'file copy' verified (F01); overwrite behaviour unknown (Q-INST-01): stop if prompted
+```
+run file copy /var/db/scripts/jet/jwicket-next.py /var/db/scripts/jet/jwicket_probe.py
+```
+STOP if 'file copy' prompts or refuses: paste nothing more, answer the prompt so that nothing is overwritten, then type 'rollback 0' and 'exit'; a file an earlier unit already overwrote is put back by the 'On failure' line of unit D. Whether 'file copy' overwrites an existing file, refuses or prompts is unknown (Q-INST-01). Otherwise paste the next unit.
+
+Unit 5C (device-configuration): stage diagnostics: commit confirmed
+Status: 'commit confirmed <minutes> comment' inferred to combine (documented: commit confirmed comment)
+```
+run file delete /var/db/jwicket/selftest-result.json
+run file delete /var/db/jwicket/probe-result.json
+commit confirmed 5 comment "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install"
+```
+Deadline: 5 minutes from now. Unless the confirming unit below is pasted before then, Junos rolls this stage back by itself.
+
+Unit 5D (device-configuration): stage diagnostics: checks
+Status: checks unverified on a device (Q-INST-06); 'request extension-service start' printed the self-test and probe JSON on the CLI on SRX4100 25.2R1-S1.4 (verified)
+```
+run file checksum sha-256 /var/db/scripts/jet/jwicket_selftest.py
+run file checksum sha-256 /var/db/scripts/jet/jwicket_probe.py
+run request extension-service start jwicket_selftest.py
+run request extension-service start jwicket_probe.py
+run file show /var/db/jwicket/selftest-result.json | no-more
+run file show /var/db/jwicket/probe-result.json | no-more
+show | compare rollback 1 | no-more
+run show system commit | no-more
+```
+Compare with what each check expects:
+The copy on /var/db/scripts/jet/jwicket_selftest.py: expect its SHA256 to be the bundle's, as in unit B's checksum line.
+The copy on /var/db/scripts/jet/jwicket_probe.py: expect its SHA256 to be the bundle's, as in unit B's checksum line.
+C2: The self-test copy ('request extension-service start jwicket_selftest.py') reports ok, with the version and payload SHA-256 of this bundle.
+    expect "ok": true, "version": "0.1.0.dev1", "payload_sha256": "2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e"
+C3: The probe copy ('request extension-service start jwicket_probe.py') reports every module the chosen backend needs as ok.
+    expect ok for: http.server, json, hmac, threading, jnpr.junos, lxml, ncclient, paramiko, ssl
+C10: Before confirming: the committed statements of the touched subtrees equal the plan, and the committed delta ('show | compare rollback 1') changes nothing outside them.
+    expect 'show | compare rollback 1' to show only the change of unit B
+C11: Before confirming: 'show system commit' shows this stage's commit as the newest, by the daemon account, with this stage's comment, and no 'commit at' or prepared commit.
+    expect the newest commit by labadmin with the comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install
+Leave at least one minute before the deadline. Only if all of that matches, paste the next unit.
+Otherwise type 'exit' (answer 'yes' if asked to exit with uncommitted changes) and let Junos roll the stage back at the deadline.
+On failure, before the deadline: 'file copy /var/db/scripts/jet/jwicket.py /var/db/scripts/jet/jwicket_selftest.py' (restores the old bytes).
+On failure, before the deadline: 'file copy /var/db/scripts/jet/jwicket.py /var/db/scripts/jet/jwicket_probe.py' (restores the old bytes).
+
+Only if every check above matched:
+Unit 5E (device-configuration): stage diagnostics: confirm
+Status: confirming with 'commit comment' (force-commit-log safe, verified)
+```
+commit comment "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics confirmed"
+exit
+```
+
+Stage runtime: 1 configuration line(s), one 'commit confirmed 5', confirmed only after the checks.
+Unit 6A (device-configuration): stage runtime: open configuration mode
+Status: 'run' verified ([run-cmd]); '| no-more' inferred
+```
+configure exclusive
+run show system commit | no-more
+```
+STOP if the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01): type 'exit' and wait until it is settled. Otherwise paste the next unit.
+
+Unit 6B (device-configuration): stage runtime: the configuration change
+Status: statements: see each line's status in Spec 006 section 7.3
+```
+set system extensions extension-service application file jwicket.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+show | compare | no-more
+```
+STOP unless 'show | compare' shows exactly these statements and nothing else. Junos prints each change under the deepest level that already exists, and a new level as a braced block; the grouping below is rendered from the configuration the installer read, a select-only read, so a level it cannot see may make Junos print a deeper header for the same statements (illustrative; real samples are recorded by lab test Q-INST-01):
+    [edit system extensions extension-service application file jwicket.py checksum]
+    -    sha-256 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d;
+    +    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+If it shows anything else, type 'rollback 0' and 'exit'.
+
+Unit 6B1 (device-configuration): stage runtime: overwrite a file before the commit
+Status: 'file copy' verified (F01); overwrite behaviour unknown (Q-INST-01): stop if prompted
+```
+run file copy /var/db/scripts/jet/jwicket.py /var/db/scripts/jet/jwicket-prev.py
+```
+STOP if 'file copy' prompts or refuses: paste nothing more, answer the prompt so that nothing is overwritten, then type 'rollback 0' and 'exit'; a file an earlier unit already overwrote is put back by the 'On failure' line of unit D. Whether 'file copy' overwrites an existing file, refuses or prompts is unknown (Q-INST-01). Otherwise paste the next unit.
+
+Unit 6B2 (device-configuration): stage runtime: overwrite a file before the commit
+Status: 'file copy' verified (F01); overwrite behaviour unknown (Q-INST-01): stop if prompted
+```
+run file copy /var/db/scripts/jet/jwicket-next.py /var/db/scripts/jet/jwicket.py
+```
+STOP if 'file copy' prompts or refuses: paste nothing more, answer the prompt so that nothing is overwritten, then type 'rollback 0' and 'exit'; a file an earlier unit already overwrote is put back by the 'On failure' line of unit D. Whether 'file copy' overwrites an existing file, refuses or prompts is unknown (Q-INST-01). Otherwise paste the next unit.
+
+Unit 6C (device-configuration): stage runtime: commit confirmed
+Status: 'commit confirmed <minutes> comment' inferred to combine (documented: commit confirmed comment)
+```
+run file delete /var/db/jwicket/startup-refused.txt
+commit confirmed 5 comment "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install"
+```
+Deadline: 5 minutes from now. Unless the confirming unit below is pasted before then, Junos rolls this stage back by itself.
+
+Unit 6D (device-configuration): stage runtime: checks
+Status: checks unverified on a device (Q-INST-06)
+```
+run file checksum sha-256 /var/db/scripts/jet/jwicket.py
+run file show /var/db/jwicket/jwicket.log | no-more
+run file show /var/db/jwicket/audit.jsonl | no-more
+run file show /var/db/jwicket/startup-refused.txt | no-more
+run show extension-service status jwicket.py | no-more
+show | compare rollback 1 | no-more
+run show system commit | no-more
+```
+Compare with what each check expects:
+The copy on /var/db/scripts/jet/jwicket.py: expect its SHA256 to be the bundle's, as in unit B's checksum line.
+C4: Exactly one new 'listening on <address>:9443' line in /var/db/jwicket/jwicket.log since the commit ('file show /var/db/jwicket/jwicket.log'); two mean a restart loop.
+    expect exactly one new line containing: listening on 192.0.2.10:9443 tls=True backend=netconf routing_instance=default version=0.1.0.dev1 payload=2e2e2e2e2e2e2e2e
+C5: Exactly one new audit record with event start and this bundle's version in /var/db/jwicket/audit.jsonl.
+C6: No new /var/db/jwicket/startup-refused.txt (a stale one is deleted before the commit).
+    expect an error saying the file does not exist
+C7: 'show extension-service status jwicket.py' shows the same process id at two reads at least 30 seconds apart.
+C8: --access tls: an HTTPS GET /api/session from the workstation to <address>:9443, trusting only the certificate whose SHA-256 the installer generated (pinned: no CA store, and the pin stands in for the host name check), answers 200 with this version (and build). --access tunnel: not available (no check uses an SSH channel).
+    by hand, from your workstation: open https://192.0.2.10:9443/api/session in the browser, compare the certificate's SHA-256 fingerprint with 5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B (this install's record), and expect "version": "0.1.0.dev1" and "build": "2e2e2e2e2e2e2e2e"
+C10: Before confirming: the committed statements of the touched subtrees equal the plan, and the committed delta ('show | compare rollback 1') changes nothing outside them.
+    expect 'show | compare rollback 1' to show only the change of unit B
+C11: Before confirming: 'show system commit' shows this stage's commit as the newest, by the daemon account, with this stage's comment, and no 'commit at' or prepared commit.
+    expect the newest commit by labadmin with the comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install
+Leave at least one minute before the deadline. Only if all of that matches, paste the next unit.
+Otherwise type 'exit' (answer 'yes' if asked to exit with uncommitted changes) and let Junos roll the stage back at the deadline.
+On failure, before the deadline: 'file copy /var/db/scripts/jet/jwicket-prev.py /var/db/scripts/jet/jwicket.py' (restores the old bytes).
+
+Wait at least 30 seconds after unit D, then paste:
+Unit 6D2 (device-configuration): stage runtime: process still the same after 30 seconds
+Status: the status command verified ([show-ext]); its use for this inferred
+```
+run show extension-service status jwicket.py | no-more
+```
+STOP unless the process id is the same as in unit D and the log still has exactly one new 'listening on' line.
+
+Only if every check above matched:
+Unit 6E (device-configuration): stage runtime: confirm
+Status: confirming with 'commit comment' (force-commit-log safe, verified)
+```
+commit comment "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime confirmed"
+exit
+```
+
+Unit 7 (workstation): open the UI in a browser (workstation)
+Status: HTTPS on the management address verified on SRX4100 25.2R1-S1.4 (TLS 1.2 and 1.3)
+```
+https://192.0.2.10:9443/
+```
+Browse to https://192.0.2.10:9443/ from a host on the management network. The browser warns about a self-signed certificate: accept it only if its SHA-256 fingerprint is 5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B:5B.

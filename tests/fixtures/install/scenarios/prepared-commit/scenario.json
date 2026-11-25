@@ -1,0 +1,6 @@
+{
+  "description": "A 'commit prepare' is pending.",
+  "refusals": [
+    "R-PENDING"
+  ]
+}

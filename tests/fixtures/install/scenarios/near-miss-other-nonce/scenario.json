@@ -1,0 +1,10 @@
+{
+  "bootstrap": {
+    "method": "workstation",
+    "nonce": "k3v9qt"
+  },
+  "description": "The bootstrap with another nonce than the one given.",
+  "refusals": [
+    "R-PENDING"
+  ]
+}

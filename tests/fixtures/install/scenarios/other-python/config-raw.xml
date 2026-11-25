@@ -1,0 +1,29 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The select-only configuration read of spec 8.3. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <configuration>
+    <system>
+      <scripts>
+        <language>python3</language>
+        <op>
+          <file>
+            <name>tools.py</name>
+          </file>
+        </op>
+      </scripts>
+      <services>
+        <netconf>
+          <ssh/>
+        </netconf>
+      </services>
+    </system>
+    <!-- Event scripts are configured under event-options event-script (junos-es-conf-event-options 23.2R1). -->
+    <event-options>
+      <event-script>
+        <file>
+          <name>on-link.py</name>
+        </file>
+      </event-script>
+    </event-options>
+  </configuration>
+</rpc-reply>

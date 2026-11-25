@@ -1,0 +1,265 @@
+{
+  "access": "tls",
+  "backend": "netconf",
+  "blocked": false,
+  "bootstrap": null,
+  "bundle": {
+    "features": [
+      "build-line",
+      "result-files"
+    ],
+    "file_sha256": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+    "payload_sha256": "2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+    "size": 1783074,
+    "source_ref": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "version": "0.1.0.dev1"
+  },
+  "device": {
+    "junos_version": "24.4R2-S3.5",
+    "model": "vsrx",
+    "serial": "FIXTURE-SN-0001"
+  },
+  "directory": {
+    "action": "keep",
+    "content": "directory",
+    "mode": "0700",
+    "path": "/var/db/jwicket",
+    "phase": "files",
+    "sha256": null,
+    "source": null,
+    "stage": null
+  },
+  "files": [
+    {
+      "action": "stage",
+      "content": "bundle",
+      "mode": "0644",
+      "path": "/var/db/scripts/jet/jwicket-next.py",
+      "phase": "files",
+      "sha256": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "source": "workstation",
+      "stage": null
+    },
+    {
+      "action": "copy",
+      "content": "bundle",
+      "mode": "0644",
+      "path": "/var/db/scripts/jet/jwicket.py",
+      "phase": "files",
+      "sha256": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "source": "/var/db/scripts/jet/jwicket-next.py",
+      "stage": null
+    },
+    {
+      "action": "copy",
+      "content": "bundle",
+      "mode": "0644",
+      "path": "/var/db/scripts/jet/jwicket_selftest.py",
+      "phase": "files",
+      "sha256": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "source": "/var/db/scripts/jet/jwicket-next.py",
+      "stage": null
+    },
+    {
+      "action": "copy",
+      "content": "bundle",
+      "mode": "0644",
+      "path": "/var/db/scripts/jet/jwicket_probe.py",
+      "phase": "files",
+      "sha256": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+      "source": "/var/db/scripts/jet/jwicket-next.py",
+      "stage": null
+    },
+    {
+      "action": "delete",
+      "content": "any",
+      "mode": "0644",
+      "path": "/var/db/scripts/jet/jwicket-next.py",
+      "phase": "files",
+      "sha256": null,
+      "source": null,
+      "stage": null
+    },
+    {
+      "action": "write",
+      "content": "settings",
+      "mode": "0600",
+      "path": "/var/db/jwicket/jwicket.ini",
+      "phase": "files",
+      "sha256": "8971fabcc10e8b5373b5f7f2ea6472bccbb2ccaf3af9070a745e0fc4d78384e2",
+      "source": "workstation",
+      "stage": null
+    },
+    {
+      "action": "write",
+      "content": "tls-key",
+      "mode": "0600",
+      "path": "/var/db/jwicket/tls.key",
+      "phase": "files",
+      "sha256": null,
+      "source": "in-memory",
+      "stage": null
+    },
+    {
+      "action": "write",
+      "content": "tls-cert",
+      "mode": "0644",
+      "path": "/var/db/jwicket/tls.crt",
+      "phase": "files",
+      "sha256": null,
+      "source": "in-memory",
+      "stage": null
+    }
+  ],
+  "final_files": [
+    {
+      "action": "write",
+      "content": "receipt",
+      "mode": "0600",
+      "path": "/var/db/jwicket/install-receipt.json",
+      "phase": "final",
+      "sha256": null,
+      "source": "workstation",
+      "stage": null
+    }
+  ],
+  "installer": "jwicket-install 0.1.0.dev1",
+  "lab_hardware": false,
+  "layout": "direct",
+  "listen_address": "192.0.2.10",
+  "method": "workstation",
+  "no_change": false,
+  "offline": false,
+  "overrides": [],
+  "port": 9443,
+  "present_before": [
+    "S1",
+    "S8"
+  ],
+  "production_signs": [
+    "model: vsrx",
+    "release: 24.4R2-S3.5",
+    "serial: FIXTURE-SN-0001",
+    "active flow sessions: 12",
+    "outbound-ssh clients: 0",
+    "distinct committers in history: 1",
+    "committers: admin",
+    "last commit: 2026-11-20 09:12:00 UTC"
+  ],
+  "provenance": {
+    "detail": [
+      "v0.1.0.dev1"
+    ],
+    "evidence": true,
+    "kind": "release-record"
+  },
+  "pull_routing_instance": null,
+  "refusals": [],
+  "routing_instance": null,
+  "schema": 2,
+  "stages": [
+    {
+      "add": [
+        {
+          "key": "S2",
+          "line": "set system extensions extension-service application file jwicket_selftest.py username labadmin"
+        },
+        {
+          "key": "S3",
+          "line": "set system extensions extension-service application file jwicket_selftest.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+        },
+        {
+          "key": "S4",
+          "line": "set system extensions extension-service application file jwicket_probe.py username labadmin"
+        },
+        {
+          "key": "S5",
+          "line": "set system extensions extension-service application file jwicket_probe.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+        }
+      ],
+      "already_committed": false,
+      "checks": [
+        "C2",
+        "C3",
+        "C10",
+        "C11"
+      ],
+      "comment": "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install",
+      "confirm_comment": "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics confirmed",
+      "confirm_minutes": 5,
+      "files_after_confirm": [],
+      "files_before_commit": [],
+      "lines": [
+        "set system extensions extension-service application file jwicket_selftest.py username labadmin",
+        "set system extensions extension-service application file jwicket_selftest.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+        "set system extensions extension-service application file jwicket_probe.py username labadmin",
+        "set system extensions extension-service application file jwicket_probe.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+      ],
+      "name": "diagnostics",
+      "post_confirm_checks": [],
+      "remove": [],
+      "restore_on_failure": []
+    },
+    {
+      "add": [
+        {
+          "key": "S10",
+          "line": "set system extensions extension-service application file jwicket.py daemonize"
+        },
+        {
+          "key": "S11",
+          "line": "set system extensions extension-service application file jwicket.py respawn-on-normal-exit"
+        },
+        {
+          "key": "S12",
+          "line": "set system extensions extension-service application file jwicket.py username labadmin"
+        },
+        {
+          "key": "S13",
+          "line": "set system extensions extension-service application file jwicket.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+        }
+      ],
+      "already_committed": false,
+      "checks": [
+        "C4",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C10",
+        "C11"
+      ],
+      "comment": "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install",
+      "confirm_comment": "jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime confirmed",
+      "confirm_minutes": 5,
+      "files_after_confirm": [],
+      "files_before_commit": [],
+      "lines": [
+        "set system extensions extension-service application file jwicket.py daemonize",
+        "set system extensions extension-service application file jwicket.py respawn-on-normal-exit",
+        "set system extensions extension-service application file jwicket.py username labadmin",
+        "set system extensions extension-service application file jwicket.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+      ],
+      "name": "runtime",
+      "post_confirm_checks": [],
+      "remove": [],
+      "restore_on_failure": []
+    }
+  ],
+  "status_checks": [
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8"
+  ],
+  "upgrade": false,
+  "user": "labadmin",
+  "warnings": [
+    "DEVICE_STATUS",
+    "POSTURE_ALREADY_SET",
+    "TLS_POSTURE_WARNING",
+    "ROOT_BLAST_RADIUS",
+    "NETCONF_NOT_CHECKED"
+  ]
+}

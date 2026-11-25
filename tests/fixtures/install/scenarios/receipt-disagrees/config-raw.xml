@@ -1,0 +1,39 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The select-only configuration read of spec 8.3. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <configuration>
+    <system>
+      <scripts>
+        <language>python3</language>
+      </scripts>
+      <extensions>
+        <extension-service>
+          <application>
+            <file>
+              <name>jwicket.py</name>
+              <daemonize/>
+              <respawn-on-normal-exit/>
+              <username>labadmin</username>
+              <checksum><sha-256>1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f</sha-256></checksum>
+            </file>
+            <file>
+              <name>jwicket_probe.py</name>
+              <username>labadmin</username>
+              <checksum><sha-256>1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f</sha-256></checksum>
+            </file>
+            <file>
+              <name>jwicket_selftest.py</name>
+              <username>labadmin</username>
+              <checksum><sha-256>1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f</sha-256></checksum>
+            </file>
+          </application>
+        </extension-service>
+      </extensions>
+      <services>
+        <netconf>
+          <ssh/>
+        </netconf>
+      </services>
+    </system>
+  </configuration>
+</rpc-reply>

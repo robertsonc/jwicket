@@ -1,0 +1,14 @@
+{
+  "description": "A 'groups jwicket' this installer did not add.",
+  "inverse_note": "the adopted group goes whole",
+  "inverse_removed_prefixes": [
+    "groups jwicket",
+    "apply-groups"
+  ],
+  "needs": [
+    "--adopt"
+  ],
+  "refusals": [
+    "R-FOREIGN"
+  ]
+}

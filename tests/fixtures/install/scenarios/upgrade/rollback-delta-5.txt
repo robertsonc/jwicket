@@ -1,0 +1,4 @@
+[edit system services]
++    netconf {
++        ssh;
++    }

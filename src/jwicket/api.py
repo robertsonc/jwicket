@@ -2,7 +2,8 @@
 
 Endpoints (all JSON unless noted):
 
-* ``GET  /api/session``    who is signed in, which credential the sign-in form needs, the CSRF token
+* ``GET  /api/session``    who is signed in, which credential the sign-in form needs, the CSRF token,
+  the version and the build (the bundle's payload digest)
 * ``POST /api/login``      same-origin only, throttled; opens the operator's own Junos session
 * ``POST /api/logout``     same-origin and CSRF token; closes the device session
 * ``GET  /api/inventory``  ``?scope=root|lsys:<name>|tenant:<name>``; the Spec 001 snapshot
@@ -61,6 +62,7 @@ BUSY_RETRY_S = 2
 # Device error text written to the diagnostic log is cut to this length (an ncclient RpcError string
 # can carry the whole rpc-error XML).
 MAX_ERROR_TEXT = 500
+_SHA256 = re.compile(r"^[0-9a-f]{64}\Z")
 BACKGROUND_HEADER = "X-JWicket-Background"
 # Session ends recorded as their own audit event; the others already have one (session_replaced,
 # logout, session_lost).
@@ -321,6 +323,17 @@ def session_lost(app: App, sess: WebSession, req: Request, err: SessionLost) -> 
     return Response.error(401, err.public, signed_out=True, reason="session-lost", at=_utc(at))
 
 
+def bundle_payload_sha256() -> Optional[str]:
+    """The payload SHA-256 of the running bundle, which tools/bundle.py's importer puts on
+    ``jwicket._embedded`` (bundle change D3 of the installation spec), or None when running from src/."""
+    try:
+        from jwicket import _embedded as emb  # type: ignore[attr-defined]  # generated in the bundle only
+    except ImportError:
+        return None
+    value = getattr(emb, "PAYLOAD_SHA256", None)
+    return value if isinstance(value, str) and _SHA256.match(value) else None
+
+
 # --- session endpoints ----------------------------------------------------------------------------
 
 
@@ -337,11 +350,13 @@ def session_facts(app: App, sess: WebSession) -> Json:
 
 def get_session(app: App, req: Request) -> Response:
     sess = _session(app, req)
+    payload = bundle_payload_sha256()
     base: Json = {
         "credential": app.backend.credential,
         "backend": app.backend.name,
         "fixture": app.fixture,
         "version": __version__,
+        "build": payload[:16] if payload else None,  # lets an installer tell which build is listening
     }
     if sess is None:
         out: Json = {"authenticated": False, **base}
@@ -768,4 +783,4 @@ def build_router(app: App) -> Router:
 
 
 # Re-exported for tests that want to assert error mapping without reaching into junos.errors.
-__all__ = ["App", "RpcDenied", "build_router", "read_snapshot", "signin_required"]
+__all__ = ["App", "RpcDenied", "build_router", "bundle_payload_sha256", "read_snapshot", "signin_required"]

@@ -1,0 +1,6 @@
+{
+  "description": "A 'commit at' is scheduled.",
+  "refusals": [
+    "R-PENDING"
+  ]
+}

@@ -1,0 +1,29 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- get-commit-information (rpc in junos-es 23.2R1 YANG, verified). The literal commit-confirmed text and whether a comment lands in comment or log are unknown (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <commit-information>
+    <commit-history>
+      <sequence-number>0</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-24 10:00:00 UTC</date-time>
+      <user>admin</user>
+      <client>cli</client>
+      <comment>{{ lookup('pipe', 'id') }}</comment>
+    </commit-history>
+    <commit-history>
+      <sequence-number>1</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-23 10:00:00 UTC</date-time>
+      <user>admin</user>
+      <client>cli</client>
+      <comment>say &quot;hello&quot; then
+exit</comment>
+      <log>{% raw %}x{% endraw %}</log>
+    </commit-history>
+    <commit-history>
+      <sequence-number>2</sequence-number>
+      <date-time junos:seconds="1795000000">2026-11-22 10:00:00 UTC</date-time>
+      <user>admin</user>
+      <client>cli</client>
+      <comment>see https://user:pw@example.net/x</comment>
+    </commit-history>
+  </commit-information>
+</rpc-reply>

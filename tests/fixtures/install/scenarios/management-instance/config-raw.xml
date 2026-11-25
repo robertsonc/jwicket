@@ -1,0 +1,10 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The select-only configuration read of spec 8.3. management-instance is an empty leaf (junos-es 23.2R1 conf-system YANG). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <configuration>
+    <system>
+      <host-name>lab-vsrx-1</host-name>
+      <management-instance/>
+    </system>
+  </configuration>
+</rpc-reply>

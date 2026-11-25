@@ -1,0 +1,6 @@
+{
+  "description": "system fips level 2.",
+  "refusals": [
+    "R-FIPS"
+  ]
+}

@@ -1,0 +1,392 @@
+# J-Wicket lab pre-releases (Spec 006 section 11, owner decision 3). LAB ONLY: what this publishes is
+# not installable on a production SRX, nothing here talks to a device, and every device step of the
+# installers it ships is unverified until lab test Q-INST-06.
+#
+# Triggers: a pushed tag vX.Y.Z.devN (the owner only, by tag ruleset), or a manual run, which is a dry
+# run: every job except publish. A run uses this file as it is in the tagged commit, so the controls
+# that matter are repository settings (Spec 006 section 11.2): immutable releases, a tag ruleset,
+# branch protection on main and the lab-prerelease environment. tools/release_check.py is defence in
+# depth.
+#
+# test and rebuild run on Python 3.7 (the SRX's: Junos 25.2R1-S1.4 ships 3.7.10, verified on a lab
+# SRX4100), 3.9 and 3.13; build runs on 3.12, and every rebuild must give its bytes. ci.yml's reproduce
+# job runs the same comparison on every pull request.
+#
+# Rules kept here, checked by tests/test_workflows.py: no ${{ }} inside any run: script (values reach
+# scripts through env: and are quoted); workflow permissions {} and per-job grants; every action
+# pinned by full commit SHA; persist-credentials: false on every checkout; no cache of any kind; a
+# timeout on every job; only reads are retried, never a write.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*.dev*"]
+  workflow_dispatch:
+
+permissions: {}
+
+# One release run per ref at a time; a second run waits rather than cancelling a publication.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  verify:
+    name: verify (tag, versions, ancestry, settings)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      dry_run: ${{ steps.check.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          # The whole history and every tag: the ancestry check needs origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Release checks (tag pattern, three equal versions, commit on main, immutable releases asserted)
+        id: check
+        env:
+          # The owner's assertion that immutable releases are on; the workflow cannot read the setting.
+          JWICKET_IMMUTABLE_RELEASES: ${{ vars.JWICKET_IMMUTABLE_RELEASES }}
+        run: >-
+          python tools/release_check.py
+          --event "$GITHUB_EVENT_NAME"
+          --ref-type "$GITHUB_REF_TYPE"
+          --ref-name "$GITHUB_REF_NAME"
+          --sha "$GITHUB_SHA"
+          --github-output "$GITHUB_OUTPUT"
+
+  test:
+    name: test (Python ${{ matrix.python }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.7 is the SRX's Python (Junos 25.2R1-S1.4 ships 3.7.10, verified on a lab SRX4100) and the
+        # floor of everything the bundle and the op script run; 3.13 is the newest. setup-python has no
+        # 3.7 for ubuntu-24.04, so that job runs on ubuntu-22.04, as in ci.yml.
+        python: ["3.7", "3.9", "3.13"]
+        os: [ubuntu-24.04]
+        exclude:
+          - python: "3.7"
+            os: ubuntu-24.04
+        include:
+          - python: "3.7"
+            os: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Bundle self-test on this Python, isolated and outside the checkout
+        run: |
+          python tools/bundle.py --out "$RUNNER_TEMP/jwicket.py"
+          cd "$RUNNER_TEMP"
+          python -I jwicket.py --bundle-self-test
+
+  build:
+    name: build (assets, SHA256SUMS, notes)
+    needs: [verify, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      sums_sha256: ${{ steps.sums.outputs.sums_sha256 }}
+      bundle_sha256: ${{ steps.sums.outputs.bundle_sha256 }}
+      op_sha256: ${{ steps.sums.outputs.op_sha256 }}
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      SOURCE_REF: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Bundle
+        run: python tools/bundle.py --out dist/jwicket.py --source-ref "$SOURCE_REF"
+      - name: Rebuild and compare (the build must be reproducible)
+        run: python tools/bundle.py --out dist/jwicket.py --source-ref "$SOURCE_REF" --check
+      - name: Bundle self-test, isolated and outside the checkout
+        run: |
+          cd "$RUNNER_TEMP"
+          python -I "$GITHUB_WORKSPACE/dist/jwicket.py" --bundle-self-test
+      - name: Self-test by file name, with no arguments, as Junos starts the alias
+        run: |
+          alias_dir="$RUNNER_TEMP/alias"
+          mkdir "$alias_dir"
+          cp dist/jwicket.py "$alias_dir/jwicket_selftest.py"
+          cd "$alias_dir"
+          python -I jwicket_selftest.py
+      - name: On-box op-script installer (M4)
+        run: >-
+          PYTHONPATH=tools python -m jwicket_install.build_op
+          --bundle dist/jwicket.py
+          --tag "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --out dist/jwicket-install-op.py
+      - name: Workstation installer wheel (M1), timestamps from the commit
+        run: |
+          epoch=$(git log -1 --format=%ct "$SOURCE_REF")
+          python tools/build_wheel.py --out dist --source-date-epoch "$epoch"
+      - name: Hash-pinned installer requirements
+        run: cp requirements-install.txt dist/requirements-install.txt
+      - name: SHA256SUMS
+        id: sums
+        run: |
+          cd dist
+          sha256sum jwicket.py jwicket-install-op.py jwicket_install-*.whl requirements-install.txt > SHA256SUMS
+          cat SHA256SUMS
+          sums_sha256=$(sha256sum SHA256SUMS | cut -d ' ' -f 1)
+          bundle_sha256=$(sha256sum jwicket.py | cut -d ' ' -f 1)
+          op_sha256=$(sha256sum jwicket-install-op.py | cut -d ' ' -f 1)
+          {
+            echo "sums_sha256=$sums_sha256"
+            echo "bundle_sha256=$bundle_sha256"
+            echo "op_sha256=$op_sha256"
+          } >> "$GITHUB_OUTPUT"
+      - name: Release notes from .github/release-notes-lab-only.md
+        run: >-
+          python tools/release_record.py notes
+          --dist dist
+          --tag "$RELEASE_TAG"
+          --commit "$SOURCE_REF"
+          --repo "$GITHUB_REPOSITORY"
+          --out dist/RELEASE-NOTES.md
+      - name: Summary
+        run: |
+          {
+            echo "### Lab pre-release $RELEASE_TAG (LAB ONLY, not for a production SRX)"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: |
+            dist/jwicket.py
+            dist/jwicket-install-op.py
+            dist/jwicket_install-*.whl
+            dist/requirements-install.txt
+            dist/SHA256SUMS
+            dist/RELEASE-NOTES.md
+          if-no-files-found: error
+          retention-days: 7
+
+  rebuild:
+    name: rebuild (Python ${{ matrix.python }}, must equal build)
+    needs: [verify, build]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The four assets must come out byte for byte the same on the box's Python 3.7 (ubuntu-22.04:
+        # setup-python has no 3.7 for ubuntu-24.04), on 3.9 and on the newest, 3.13.
+        python: ["3.7", "3.9", "3.13"]
+        os: [ubuntu-24.04]
+        exclude:
+          - python: "3.7"
+            os: ubuntu-24.04
+        include:
+          - python: "3.7"
+            os: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      SOURCE_REF: ${{ github.sha }}
+      EXPECTED_SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Rebuild the four assets outside the checkout
+        run: |
+          out="$RUNNER_TEMP/rebuild"
+          mkdir "$out"
+          python tools/bundle.py --out "$out/jwicket.py" --source-ref "$SOURCE_REF"
+          PYTHONPATH=tools python -m jwicket_install.build_op --bundle "$out/jwicket.py" --tag "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --out "$out/jwicket-install-op.py"
+          epoch=$(git log -1 --format=%ct "$SOURCE_REF")
+          python tools/build_wheel.py --out "$out" --source-date-epoch "$epoch"
+          cp requirements-install.txt "$out/requirements-install.txt"
+      - name: Compare with build
+        run: |
+          cd "$RUNNER_TEMP/rebuild"
+          sha256sum jwicket.py jwicket-install-op.py jwicket_install-*.whl requirements-install.txt > SHA256SUMS
+          cat SHA256SUMS
+          actual=$(sha256sum SHA256SUMS | cut -d ' ' -f 1)
+          if [ "$actual" != "$EXPECTED_SUMS_SHA256" ]; then
+            echo "::error::this Python's rebuild differs from the build job: SHA256SUMS $actual, expected $EXPECTED_SUMS_SHA256"
+            exit 1
+          fi
+          echo "reproduced: SHA256SUMS $actual"
+
+  attest:
+    name: attest (build provenance of every asset)
+    needs: [build, rebuild]
+    # Mandatory for a public repository. A private one attests only on GitHub Enterprise Cloud, where the
+    # owner sets JWICKET_ATTEST=true; otherwise publish leaves a draft for the owner's signature (11.5).
+    if: ${{ !github.event.repository.private || vars.JWICKET_ATTEST == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      EXPECTED_SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist
+      - name: Check the downloaded assets against build
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          actual=$(sha256sum SHA256SUMS | cut -d ' ' -f 1)
+          if [ "$actual" != "$EXPECTED_SUMS_SHA256" ]; then
+            echo "::error::SHA256SUMS changed between build and attest: $actual, expected $EXPECTED_SUMS_SHA256"
+            exit 1
+          fi
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+          # Storage records apply only to images pushed to a registry; nothing is pushed here.
+          create-storage-record: false
+
+  publish:
+    name: publish (lab pre-release)
+    needs: [verify, build, rebuild, attest]
+    # Written out in full: a job whose needed job was skipped is skipped unless its condition continues
+    # it. A manual (workflow_dispatch) run never publishes.
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.build.result == 'success' && needs.rebuild.result == 'success' && (needs.attest.result == 'success' || (needs.attest.result == 'skipped' && github.event.repository.private)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: lab-prerelease
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+      EXPECTED_SUMS_SHA256: ${{ needs.build.outputs.sums_sha256 }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist
+      - name: Check the tag and the assets against build
+        run: |
+          if [ "$RELEASE_TAG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::verify checked $RELEASE_TAG, but this run is for $GITHUB_REF_NAME"
+            exit 1
+          fi
+          cd dist
+          sha256sum -c SHA256SUMS
+          actual=$(sha256sum SHA256SUMS | cut -d ' ' -f 1)
+          if [ "$actual" != "$EXPECTED_SUMS_SHA256" ]; then
+            echo "::error::SHA256SUMS changed between build and publish: $actual, expected $EXPECTED_SUMS_SHA256"
+            exit 1
+          fi
+          count=$(find . -type f | wc -l)
+          if [ "$count" -ne 6 ]; then
+            echo "::error::expected six files (four assets, SHA256SUMS, RELEASE-NOTES.md), found $count"
+            exit 1
+          fi
+      - name: Create the pre-release as a draft, with its assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          timeout 600 gh release create "$RELEASE_TAG" \
+            dist/jwicket.py dist/jwicket-install-op.py "dist/jwicket_install-$version-py3-none-any.whl" \
+            dist/requirements-install.txt dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --prerelease --verify-tag --latest=false --draft \
+            --title "J-Wicket $RELEASE_TAG (lab only, pre-release)" --notes-file dist/RELEASE-NOTES.md
+      - name: Publish, then verify the release attestation; delete the release if it does not verify
+        if: ${{ needs.attest.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Reads only are retried; the writes (edit, delete) run once.
+          retry_read() {
+            local delay
+            for delay in 5 10 20 40; do
+              if timeout 120 "$@"; then
+                return 0
+              fi
+              sleep "$delay"
+            done
+            return 1
+          }
+          version="${RELEASE_TAG#v}"
+          timeout 120 gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          verified=false
+          if retry_read gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"; then
+            verified=true
+            for asset in jwicket.py jwicket-install-op.py "jwicket_install-$version-py3-none-any.whl" \
+              requirements-install.txt SHA256SUMS; do
+              if ! retry_read gh release verify-asset "$RELEASE_TAG" "dist/$asset" --repo "$GITHUB_REPOSITORY"; then
+                verified=false
+              fi
+            done
+          fi
+          if [ "$verified" != true ]; then
+            echo "::error::gh release verify failed for $RELEASE_TAG (are immutable releases on?); deleting the release, the tag stays"
+            timeout 120 gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes
+            exit 1
+          fi
+          {
+            echo "### Published $RELEASE_TAG (LAB ONLY pre-release)"
+            echo
+            echo "Release attestation verified for every asset. Next: make release-record TAG=$RELEASE_TAG REPO=$GITHUB_REPOSITORY, then a reviewed pull request to main."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: No attestation (private repository without Enterprise Cloud); leave the draft for the owner
+        if: ${{ needs.attest.result == 'skipped' }}
+        run: |
+          echo "::notice::$RELEASE_TAG stays a draft: no attestation is available, so the owner signs SHA256SUMS (Spec 006 section 11.5)"
+          {
+            echo "### $RELEASE_TAG is a draft, waiting for the owner"
+            echo
+            echo "1. Download the draft and reproduce it locally (P-D)."
+            echo "2. ssh-keygen -Y sign -f <key> -n jwicket-release@<domain> SHA256SUMS, and upload SHA256SUMS.sig."
+            echo "3. Publish the draft, then run gh release verify $RELEASE_TAG."
+            echo "4. make release-record TAG=$RELEASE_TAG REPO=$GITHUB_REPOSITORY VERIFY=signature IDENTITY=<owner> NAMESPACE=jwicket-release@<domain>"
+          } >> "$GITHUB_STEP_SUMMARY"

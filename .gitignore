@@ -12,6 +12,10 @@ build/
 *.ini
 !tests/fixtures/*.ini
 !docs/examples/*.ini
+# Spec 006: the installer's golden settings files and M2's example inventory (documentation
+# addresses, no secrets). A copied inventory.ini stays ignored.
+!tests/fixtures/install/golden/*.ini
+!deploy/ansible/inventory.example.ini
 *.pem
 *.key
 *.log
@@ -20,3 +24,10 @@ build/
 .playwright/
 .playwright-mcp/
 screenshots/
+# The container image's build context, made by `make container-context` (Spec 006 section 6.4).
+deploy/container/build/
+# Device evidence that 'jwicket-install uninstall' fetches into the working directory by default (the
+# device's log and audit trail; tools/jwicket_install/receipt.py).
+evidence-*/
+# containerlab's lab directory, written next to the topology (inferred; deploy/containerlab/README.md).
+deploy/containerlab/clab-*/

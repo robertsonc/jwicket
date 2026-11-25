@@ -1,0 +1,65 @@
+This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
+
+Device: model srx4100, release 25.2R1-S1.4, serial FIXTURE-SN-4100
+
+LAB ONLY. 'set system scripts language python3' is already set on this device; this install relies on it. It lets any unsigned Python script owned by a super-user-class account run on this device's routing engine, not only J-Wicket: a change to the device's security posture that someone made before. J-Wicket is not qualified for production (gate G1 has not passed). Continue only on a disposable lab device you are allowed to change.
+LAB ONLY. With --access tls the runtime commit opens a new HTTPS listener on this device's management address: the --listen-address, by default --host, which the installer does not check is the management address (an address of a revenue interface would put the listener there; in the mgmt_junos routing instance when 'system management-instance' is set). It is reachable by anything that reaches that address: J-Wicket's sign-in page becomes one more way into this device, beside SSH and NETCONF. Its certificate is self-signed; compare its SHA-256 fingerprint in the browser with the one the installer prints. J-Wicket has not passed gate G1 or a security review (Q-SEC-01). Continue only on a lab device whose management network you control.
+--lab-hardware: this device is not a vSRX ('show version' reports its model). J-Wicket has run on one lab SRX4100 by hand (docs/deploy-lab.md); this installer has run on no hardware, and the hardware procedure of governance decision D12 is not written: the lab owner decides. The production signs below are what a production firewall would show. After the host name, the installer asks you to type 'lab only'.
+Outbound-SSH clients are configured ('show configuration system services outbound-ssh'), so a central manager probably manages this device. This change is made on the box, out of band to the manager, which may report it or overwrite it.
+The netconf backend's reach to the device's own NETCONF ('show configuration system services netconf') rests on the probe (check C3) only: it is not checked end to end, because no check uses an SSH channel (SSH forwarding was refused on the lab SRX4100). Sign in once to prove it.
+
+Shown, not judged (a production device would show these):
+  model: srx4100
+  release: 25.2R1-S1.4
+  serial: FIXTURE-SN-4100
+  active flow sessions: 40
+  outbound-ssh clients: 1
+  outbound-ssh client: sd-cloud
+  distinct committers in history: 2
+  committers: labadmin, sd-cloud
+  last commit: 2026-11-24 18:20:00 CST
+
+Refusals:
+  R-MODEL (overridden by --lab-hardware): This installer changes vSRX lab devices unless told otherwise. This device does not report a vSRX product model ('show version'), or it did not answer 'show chassis cluster status' the way an SRX does. --lab-hardware continues on a physical SRX that carries only lab traffic: after the host name you then type 'lab only', recorded. It never applies to a device that is not an SRX or did not answer as one.
+    model: srx4100, a physical SRX
+  R-MANAGED (overridden by --ack-managed): Outbound-SSH clients are configured ('show configuration system services outbound-ssh'), so a central manager probably manages this device, and a change made on the box is out of band to it. --ack-managed continues (recorded).
+    outbound-ssh clients: 1
+  R-FOREIGN (overridden by --adopt): A J-Wicket application stanza ('show configuration system extensions extension-service') or a 'groups jwicket' configuration group exists that neither the commit history ('show system commit') nor this workstation's install record shows this installer added, for example a manual install from deploy-lab.md. Remove it, or pass --adopt to take it over (recorded).
+    stanza jwicket.py
+  R-FOREIGN (overridden by --adopt): A J-Wicket application stanza ('show configuration system extensions extension-service') or a 'groups jwicket' configuration group exists that neither the commit history ('show system commit') nor this workstation's install record shows this installer added, for example a manual install from deploy-lab.md. Remove it, or pass --adopt to take it over (recorded).
+    stanza jwicket_probe.py
+  R-FOREIGN (overridden by --adopt): A J-Wicket application stanza ('show configuration system extensions extension-service') or a 'groups jwicket' configuration group exists that neither the commit history ('show system commit') nor this workstation's install record shows this installer added, for example a manual install from deploy-lab.md. Remove it, or pass --adopt to take it over (recorded).
+    stanza jwicket_selftest.py
+
+The plan's change (patch form, from the committed configuration):
+# stage diagnostics: commit confirmed 5 (comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install)
+[edit system extensions extension-service application file jwicket_probe.py checksum]
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+[edit system extensions extension-service application file jwicket_selftest.py checksum]
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+# stage runtime: commit confirmed 5 (comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install)
+[edit system extensions extension-service application file jwicket.py checksum]
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+
+Files:
+  keep     /var/db/jwicket mode 0700
+  stage    /var/db/scripts/jet/jwicket-next.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from workstation
+  backup   /var/db/jwicket/jwicket.ini.prev mode 0600 sha256 6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a from /var/db/jwicket/jwicket.ini
+  write    /var/db/jwicket/jwicket.ini mode 0600 sha256 1843becbdbf07b6e125a7daa44e7c1a066a215f3e300d7885472d272bd17d218 from workstation
+  write    /var/db/jwicket/tls.key mode 0600 from in-memory
+  write    /var/db/jwicket/tls.crt mode 0644 from in-memory
+  replace  /var/db/scripts/jet/jwicket_selftest.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from /var/db/scripts/jet/jwicket-next.py
+  replace  /var/db/scripts/jet/jwicket_probe.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from /var/db/scripts/jet/jwicket-next.py
+  backup   /var/db/scripts/jet/jwicket-prev.py mode 0644 sha256 0a5a48a8a6b69111b46b32c9dfe2bcb0cda995ff4105d3c4fb5d0cce4477458a from /var/db/scripts/jet/jwicket.py
+  replace  /var/db/scripts/jet/jwicket.py mode 0644 sha256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f from /var/db/scripts/jet/jwicket-next.py
+  delete   /var/db/scripts/jet/jwicket-prev.py mode 0644
+  delete   /var/db/scripts/jet/jwicket-next.py mode 0644
+
+Already present and kept (never removed by this tool):
+  set system scripts language python3
+  set system services netconf ssh
+
+The runtime commit starts J-Wicket, listening with TLS on 192.0.2.10:9443 in routing instance mgmt_junos: browse to https://192.0.2.10:9443/ and compare the certificate's SHA-256 fingerprint with the one the installer prints.
+
+Blast radius: posture: language python3 already set; listener: HTTPS on 192.0.2.10:9443 in routing instance mgmt_junos, reachable by anything that reaches that address; NETCONF: netconf ssh already set or not needed; account: J-Wicket will run with the rights of labadmin, a super-user-class account that can commit configuration ('username labadmin' under 'system extensions extension-service application file jwicket.py'). A compromise of J-Wicket is a compromise of this device.
+Confirm windows: diagnostics 5 min, runtime 5 min

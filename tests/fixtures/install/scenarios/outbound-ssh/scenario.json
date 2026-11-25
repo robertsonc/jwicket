@@ -1,0 +1,16 @@
+{
+  "description": "Outbound-SSH client with a secret leaf (must not survive parsing), a login hash and a source URL with user information that a failed filter returned.",
+  "inverse_added": [
+    [
+      "system scripts language",
+      "python3"
+    ]
+  ],
+  "inverse_note": "language python3 stays: another Python JET file (other_app.py) is configured",
+  "needs": [
+    "--ack-managed"
+  ],
+  "refusals": [
+    "R-MANAGED"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "The reference case of --lab-hardware (revision R5): the lab SRX4100 of docs/evidence/2026-11-24-srx4100-lab, standalone, 25.2R1-S1.4, managed by Security Director Cloud over outbound-ssh, with 'system management-instance' and what the lab run left: language python3, the three stanzas without checksums, its bundle's files and the root-made /var/db/jwicket with an on-box TLS pair. Values other than the model, release and bundle SHA-256 are placeholders.",
+  "inverse_note": "the adopted stanzas are recorded as J-Wicket's (8.11) and go; language python3, netconf ssh, management-instance and the outbound-ssh client were there before and stay",
+  "inverse_removed_prefixes": [
+    "system extensions extension-service application file jwicket"
+  ],
+  "needs": [
+    "--lab-hardware",
+    "--ack-managed",
+    "--adopt"
+  ],
+  "refusals": [
+    "R-MODEL",
+    "R-MANAGED",
+    "R-FOREIGN"
+  ]
+}

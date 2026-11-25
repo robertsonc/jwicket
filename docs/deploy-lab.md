@@ -13,6 +13,19 @@
 > engine, which is a security posture change in its own right. Every configuration change below is
 > made with `commit confirmed 5`, so Junos rolls it back by itself unless you confirm it.
 
+> [!NOTE]
+> **Installers.** [docs/install.md](install.md) describes the lab-gated installers of
+> [Spec 006](specs/006-installation.md), which automate these steps on a lab device: a dry run by
+> default, the plan's diff and the posture warning, the lab device's host name typed by the
+> operator, and a `commit confirmed` per stage that they confirm only after a health check. None
+> has run on a device, so every device step of theirs is unverified until Q-INST-06, except where
+> the SRX4100 run below verified the same statement by hand. This procedure stays the reference:
+> its verified steps are the only ones that have run on a device, and it is the fallback when an
+> installer step is refused. Revised from that run: they never create `/var/db/jwicket` (step 3's
+> root step stays yours, and they refuse until it is done), and by default (`--access tls`) they set
+> up the [TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused) instead of step 7's
+> tunnel.
+
 **Where this has run.** Written for a disposable vSRX. Run once end to end, on 24 November 2026, on
 the project owner's lab SRX4100 (hardware, Junos 25.2R1-S1.4), at the owner's direction
 ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). That run is the source of every "verified on SRX4100" mark below, and it
@@ -36,11 +49,13 @@ What the procedure changes on the lab box, and nothing else:
 | `system scripts language python3` and `system extensions extension-service` entries | Steps 4 and 6 |
 | `system services netconf ssh`, for the `netconf` sign-in backend | Step 5 |
 | A lab-only account in a read-only class (and that class, if you create one), for Q-AUTH-01 | Step 7 |
-| `system services ssh tcp-forwarding`, only if step 7 needed it | Step 7 |
+| `system services ssh allow-tcp-forwarding` (or, on older releases, `tcp-forwarding`), only if step 7 needed it | Step 7 |
 
-What it never does: bind anything but `127.0.0.1`, load `junos/zone-access.set`, touch J-Web
-(`system services web-management`), or open TCP 8443 in a cloud security group. The UI is reached only
-through an SSH tunnel (step 7).
+What it never does: bind anything but `127.0.0.1` (except the
+[TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused), which binds the fxp0
+address with TLS, on the lab owner's approval), load `junos/zone-access.set`, touch J-Web
+(`system services web-management`), or open TCP 8443 in a cloud security group. The UI is reached
+through an SSH tunnel (step 7), or, in that variant, over TLS on fxp0.
 
 ## How to read the verification marks
 
@@ -58,9 +73,24 @@ one vSRX, Junos 24.4R2-S3.5, 24 November 2026 UTC, with the file name `wicket_sp
 - **Unverified**: not exercised by the spike. Check a configuration statement with `?` in the CLI
   before you commit it, and write down what happened: that is qualification evidence too. Each
   unverified item names the qualification test whose record settles it.
+- **Proposed (Spec 006)**: a change to this procedure that [Spec 006](specs/006-installation.md)
+  proposes, so that the manual steps follow the same safety rules as the installers. The lab owner
+  decides each one (governance D2), with the security reviewer (D1) where a step changes the
+  device's security posture; both roles are unnamed, so none is approved yet. Where the earlier form
+  differs, it is named beside the change.
 
 Shell steps (`ls`, `chmod`, `mkdir`, `rm`, `openssl`, `sysctl`) run in the Junos shell
 (`start shell`), as the spike's did.
+
+The proposed changes, all dated 2026-11-24:
+
+| Step | Proposed change | Why |
+| --- | --- | --- |
+| 0, and before every commit | `show system commit`; stop while the newest entry (`0`) ends with `commit confirmed, rollback in <n>mins`, or the output starts with `commit requested by` (Juniper's sample wording) | A `commit` or `commit check` confirms a pending `commit confirmed` (verified); that yours confirms someone else's is inferred (Q-INST-03) |
+| 4 to 7, 9, Debugging | Confirm with `commit comment "..."`, never `commit check` | 24.2R1 and later can require a comment on every commit (verified); `commit check` is not a dry run while a confirmed commit is pending |
+| 6 | Check the build in the start line | The line names the version and payload digest (Spec 006 change D3), so the old process cannot pass for the new one |
+| 7 | `ssh -L 127.0.0.1:8443:127.0.0.1:8443` | The explicit bind keeps the forwarded port off the workstation's network |
+| 9 | Keep `language python3` while other Python scripts exist; delete files only once no J-Wicket process runs | Removing the statement stops every unsigned Python script on the box; whether deleting the stanzas stops the daemon is unverified, so a process still running is stopped first |
 
 ## 0. Before you start
 
@@ -89,6 +119,23 @@ show configuration system management-instance
 
 If `system management-instance` is set, fxp0 is in the `mgmt_junos` routing instance; that
 matters only for the [TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused).
+
+**Proposed (Spec 006): check for a pending commit, and stop while one is there.**
+
+```
+show system commit
+```
+
+`show system commit` shows when a rollback is scheduled after a `commit confirmed` (verified,
+Juniper's commit guide). If the newest entry (`0`) ends with `commit confirmed, rollback in <n>mins`
+(Juniper's sample: `0   2022-05-06 06:33:42 PDT by root via cli commit confirmed, rollback in
+10mins`), someone's confirmed commit is waiting for its confirmation; if the output starts with
+`commit requested by`, a `commit at` is scheduled. Stop, and wait until neither shows. Any `commit` you type meanwhile, and any
+`commit check`, would confirm their change and remove their safety net ("To confirm a commit, enter
+either a commit or commit check command.", verified, Juniper's `commit` reference; that it confirms
+another user's or session's commit is inferred, Q-INST-03). Repeat the
+check, as `run show system commit` from configuration mode (`run` is verified), before each
+`commit confirmed 5` below.
 
 ## 1. Build and record the bundle (workstation)
 
@@ -163,14 +210,20 @@ ls -ld /var/db/jwicket
 
 Expect `drwx------` and `<user>`. On SRX4100 25.2R1-S1.4 a super-user-class account may **not**
 create a directory under `/var/db`: both this `mkdir` and the CLI's `file make-directory` were
-refused with `Permission denied` (verified on SRX4100). The fallback works (verified on SRX4100):
-as root, in the shell,
+refused with `Permission denied` (verified on SRX4100). The fallback: as root, in the shell,
 
 ```
 mkdir -m 700 /var/db/jwicket && chown <user> /var/db/jwicket
 ```
+On the SRX4100 root made the directory and gave it to the account with `chown` (verified on
+SRX4100); the run did not record root's exact command, so that `-m 700` gives `drwx------` is
+inferred: check it with `ls -ld /var/db/jwicket` as above.
 If neither works, stop and record it: moving the settings file elsewhere is a code change, not a lab
 workaround.
+
+The installers never create this directory: their dry run lists `/var/db` (read only), and while
+`jwicket` is absent or untrusted they refuse (R-STATEDIR) and print the root step above
+([install guide](install.md#the-state-directory-once-as-root)).
 
 Write `jwicket.ini` on the workstation. This example lists every setting with its default; the three
 values marked "lab" are the only departures from the defaults:
@@ -282,12 +335,19 @@ set system scripts language python3
 set system extensions extension-service application file jwicket_selftest.py username <user>
 set system extensions extension-service application file jwicket_probe.py username <user>
 commit confirmed 5
-commit
+commit comment "jwicket lab: diagnostics confirmed"
 ```
 
-The statements are verified syntax (with the spike's file name). The second `commit`, within five
-minutes, confirms the change; without it Junos rolls back (from the spike packet's run instructions;
-not in the recorded results).
+The statements are verified syntax (with the spike's file name). The second commit, within five
+minutes, confirms the change; without it Junos rolls back (from the spike packet's run instructions,
+where it is a plain `commit`; not in the recorded results). **Proposed (Spec 006):** confirm with
+`commit comment "..."`, as here and in every step below. Junos 24.2R1 and later can require a
+comment on every commit (`force-commit-log`, verified), and the comment marks your confirm in
+`show system commit`. Never use `commit check` in this procedure: while a confirmed commit is pending it
+is not a dry run, because it confirms that commit, and it cannot carry a comment (both verified).
+On a box that requires a comment, give the first line one too:
+`commit confirmed 5 comment "jwicket lab: diagnostics"` (inferred from the documented
+`commit confirmed comment "..."`).
 
 Then, in operational mode:
 
@@ -311,6 +371,14 @@ If the self-test fails with an `ImportError` naming a `typing` or standard-libra
 bundle uses something newer than the device's Python: record the version and the error, and stop.
 That is how the 3.9-era bundle failed on 25.2 before the floor moved to 3.7.
 
+When `/var/db/jwicket` passes the daemon's trust rule (owned by `<user>`, not group- or
+other-writable, not a link), both diagnostics also write the same JSON to
+`/var/db/jwicket/selftest-result.json` and `probe-result.json`, mode 0600 (Spec 006 change D2; never
+run on a device): `file show /var/db/jwicket/selftest-result.json` reads it back without the shell.
+A file left from an earlier run is not removed by the bundle, so delete both
+(`file delete /var/db/jwicket/selftest-result.json`, and the same for the probe's) before you start
+the diagnostics again.
+
 The argument form, `request extension-service start jwicket.py --bundle-self-test` (or `--probe`),
 is unverified (Q-RT-01 records it if tried), and spike finding F1 suggests it fails: Junos's script
 runner parsed `--flag` options itself and exited with "missing script filename" when they were
@@ -325,7 +393,7 @@ over SSH must be on. Unverified: the spike did not run this statement (Q-AUTH-01
 ```
 set system services netconf ssh
 commit confirmed 5
-commit
+commit comment "jwicket lab: netconf confirmed"
 ```
 
 This is a configuration change with reach beyond J-Wicket: it starts NETCONF over SSH on TCP 830 for
@@ -358,8 +426,14 @@ file show /var/db/jwicket/jwicket.log
 ```
 
 Expect `TLS is off; listening on loopback only (127.0.0.1)` and
-`listening on 127.0.0.1:8443 tls=False backend=netconf routing_instance=default` (verified on SRX4100). If those lines are there, confirm with
-`commit`. If not, do not confirm: let the change roll back, and use "Debugging" below. A refused start
+`listening on 127.0.0.1:8443 tls=False backend=netconf routing_instance=default version=<version> payload=<16 hex>`,
+where `<16 hex>` is the start of step 1's `payload_sha256`. The line up to
+`routing_instance=default` is verified on SRX4100; the `version=` and `payload=` fields (Spec 006
+change D3) were not in that build and have not run on a device.
+**Proposed (Spec 006):** check that value, and that the line appears once after your commit: an
+older process still running, or a daemon restarting in a loop, would otherwise pass. If those lines
+are there, confirm with `commit comment "jwicket lab: daemon confirmed"` (earlier: `commit`). If
+not, do not confirm: let the change roll back, and use "Debugging" below. A refused start
 writes its reason (`startup refused: ...`) to stderr, and also to `/var/db/jwicket/startup-refused.txt`
 when that directory exists, because the log file is opened only after the settings are accepted:
 `file show /var/db/jwicket/startup-refused.txt`. One refusal happens before the settings are read:
@@ -379,8 +453,13 @@ brings it back within seconds (verified on SRX4100). `pkill` is not on the box.
 On the workstation:
 
 ```
-ssh -L 8443:127.0.0.1:8443 <user>@<device>
+ssh -L 127.0.0.1:8443:127.0.0.1:8443 <user>@<device>
 ```
+
+**Proposed (Spec 006)**, earlier `ssh -L 8443:127.0.0.1:8443`: the leading `127.0.0.1:` binds the
+workstation end to loopback whatever the SSH client's `GatewayPorts` setting says ("By default, the
+local port is bound in accordance with the GatewayPorts setting.", verified, OpenSSH `ssh(1)`), so
+nobody else on the workstation's network can use the tunnel.
 
 Then browse to `http://127.0.0.1:8443/` on the workstation while the SSH session stays open. The
 listener stays on the device's loopback: nothing listens on fxp0 or a revenue port, no security zone
@@ -396,19 +475,21 @@ overwrite each other's cookie, and a restart signs everyone out.
 
 Whether the SSH service allows TCP forwarding depends on the release (Q-NET-03). On SRX4100
 25.2R1-S1.4 it does not: the tunnel reports `channel 1: open failed: administratively prohibited`,
-and `set system services ssh tcp-forwarding` is a syntax error there (verified on SRX4100). On
-another release, check that statement with `?` (a configuration change; lab box only;
-`commit confirmed 5`, then `commit`). If the tunnel cannot work, use the
+and `set system services ssh tcp-forwarding` is a syntax error there (verified on SRX4100). The
+SRX configuration schema at 23.2R1 marks `tcp-forwarding` deprecated and names `set system services
+ssh allow-tcp-forwarding` instead; it was not tried on the SRX4100 (**unverified**, Q-NET-03). Check
+it with `?` (a configuration change; lab box only; `commit confirmed 5`, then `commit comment
+"..."`). If the tunnel cannot work, use the
 [TLS-on-fxp0 variant](#variant-tls-on-fxp0-when-the-tunnel-is-refused).
 
 Sign in with a Junos user name and password. Each operator's login class decides what they see: a
 panel their class may not read shows "denied" instead of data. For Q-AUTH-01, sign in once with a
 super-user account and once with a lab-only account in a read-only class (creating that account,
 and a class for it if you make one, is a configuration change: `commit confirmed 5`, then
-`commit`), and record what each sees. Give every lab account a unique, strong password that is
-used nowhere else: in vLabs, SSH (22) and NETCONF (830) are forwarded to the vSRX from the internet
-(step 5), so any account on the box can be tried from outside for as long as it exists. Step 9
-deletes the lab-only account.
+`commit comment "..."`), and record what each sees. Give every lab account a unique, strong
+password that is used nowhere else: in vLabs, SSH (22) and NETCONF (830) are forwarded to the vSRX
+from the internet (step 5), so any account on the box can be tried from outside for as long as it
+exists. Step 9 deletes the lab-only account.
 
 A wrong password shows "Sign-in failed. Check the user name and password." and is audited as
 `login_failed` with a `user_hash`, never the name; the device logs `SSHD_LOGIN_FAILED ... from
@@ -457,11 +538,18 @@ and are Q-NET-01's.
    your choice; the run used 9443.
 
 3. **Restart the daemon** (`kill <pid>`, step 6) and check the log for
-   `listening on <fxp0 address>:9443 tls=True backend=netconf routing_instance=mgmt_junos`.
+   `listening on <fxp0 address>:9443 tls=True backend=netconf routing_instance=mgmt_junos version=<version> payload=<16 hex>`.
+   As in step 6, the line up to `routing_instance=mgmt_junos` is verified on SRX4100; the
+   `version=` and `payload=` fields (Spec 006 change D3) have not run on a device.
 
 4. **Browse** to `https://<fxp0 address>:9443/` from a host on the management network, accept the
    certificate after checking its fingerprint, and sign in as in step 7. TLS 1.2 and 1.3 were
    offered (verified on SRX4100); plain HTTP to the port gets no answer.
+
+The installers' default, `--access tls`, sets up this variant: these settings, with
+`routing_instance` from step 0's `system management-instance`, and the certificate (M1 to M3 make it
+in memory on the workstation and send it by SCP; M4 and M6 use step 1 above). Unverified on a device
+(Q-INST-06); see the [install guide](install.md#choose-the-access-mode).
 
 ## Debugging a start failure (verified procedure)
 
@@ -483,7 +571,7 @@ errors print to the terminal:
 ```
 delete system extensions extension-service application file jwicket.py daemonize
 commit confirmed 5
-commit
+commit comment "jwicket lab: debugging, no daemonize"
 ```
 
 ```
@@ -495,7 +583,7 @@ foreground run (interrupting the CLI command, or `request extension-service stop
 unverified (record it with Q-RT-02). This is also where the unverified argument form of step 4
 would be tried. To go back to daemon mode,
 `set system extensions extension-service application file jwicket.py daemonize`, then
-`commit confirmed 5` and `commit`.
+`commit confirmed 5` and `commit comment "..."`.
 
 ## Variant: `lab-token` backend
 
@@ -539,19 +627,30 @@ delete system services netconf ssh
 delete system scripts language
 delete system login user <lab-only account>
 commit confirmed 5
-commit
+commit comment "jwicket lab: removal confirmed"
 ```
 
 Unverified: these `delete` statements are the inverses of the `set` statements above, but the spike
 only ran `delete system services rest`. Check each with `?` first. Leave out
-`delete system scripts language` if anything else on the box relies on unsigned Python. If step 7
-created a login class or set TCP forwarding, add these lines to the same commit (also unverified;
-check each with `?`):
+`delete system scripts language` if anything else on the box relies on unsigned Python.
+**Proposed (Spec 006), the ownership rule:** keep `system scripts language python3` while any other
+Python script is configured (a commit, op, event or SNMP script whose name ends in `.py`, or an
+extension-service file that is not one of J-Wicket's three) or present in `/var/db/scripts/commit`,
+`op`, `event`, `snmp` or `jet`. Check with `show configuration system scripts` (commit, op and SNMP
+scripts), `show configuration event-options event-script` (event scripts are configured there, not under
+`system scripts`: junos-es 23.2R1 conf YANG, verified schema path; the command unverified on a device),
+`show configuration system extensions` and `file list /var/db/scripts/<directory>` for each of the
+five. Removing the statement stops every unsigned Python script on the box, not only J-Wicket.
+
+If step 7 created a login class or set TCP forwarding, add these lines to the same commit (also
+unverified; check each with `?`):
 
 ```
 delete system login class <lab-only class>
-delete system services ssh tcp-forwarding
+delete system services ssh allow-tcp-forwarding
 ```
+
+(or `delete system services ssh tcp-forwarding`, if that is the statement you added).
 
 The lab-only account matters most: with SSH and NETCONF reachable from outside in vLabs, a leftover
 account and its password stay exposed.
@@ -559,7 +658,18 @@ account and its password stay exposed.
 Whether deleting the configuration stops a running daemon is unverified. In the shell, check with
 `ps ax | grep jwicket` (the spike's daemon showed as `cscript -mjet -Q3 -j -f <file> -J<user>`), and
 stop a leftover process with `kill <pid>`; without `respawn-on-normal-exit` configured, Junos does
-not restart it (verified). Then remove the files:
+not restart it (verified). **Proposed (Spec 006), the process check:** remove the files only when no
+J-Wicket process is left. Also check without the shell, in operational mode:
+
+```
+show extension-service status all
+```
+
+It lists the running Python extension-service applications with their `Process-id`, or prints
+`warning: No active extension-services` (verified, Juniper's `show extension-service status`
+reference); neither it nor `ps ax | grep jwicket` may show `jwicket.py`, `jwicket_selftest.py` or
+`jwicket_probe.py`. The installers stop with exit 8 and keep the files in that case. Then remove the
+files:
 
 ```
 rm /var/db/scripts/jet/jwicket.py /var/db/scripts/jet/jwicket_selftest.py /var/db/scripts/jet/jwicket_probe.py
@@ -567,5 +677,12 @@ rm -r /var/db/jwicket        # also removes tls.key and tls.crt from the TLS var
 ls /var/db/scripts/jet/
 ```
 
-The last listing should show only what was there before, such as Juniper's own applications. Finally,
-delete the disposable vSRX itself if the lab allows it.
+The last listing should show only what was there before, such as Juniper's own applications.
+Removing `/var/db/jwicket` itself likely needs root, as creating it did (inferred; this step was not
+run on the SRX4100).
+
+After an installer's uninstall, this step is still needed for what the installers never remove: a
+lab-only account or class, or `allow-tcp-forwarding` (or `tcp-forwarding`), made by hand in step 7, and `/var/db/jwicket` itself,
+which root removes once it is empty (`rmdir /var/db/jwicket`, unverified). Remove those as above. The
+rollback history also keeps the removed statements (inferred). Finally, delete the disposable vSRX
+itself if the lab allows it.

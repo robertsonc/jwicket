@@ -1,0 +1,12 @@
+{
+  "bootstrap": {
+    "method": "workstation",
+    "nonce": "k3v9qt"
+  },
+  "description": "This installer's own NETCONF bootstrap, pending, nonce k3v9qt.",
+  "inverse_note": "the pending bootstrap is part of this run: the original is the state before it",
+  "inverse_removed_prefixes": [
+    "system services netconf ssh"
+  ],
+  "refusals": []
+}

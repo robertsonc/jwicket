@@ -1,0 +1,9 @@
+{
+  "description": "A physical model: R-MODEL, which --lab-hardware overrides (then the typed lab-only attestation).",
+  "needs": [
+    "--lab-hardware"
+  ],
+  "refusals": [
+    "R-MODEL"
+  ]
+}

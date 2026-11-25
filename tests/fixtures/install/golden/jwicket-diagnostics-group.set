@@ -1,0 +1,7 @@
+set groups jwicket system scripts language python3
+set groups jwicket system extensions extension-service application file jwicket_selftest.py username labadmin
+set groups jwicket system extensions extension-service application file jwicket_selftest.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+set groups jwicket system extensions extension-service application file jwicket_probe.py username labadmin
+set groups jwicket system extensions extension-service application file jwicket_probe.py checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+set groups jwicket system services netconf ssh
+set apply-groups jwicket

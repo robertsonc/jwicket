@@ -1,0 +1,9 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2/junos">
+  <chassis-cluster-status>
+    <cluster-id>1</cluster-id>
+    <redundancy-group>
+      <redundancy-group-id>0</redundancy-group-id>
+    </redundancy-group>
+  </chassis-cluster-status>
+</rpc-reply>

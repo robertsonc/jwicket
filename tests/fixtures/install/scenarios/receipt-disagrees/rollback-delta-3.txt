@@ -1,0 +1,9 @@
+[edit system extensions extension-service application]
++    file jwicket_selftest.py {
++        username labadmin;
++        checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
++    }
++    file jwicket_probe.py {
++        username labadmin;
++        checksum sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
++    }

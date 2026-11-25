@@ -1,0 +1,4 @@
+{
+  "description": "Commit comments with a Jinja lookup, quotes and a newline: kept out of parsed state and of every rendering.",
+  "refusals": []
+}

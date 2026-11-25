@@ -1,0 +1,10 @@
+{
+  "description": "The running install of an earlier build (checksums and files of OLD_SHA).",
+  "inverse_note": "already installed: its history and record show this installer added all of it",
+  "inverse_removed_prefixes": [
+    "system extensions extension-service application file jwicket",
+    "system scripts language",
+    "system services netconf ssh"
+  ],
+  "refusals": []
+}

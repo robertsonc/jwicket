@@ -1,0 +1,11 @@
+# stage diagnostics: commit confirmed 5 (comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f diagnostics lab-install)
+[edit system extensions extension-service application file jwicket_probe.py checksum]
+-    sha-256 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d;
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+[edit system extensions extension-service application file jwicket_selftest.py checksum]
+-    sha-256 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d;
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+# stage runtime: commit confirmed 5 (comment: jwicket 0.1.0.dev1 sha256:1f1f1f1f1f1f runtime lab-install)
+[edit system extensions extension-service application file jwicket.py checksum]
+-    sha-256 3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d;
++    sha-256 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;

@@ -1,0 +1,38 @@
+This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
+LAB ONLY. This adds 'set system scripts language python3'. That lets any unsigned Python script owned by a super-user-class account run on this device's routing engine, not only J-Wicket: a change to the device's security posture. J-Wicket is not qualified for production (gate G1 has not passed). Continue only on a disposable lab device you are allowed to change.
+Check that your CLI prompt shows labadmin@<the lab device you intend> before unit A.
+Unit A (device-configuration): bootstrap: open configuration mode
+Status: 'run' verified; '| no-more' inferred
+```
+configure exclusive
+run show system commit | no-more
+```
+STOP if the newest entry (0) ends with 'commit confirmed, rollback in <n>mins' (a commit confirmed is waiting) or the output starts with 'commit requested by' (a pending 'commit at'); Juniper's sample wording, unverified on 24.4 (Q-INST-01): type 'exit'. Otherwise paste unit B.
+
+Unit B (device-configuration): bootstrap: the configuration change
+Status: statements documented (Spec 006 section 7.3); unverified on a device
+```
+set system scripts language python3
+set system scripts op file jwicket-install-op.py checksum sha-256 4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c
+show | compare | no-more
+```
+STOP unless 'show | compare' shows the same statements and nothing else. This rendering does not know which levels the device already has: Junos prints each change under the deepest level that already exists, and a new level (for example a new 'file jwicket.py' entry) as a braced block of '+' lines under that header, so the same statements may appear grouped that way rather than one leaf per header (illustrative; real samples are recorded by lab test Q-INST-01). For example:
+    [edit system scripts]
+    +    language python3;
+    [edit system scripts op file jwicket-install-op.py checksum]
+    +    sha-256 4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c;
+If the comparison does not list 'language python3', it was already set: that is fine.
+If it shows anything else, type 'rollback 0' and 'exit'.
+
+Unit C (device-configuration): bootstrap: commit confirmed (not confirmed by you)
+Status: inferred to combine minutes and comment
+```
+commit confirmed 10 comment "jwicket-bootstrap op"
+```
+Deadline: 10 minutes. The installer confirms this commit only after its own checks and your typed host name; otherwise Junos removes it.
+
+Unit D (device-configuration): bootstrap: leave configuration mode
+```
+exit
+```
+Keep this CLI session open until the installer reports that it confirmed the bootstrap: whether closing a CLI session rolls back its pending 'commit confirmed' early is unknown (lab test Q-INST-03). Do not type 'commit' to confirm it yourself: the installer confirms it only after its own checks and your typed host name. If you stop here, Junos removes it at its deadline.

@@ -1,0 +1,46 @@
+<!-- SYNTHETIC: shaped from the junos-es 23.2R1 YANG and PyEZ 2.8.3 source; not captured from a device (Q-INST-01). -->
+<!-- The select-only configuration read of spec 8.3: what the lab run left (evidence README, "Configuration left on the box"), netconf ssh (already there, deploy-lab step 5), management-instance and the central manager's outbound-ssh client. -->
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.2R1/junos">
+  <configuration>
+    <system>
+      <host-name>lab-srx-1</host-name>
+      <management-instance/>
+      <scripts>
+        <language>python3</language>
+      </scripts>
+      <extensions>
+        <extension-service>
+          <application>
+            <file>
+              <name>jwicket.py</name>
+              <daemonize/>
+              <respawn-on-normal-exit/>
+              <username>labadmin</username>
+            </file>
+            <file>
+              <name>jwicket_probe.py</name>
+              <username>labadmin</username>
+            </file>
+            <file>
+              <name>jwicket_selftest.py</name>
+              <username>labadmin</username>
+            </file>
+          </application>
+        </extension-service>
+      </extensions>
+      <services>
+        <netconf>
+          <ssh/>
+        </netconf>
+        <outbound-ssh>
+          <client>
+            <name>sd-cloud</name>
+            <secret>$9$FIXTURE-PLACEHOLDER-NOT-A-SECRET</secret>
+            <device-id>FIXTURE-DEVICE-ID</device-id>
+            <services>netconf</services>
+          </client>
+        </outbound-ssh>
+      </services>
+    </system>
+  </configuration>
+</rpc-reply>
