@@ -1677,10 +1677,6 @@
   font-size: 11px;
 }
 
-.fd-mark rect {
-  fill: var(--gold);
-}
-
 .fd-svg .fd-srx-t {
   font: 800 12px var(--font-display);
   letter-spacing: .16em;

@@ -16,6 +16,7 @@
 // direction-changing character as a visible <tspan class="ctl-badge">U+202E</tspan> instead of
 // applying it, and titles and aria-labels go through format.plain() ("<U+202E>").
 
+import { logoMark } from '../brand.js';
 import { svg, visSvg } from '../dom.js';
 import { plain } from '../format.js';
 
@@ -224,13 +225,9 @@ export class FlowDiagram {
     return g;
   }
 
-  _stumps(x, y, s = 1) {
-    // The J-Wicket mark: three stumps and two bails, drawn small inside the SRX box.
-    const g = svg('g', { class: 'fd-mark', transform: `translate(${x} ${y}) scale(${s})`, 'aria-hidden': 'true' });
-    for (const sx of [0, 6, 12]) g.append(svg('rect', { x: sx, y: 4, width: 3.4, height: 14, rx: 1.7 }));
-    g.append(svg('rect', { x: -0.4, y: 0.6, width: 7.6, height: 2.4, rx: 1.2 }));
-    g.append(svg('rect', { x: 8, y: 0, width: 7.6, height: 2.4, rx: 1.2, transform: 'rotate(-14 11.8 1.2)' }));
-    return g;
+  _mark(x, y, size) {
+    // The J-Wicket emblem (brand.js), drawn small inside the SRX box: a size x size square at x, y.
+    return logoMark({ class: 'logo-mark fd-mark', x, y, width: size, height: size });
   }
 
   _zonePill(cx, y, zone, side) {
@@ -430,7 +427,7 @@ export class FlowDiagram {
     const cx = fx + fw / 2;
     const srx = svg('g', { class: 'fd-box fd-srx' });
     srx.append(svg('rect', { x: fx, y: top - 10, width: fw, height: 124, rx: 12, class: 'fd-node srx' }));
-    srx.append(this._stumps(fx + 12, top + 2, 0.9));
+    srx.append(this._mark(fx + 10, top, 18));
     srx.append(text(fx + 34, top + 14, 'SRX', 'fd-srx-t'));
     if (m.policyIndex) srx.append(this._policyId(fx + fw - 12, top + 14, m, 'id'));
     srx.append(text(cx, top + 38, m.policyPos ? `policy · rule ${m.policyPos.n} of ${m.policyPos.of}` : 'policy', 'fd-sub', { 'text-anchor': 'middle' }));
@@ -511,7 +508,7 @@ export class FlowDiagram {
     lanes();
     const srx = svg('g', { class: 'fd-box fd-srx' });
     srx.append(svg('rect', { x: x0, y, width: W, height: 100, rx: 12, class: 'fd-node srx' }));
-    srx.append(this._stumps(14, y + 12, 0.9));
+    srx.append(this._mark(12, y + 10, 18));
     srx.append(text(36, y + 24, 'SRX', 'fd-srx-t'));
     srx.append(m.policyIndex ? this._policyId(W - 14, y + 24, m, 'policy id', true) : text(W - 14, y + 24, 'policy', 'fd-sub', { 'text-anchor': 'end' }));
     srx.append(this._policy(cx, y + 50, m, 30));

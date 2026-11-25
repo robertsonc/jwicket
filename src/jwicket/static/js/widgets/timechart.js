@@ -73,15 +73,18 @@ export class TimeChart {
         keydown: (e) => this.onKey(e),
       },
     }, this.plotSvg, this.dots, this.cross, this.tip, this.empty);
-    this.plot.style.setProperty('--tc-h', `${height}px`);
     this.xStart = h('span', null, `${Math.round(windowMs / 60000)} min ago`);
     this.xEnd = h('span', null, 'now');
     const xAxis = h('div', { class: 'tc-x', 'aria-hidden': 'true' }, this.xStart, this.xEnd);
     this.table = h('div', { class: 'tc-table', hidden: true });
 
+    // The axis labels and the plot are siblings in the frame: both read --tc-h, so it goes on the
+    // frame. On the plot alone, the labels fell back to the 132 px default and sat too high.
+    const frame = h('div', { class: 'tc-frame' }, yAxis, this.plot);
+    frame.style.setProperty('--tc-h', `${height}px`);
     this.el = h('figure', { class: 'tc' },
       h('figcaption', { class: 'tc-head' }, h('span', { class: 'tc-title' }, title), legend, this.tableBtn),
-      h('div', { class: 'tc-frame' }, yAxis, this.plot),
+      frame,
       xAxis,
       this.table);
   }

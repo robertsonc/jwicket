@@ -14,6 +14,7 @@
 import * as dom from './dom.js';
 import * as format from './format.js';
 import * as api from './api.js';
+import { SCHEMES, logoMark, schemeId } from './brand.js';
 import { Palette } from './widgets/palette.js';
 
 const { h, icon, put, stateCard, vis } = dom;
@@ -29,12 +30,6 @@ const VIEWS = [
 const VIEW_BY_ID = new Map(VIEWS.map((v) => [v.id, v]));
 const SCOPE_RE = /^(root|lsys:[A-Za-z0-9._-]{1,63}|tenant:[A-Za-z0-9._-]{1,63})$/;
 const PREF = { theme: 'jwicket.theme', scheme: 'jwicket.scheme', density: 'jwicket.density', rail: 'jwicket.rail', announce: 'jwicket.announce' };
-// Colour schemes (app.css "colour schemes"); the first is the default and needs no data-scheme.
-const SCHEMES = [
-  { id: 'hpe', label: 'HPE', detail: 'HPE brand: green accents on slate' },
-  { id: 'obsidian', label: 'Obsidian & Phosphor', detail: 'NOC: cyan telemetry, teal healthy, coral critical' },
-  { id: 'nordic', label: 'Nordic Steel', detail: 'Colourblind-safe: ice blue allow, magenta deny' },
-];
 const ANNOUNCE_GAP_MS = 10000;
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
 const SEP = ' · ';
@@ -146,20 +141,22 @@ function toggleTheme() {
   say(`${next === 'light' ? 'Day' : 'Night'} theme`);
 }
 
+// Colour schemes (brand.js, app.css "colour schemes"). data-scheme on <html> always names one: index.html
+// sets the default so the first paint has it, and applyScheme() replaces it with a stored choice.
 function currentScheme() {
-  return document.documentElement.dataset.scheme || SCHEMES[0].id;
+  return schemeId(document.documentElement.dataset.scheme);
 }
 
+/** Show a scheme; nothing stored or an unknown value gets the default (brand.js). */
 function applyScheme(id) {
-  const root = document.documentElement;
-  if (SCHEMES.some((s) => s.id === id) && id !== SCHEMES[0].id) root.dataset.scheme = id;
-  else delete root.dataset.scheme;
+  document.documentElement.dataset.scheme = schemeId(id);
 }
 
+/** The user's choice: shown and stored as given, the default included, so it outlasts a new default. */
 function setScheme(id) {
-  const scheme = SCHEMES.find((s) => s.id === id) || SCHEMES[0];
+  const scheme = SCHEMES.find((s) => s.id === schemeId(id));
   applyScheme(scheme.id);
-  prefSet(PREF.scheme, scheme.id === SCHEMES[0].id ? null : scheme.id);
+  prefSet(PREF.scheme, scheme.id);
   if (TB.scheme && TB.scheme.value !== scheme.id) TB.scheme.value = scheme.id;
   say(`${scheme.label} colour scheme`);
 }
@@ -1132,17 +1129,12 @@ function setScope(id) {
 
 // ---- top bar -------------------------------------------------------------------------------------
 
-function logoMark() {
-  const { svg } = dom;
-  return svg(
-    'svg',
-    { class: 'logo-mark', viewBox: '0 0 48 48', 'aria-hidden': 'true', focusable: 'false' },
-    svg('rect', { class: 'lg-stump', x: 10, y: 15, width: 6, height: 29, rx: 3 }),
-    svg('rect', { class: 'lg-stump', x: 21, y: 15, width: 6, height: 29, rx: 3 }),
-    svg('rect', { class: 'lg-stump', x: 32, y: 15, width: 6, height: 29, rx: 3 }),
-    svg('rect', { class: 'lg-bail', x: 9.5, y: 8.6, width: 15, height: 4.6, rx: 2.3 }),
-    svg('rect', { class: 'lg-bail', x: 25, y: 4.4, width: 15, height: 4.6, rx: 2.3, transform: 'rotate(-17 32.5 6.7)' }),
-  );
+/**
+ * The wordmark as live text in the UI font, the hyphen in the brand mint. No hidden copy of the name:
+ * the link around it is named by its aria-label, and copied or found text reads "J-Wicket" once.
+ */
+function wordmark() {
+  return h('span', { class: 'wordmark' }, 'J', h('span', { class: 'wm-dash' }, '-'), 'Wicket');
 }
 
 function modelName(model) {
@@ -1202,7 +1194,9 @@ function buildTopbar() {
   TB.scheme = h(
     'select',
     { id: 'sel-scheme', class: 'tb-scheme', title: 'Colour scheme', 'aria-label': 'Colour scheme', on: { change: () => setScheme(TB.scheme.value) } },
-    SCHEMES.map((s) => h('option', { value: s.id, title: s.detail }, s.label)),
+    // Short names in the top bar, so the picker does not squeeze the device and context chips; the full
+    // name and description are the option's tooltip and the palette actions' labels.
+    SCHEMES.map((s) => h('option', { value: s.id, title: `${s.label}: ${s.detail}` }, s.short || s.label)),
   );
   TB.scheme.value = currentScheme();
   TB.search = h(
@@ -1223,7 +1217,7 @@ function buildTopbar() {
       'a',
       { class: 'tb-brand', href: '#/overview', 'aria-label': 'J-Wicket overview', on: { click: (e) => { e.preventDefault(); navigate('overview', {}); } } },
       logoMark(),
-      h('span', { class: 'wordmark' }, 'J-Wicket'),
+      wordmark(),
       h('span', { class: 'ro-badge', title: 'This build has no code path that changes the device configuration.' }, icon('lock'), 'READ-ONLY'),
     ),
     h('span', { class: 'tb-divider', 'aria-hidden': 'true' }),

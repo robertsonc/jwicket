@@ -53,6 +53,7 @@ DOCUMENT_SET = (
     "docs/governance.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "docs/brand/README.md",
 )
 
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
