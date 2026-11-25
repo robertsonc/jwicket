@@ -12,7 +12,7 @@
   <img src="docs/images/readme/sessions-live-filter.gif" width="900" alt="J-Wicket Sessions view on fixture data: a live flow-session table narrows as the filter dport:443 nat:dst bytes>1M is typed, the first term marked as run on the device and the other two in the browser, then a session's flow drawer opens showing the DNAT path from untrust to dmz">
 </p>
 
-*The Sessions view on the development server, polling every 2 s. `dport:443` is sent with the session-table read as an RPC parameter (gold DEVICE chip; here a fixture plays the device), `nat:dst bytes>1M` filters in the browser (sky BROWSER chips), and one session's flow drawer opens on its DNAT path. Synthetic fixture data, not read from a device.*
+*The Sessions view on the development server, polling every 2 s. `dport:443` is sent with the session-table read as an RPC parameter (green DEVICE chip; here a fixture plays the device), `nat:dst bytes>1M` filters in the browser (sky BROWSER chips), and one session's flow drawer opens on its DNAT path. Synthetic fixture data, not read from a device.*
 
 In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids have a manual Refresh and no live tail, export at most 100 rows, and filter the system log on Event and Message with `=` only; security policies are inline grid rows with no policy wizard; and six paths commit at once with no review step ([catalog](docs/catalog.md#key-findings), [ledger](docs/parity/jweb-24.4.csv)). J-Wicket starts with the reads, each designed to run as your own Junos login and to make sense to someone who does not know Junos yet. Its configuration path (reviewed diffs, confirmed commits and a preview-only policy builder) is specified, not built ([Spec 002](docs/specs/002-change-protocol.md), [Spec 003](docs/specs/003-firewall-policy-builder.md)).
 
@@ -69,7 +69,7 @@ It starts with these lines (the timestamp at the start of each line left out):
 ```text
 WARNING jwicket.devserver FIXTURE MODE: tests/fixtures/branch; users admin, auditor accept any non-empty password
 WARNING jwicket TLS is off; listening on loopback only (127.0.0.1). Reach it through an SSH tunnel.
-INFO jwicket listening on 127.0.0.1:8080 tls=False backend=fixture
+INFO jwicket listening on 127.0.0.1:8080 tls=False backend=fixture routing_instance=default
 INFO jwicket.audit {"backend": "fixture", "event": "start", "source": "local", "ts": "2026-11-24T16:40:48Z", "user": null, "version": "0.1.0.dev0"}
 ```
 
@@ -77,10 +77,11 @@ Open <http://127.0.0.1:8080/> and sign in as `admin` with any non-empty password
 
 1. **Sessions:** type `dport:443 nat:dst bytes>1M` and watch the chips say which terms ran where; click any address or port to add it, Alt-click to exclude it.
 2. **Logs:** pick `traffic-log`, type `ip:198.51.100.0/24 -dport:53`, then click a CLOSE line to decode it.
-3. **Policies:** open `allow-web` to see its resolved addresses and applications, then press the "no match → 2 global → deny-all" button under its zone pair to see how Junos picks a policy.
+3. **Policies:** open `allow-web` to see its resolved addresses and applications, then press the "no match → 1 global → deny-all" button under its zone pair to see how Junos picks a policy.
 4. **Ctrl+K**, type `deny`; or paste an address such as `10.10.3.4`.
-5. **Sign out and sign in as `auditor`**, a fixture user whose simulated login class is denied the configuration read: panels say DENIED instead of showing empty tables.
-6. **The cluster fixture:** stop the server, run `make dev DEV_FIXTURE=tests/fixtures/cluster-lsys` and sign in as `admin` or `lsys-a-admin` to see a two-node chassis cluster, a logical system and a deactivated tenant system in the scope picker.
+5. **Sign out and sign in as `auditor`**, a fixture user whose simulated login class is denied the configuration read and the data-plane monitoring read: panels say DENIED instead of showing empty tables.
+6. **The cluster fixture:** stop the server, run `make dev DEV_FIXTURE=tests/fixtures/cluster-lsys` and sign in as `admin` or `lsys-a-admin` to see a two-node chassis cluster, a logical system and a deactivated tenant system in the scope picker, and a synthetic two-node session table in Sessions.
+7. **The edge cases:** `make dev DEV_FIXTURE=tests/fixtures/branch-edge` shows deactivated statements, configuration comments, hidden characters in names and a configured time zone; `tests/fixtures/log-states` shows every log-source state.
 
 Port 8080 taken? Run `PYTHONPATH=src python3 -m jwicket.devserver --fixture tests/fixtures/branch --port 8301`. Stop the server with Ctrl+C.
 
@@ -91,7 +92,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # ruff 
 make test                                  # Python unit and HTTP integration tests
 make lint RUFF=.venv/bin/ruff              # ruff check src tests tools
 make typecheck MYPY=.venv/bin/mypy         # mypy --strict, Python 3.8 target (oldest mypy accepts)
-node --test tests/js/*.test.mjs            # query language and log parser, no packages
+node --test tests/js/*.test.mjs            # query language, log parser and UI helpers, no packages
 make bundle                                # build dist/jwicket.py, then self-test it isolated
 ```
 
@@ -119,7 +120,7 @@ Central managers (Security Director, Security Director Cloud and Mist) run off t
 
 | Status tag | Means |
 | --- | --- |
-| `built` | The code exists. The daemon, the query language and the log parser have automated tests that pass against synthetic fixtures. Browser-only views (for example the Overview, command palette, session drawer, histogram, themes and phone layout) have been exercised by hand on the development server, with no automated UI tests. Formal browser acceptance (AC-001-21, AC-004-20) is not signed off. The daemon, the Policies, Sessions and Logs reads, and sign-in have run once on a lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); that is not qualification. |
+| `built` | The code exists. The daemon, the query language and the log parser have automated tests that pass against synthetic fixtures. Browser-only views (for example the Overview, command palette, session drawer, histogram, themes and phone layout) have been exercised by hand on the development server, with no automated browser tests (Node tests cover some of their helpers). Formal browser acceptance (AC-001-21, AC-004-20) is not signed off. The daemon, the Policies, Sessions and Logs reads, and sign-in have run once on a lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); that is not qualification. |
 | `specified` | A spec covers it; nothing is built. |
 | `planned` | On the roadmap, with no spec. |
 
@@ -130,25 +131,25 @@ Reply formats are J-Wicket's reading of Juniper documentation until recorded rep
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/sessions-filter-dark.webp">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/readme/sessions-filter-light.webp">
-  <img src="docs/images/readme/sessions-filter-dark.webp" width="900" alt="J-Wicket Sessions view, fixture data: the query src:10.10.0.0/16 dport:443 nat:src bytes>1M split into device and browser filter chips, 66 of 70 sessions shown">
+  <img src="docs/images/readme/sessions-filter-dark.webp" width="900" alt="J-Wicket Sessions view, fixture data: the query src:10.10.0.0/16 dport:443 nat:src bytes>1M split into device and browser filter chips, 57 of 58 sessions shown">
 </picture>
 
-*`src:10.10.0.0/16 dport:443 nat:src bytes>1M`: gold DEVICE chips went into the RPC, sky BROWSER chips filter what came back (66 of 70 listed). The image follows your GitHub theme. Synthetic fixture data.*
+*`src:10.10.0.0/16 dport:443 nat:src bytes>1M`: green DEVICE chips went into the RPC, sky BROWSER chips filter what came back (57 of 58 listed); the gauge above is the table-wide count, read without your filters at most every 30 s and shown with its age between reads. The image follows your GitHub theme. Synthetic fixture data.*
 
 `show security flow session` as a polled live table, with device-side filters, a guard that refuses lists over 5,000 matches, live diff and rate, a live session drawer, cluster-aware rows and stamped export.
 
 <details>
 <summary>All 10 live-session features, and the session drawer</summary>
 
-- `built` **Live flow-session table** for the root system: reads `show security flow session` (RPC `get-flow-session-information`) on your own device session and re-reads every 2, 5, 10 or 30 s. "Live" is polling, never push; each poll costs two RPCs (one when the list is refused), plus one unfiltered summary for the gauge at most every 30 s while a device-side filter is set.
-- `built` **Filters pushed to Junos:** positive, AND-ed terms on `src`, `dst`, `sport`, `dport`, `proto`, `app` and `iface` become RPC parameters, so the device does the narrowing. Chips show which terms ran on the device and which in the browser.
+- `built` **Live flow-session table** for the root system: reads `show security flow session` (RPC `get-flow-session-information`) on your own device session and re-reads every 2, 5, 10 or 30 s. "Live" is polling, never push; each poll costs two RPCs (one when the list is refused), plus one unfiltered summary for the gauge at most every 30 s while a device-side filter is set; between those reads the gauge shows the last one, labelled "table-wide" with its age.
+- `built` **Filters pushed to Junos:** positive, AND-ed terms on `src`, `dst`, `sport`, `dport`, `proto`, `app` and `iface` become RPC parameters, so the device does the narrowing, when the value is one the RPC accepts (a port from 1 to 65535, a protocol keyword or number, an application-protocol type from the RPC's own list); any other value filters in the browser. Following that list for `app` is owner decision OD-14's default, which the owner may veto. Chips show which terms ran on the device and which in the browser.
 - `built` **A guard that fails closed:** a filtered summary is read first, and if more than 5,000 sessions match, J-Wicket lists none and offers narrowing filters instead (5,000 is J-Wicket's own threshold, [Spec 004 section 7.4](docs/specs/004-live-sessions-and-logs.md#74-cost-of-listing-and-the-refusal-threshold); cost on hardware is Q-LOAD-02). Rows are capped at 500 by default, 2,000 at most, with truncation stated.
-- `built` **Live diff and rate:** new sessions wash gold, ended ones stay struck through for one poll; bytes per second is computed between polls, with an in-cell bar.
+- `built` **Live diff and rate:** new sessions wash green (in the default scheme), ended ones stay struck through for one poll; bytes per second is computed between polls, with an in-cell bar.
 - `built` **Sixteen columns** (status, ID, policy, zones, protocol, source, destination, NAT, application, interfaces, bytes each way, packets, rate, age, idle timeout left, node), fitted to the width or chosen by hand; zones are derived from the policy inventory and marked when uncertain.
 - `built` **Click any value to filter, Alt-click to exclude**; facets show the top 8 sources, destinations, ports, applications, policies and interfaces by sessions, bytes or rate.
 - `built` **Session drawer that updates live:** a flow diagram (client, ingress zone and interface, SRX policy with "rule n of m", egress, server), the NAT translation in both directions, both wings, a traffic sparkline and the idle-timeout bar.
-- `built` **Chassis cluster aware:** counts never summed across nodes, rows labelled with node and SPU, backup copies hidden by default with a count. Element names are inferred and no fixture serves cluster sessions yet (Q-HA-01).
-- `built` **Explicit states instead of an empty table:** too many to list, count unknown, denied, unsupported, failed, no match on the device or in the browser.
+- `built` **Chassis cluster aware:** counts never summed across nodes (the gauge shows the largest node, with one line per node), rows labelled with node and SPU, backup copies hidden by default with a count. Element names are inferred (Q-HA-01); the `cluster-lsys` fixture serves a synthetic two-node session table, not a recorded one.
+- `built` **Explicit states instead of an empty table:** too many to list; count unknown, worded by its cause (after a failed count it tries again 15 s later, or at the poll interval if that is longer; while a filter has no count and the whole table is over 5,000 sessions it reads every 30 s; when the summary has no count at all, polling stops until you refresh); a filter the device rejected, with buttons to drop the device filters or apply them in the browser; denied, unsupported, failed, no match on the device or in the browser. A busy reply (another read of yours still running) only marks the last-read time.
 - `built` **Export** the rows on screen as CSV or JSON, stamped with device, read time, user and query, with spreadsheet formula injection neutralised; **copy a link** that holds the view and its filters, never device data.
 
 <p align="center">
@@ -174,15 +175,15 @@ Syslog files, the on-box reporting database and the security log buffer, tailed 
 <details>
 <summary>All 10 log features, and two more screenshots</summary>
 
-- `built` **Log sources found in the configuration:** every configured `system syslog file`, the on-box reporting database (ten report types) and the routing engine's security log buffer, with the sources that hold traffic logs badged.
-- `built` **"Where are my traffic logs?"** explains in one sentence where traffic logs go (security log mode, stream destinations, on-box reporting), using the documented default for the model and release when no mode is configured, instead of showing an empty pane.
-- `built` **Tail with a cursor:** each poll returns only new lines from `show log <file>`, read on your own session, never by opening `/var/log` as the daemon; rotation and gaps are marked. Junos still returns the whole file on every read (`get-log` has no tail parameter; cost on a device is Q-LOAD-01).
+- `built` **Log sources found in the configuration:** every configured `system syslog file`, the on-box reporting database (ten report types) and the routing engine's security log buffer, with the sources that hold traffic logs badged. A deactivated file, a `messages` file assumed because none is configured, on-box reports on a release older than 23.1R1 and disabled security logging each have their own label, and the buffer shows its log mode.
+- `built` **"Where are my traffic logs?"** explains in one sentence where traffic logs go (security log mode, stream destinations, on-box reporting), using the documented default for the model and release when no mode is configured, instead of showing an empty pane. It lists stream hosts and local stream files and shows the configured `security log format`.
+- `built` **Tail with a cursor:** each poll returns only new lines from `show log <file>`, read on your own session, never by opening `/var/log` as the daemon; rotation and gaps are marked, and the footer says how many new lines the last read brought. Junos still returns the whole file on every read (`get-log` has no tail parameter; cost on a device is Q-LOAD-01).
 - `built` **Highlighting as log syntax:** timestamp, host, process, pid, tag, priority, structured-data ID, keys and values, addresses, ports, protocols, zones, policies, interfaces, NAT addresses, numbers, strings, failure and success words, users. Zone, policy and interface names from the inventory are marked in free text, and the tokens always join back to the exact line (lossless, tested).
-- `built` **Formats read:** RFC 5424 (with its structured-data quirks), BSD syslog, and security log buffer events. Times without a zone are read as UTC, and a clock note says so.
+- `built` **Formats read:** RFC 5424 (with its structured-data quirks), BSD syslog, and security log buffer events. Times without a zone are read as UTC, and a clock note says so. When the configuration names a time zone this browser can convert (an IANA name such as `Europe/Paris`), "Show times in the device zone" reads them in that zone instead; it is the configured zone, which Junos applies to every process only after a reboot.
 - `built` **Compact rows for traffic logs:** a CREATE, CLOSE, DENY or UPDATE badge, the aligned 5-tuple, policy, zones, NAT, close reason, bytes and duration first, the rest faint.
 - `built` **Event-rate histogram** stacked by family: drag to set a time range, click a bar for its bucket; 15 min, 1 h, 24 h, custom and all presets.
-- `built` **Decoded line panel:** a plain-sentence decode ("Session 365425 closed (TCP RST) after 36 s"), the flow, the CREATE-to-CLOSE timeline for that session, whether it is still in the last Sessions read, every parsed field, and a `show security match-policies` command built from the line.
-- `built` **Hidden and direction-changing characters** in device text are shown as visible `U+XXXX` badges, and your own J-Wicket reads (`UI_NETCONF_CMD` lines for your user) are hidden by default with a counter.
+- `built` **Decoded line panel:** a plain-sentence decode ("Session 652898 closed (TCP SERVER RST) after 1 min 53 s"), the flow, the CREATE-to-CLOSE timeline for that session, whether it is still in the last Sessions read, every parsed field, and a `show security match-policies` command built from the line. The 28 close reasons Juniper documents (`TCP FIN`, `TCP CLIENT RST`, `idle Timeout`...) get badges there and a dot in the Reasons facet, coloured by J-Wicket's own grouping (normal, reset, timeout, error, administrative, other); any other reason is shown as written.
+- `built` **Hidden and direction-changing characters** in device text are shown as visible `U+XXXX` badges in every view, not only Logs, and no copyable CLI command is offered for a name with a line break or control character in it. Your own J-Wicket reads (`UI_NETCONF_CMD` lines for your user) are hidden by default with a counter.
 - `built` **Export the filtered lines** as raw `.log`, CSV or JSON: every line held in the browser's 2,000 to 10,000-line window; J-Web 24.4 exports at most 100 rows ([ledger](docs/parity/jweb-24.4.csv), row MON-LOGS-SESSION-EXPORT).
 
 <p align="center">
@@ -205,24 +206,24 @@ Syslog files, the on-box reporting database and the security log buffer, tailed 
   <img src="docs/images/readme/policy-detail.png" width="900" alt="J-Wicket Policies view on fixture data: policies in evaluation order with the allow-web detail drawer showing resolved addresses, resolved applications and its live session count">
 </p>
 
-*Policies in evaluation order (8 zone-pair, then 2 global, then deny-all), an inactive rule struck through, and the drawer for `allow-web`: policy 2 of 3 in its zone pair, 72 live sessions, addresses and applications resolved. Synthetic fixture data.*
+*Policies in evaluation order (8 zone-pair, then 2 global, then deny-all), an inactive rule struck through, and the drawer for `allow-web`: policy 2 of 3 in its zone pair, 105 live sessions in the last (unfiltered) Sessions poll, addresses and applications resolved. Synthetic fixture data.*
 
 Each scope's policies from the committed configuration, in Junos evaluation order, with inactive and group-inherited rules marked, addresses and applications resolved, and a `match-policies` command built for the device to answer.
 
 <details>
 <summary>All 11 policy-inventory features</summary>
 
-- `built` **Scopes never merged:** the root system, each logical system and each tenant system are separate inventories from the committed configuration. The scope lives in the URL, a non-root scope tints the top bar and prefixes every title, and a deactivated scope says its policies are not in effect.
-- `built` **Junos evaluation order:** each zone pair's policies in configuration order, then the global policies, then the default policy (configured, or "not configured (Junos default)" with deny-all). J-Wicket shows the order; it never claims which policy a flow matches ([ADR 0006](docs/adr/0006-device-explains-policy-decisions.md)).
-- `built` **Inactive configuration with its reason:** inactive policies keep their place, struck through, with the reason (the policy, its zone pair or global block, or a deactivated ancestor such as `[edit security policies]` or the logical system), and evaluation-order lists mark them "skipped: inactive".
+- `built` **Scopes never merged:** the root system, each logical system and each tenant system are separate inventories from the committed configuration. The scope lives in the URL, a non-root scope tints the top bar and prefixes every title, and a deactivated scope says its policies are not in effect. A logical or tenant system whose name has characters J-Wicket does not accept in a scope yet is listed but cannot be opened (owner decision OD-12's default, which the owner may veto).
+- `built` **Junos evaluation order:** each zone pair's policies in configuration order, then the global policies, then the default policy (configured, or "not configured (Junos default)" with deny-all; a deactivated `default-policy` is marked, and that deny-all then decides is J-Wicket's inference). J-Wicket shows the order; it never claims which policy a flow matches ([ADR 0006](docs/adr/0006-device-explains-policy-decisions.md)).
+- `built` **Inactive configuration with its reason:** inactive policies keep their place, struck through, with the reason (the policy, its zone pair or global block, or a deactivated ancestor such as `[edit security policies]` or the logical system), and evaluation-order lists mark them "skipped: inactive". Deactivated addresses, applications and set members a rule names are marked "deactivated" on the row.
 - `built` **Group provenance:** which configuration group a policy or object came from, which parts were inherited, and a warning that a direct change to a group-owned object may be overridden ([ADR 0005](docs/adr/0005-committed-config-with-provenance.md)).
 - `built` **Addresses and applications resolved** to their leaves through nested sets, following J-Wicket's reading of the Junos address-book lookup order (to be verified, Q-REL-01), with unresolved names and truncation (16 levels, 512 leaves) reported.
-- `built` **Nothing dropped silently:** settings J-Wicket does not model are reported per policy ("settings not shown"), never mistaken for absent.
+- `built` **Nothing dropped silently:** settings J-Wicket does not model are reported per policy ("settings not shown"), never mistaken for absent. Configuration comments (`annotate`) are shown as comments on rules, zone pairs and the default policy, and the Summary shows whether policy rematch is on, on extensive, off, or configured but deactivated.
 - `built` **"Explain a flow":** the three steps Junos takes, a form that builds a copyable `show security match-policies` command and a table filter ("a filter, not a match result").
 - `built` **Zone-pair matrix and summary cards:** counts by action per pair, live sessions per pair, arrow-key navigation; selecting a cell filters the table.
 - `built` **Live session count per policy** (root system) from the last Sessions poll in this tab, or one session-table read on request.
-- `built` **Stamped JSON and CSV export** of a fresh read, file named by host, scope and UTC time, formula injection neutralised.
-- `built` **Device facts:** host name, model, release, HA mode (standalone, chassis cluster with redundancy groups, Multinode High Availability, or unknown), and outbound-SSH central-management clients shown as "managed from" (that such a client means Security Director, Security Director Cloud or Mist is inferred, Q-MGMT-01; [ADR 0009](docs/adr/0009-central-management-coexistence.md)).
+- `built` **Stamped JSON and CSV export** of a fresh read, file named by host, scope and UTC time, formula injection neutralised. Before the file is saved, a toast shows its name, host, scope, read time and user; a CSV is refused, with the reason, when the configuration could not be read.
+- `built` **Device facts:** host name, model, release, HA mode (standalone, chassis cluster with redundancy groups, Multinode High Availability, or unknown), the configured time zone (or "not known" when it could not be read), and outbound-SSH central-management clients shown as "managed from" (that such a client means Security Director, Security Director Cloud or Mist is inferred, Q-MGMT-01; [ADR 0009](docs/adr/0009-central-management-coexistence.md)). A deactivated client is listed as deactivated, and central management reads "not known" when it could not be read, for example when the configuration read had to fall back to a narrower filter. The time zone is one more leaf of the existing configuration read, no new RPC (owner decision OD-05's default, which the owner may veto).
 
 </details>
 
@@ -234,9 +235,9 @@ Zones, address books and applications, each with where it is used, detail panels
 <summary>All 5 object features</summary>
 
 - `built` **Zones** with interfaces, screen and host-inbound system services and protocols at zone and interface level (exclusions and deactivated entries marked), and the policies that name each zone.
-- `built` **Address books:** global, attached and legacy zone books, entries (prefix, range, DNS, wildcard, set) and "used by" counts, direct or through a set, or "unused".
-- `built` **Applications and application sets** with protocol and ports, members (predefined `junos-*` marked) and usage. Predefined ports come from a table built into the UI, not from the device.
-- `built` **Detail panels** that expand sets, list the policies that use an object, and open Policies, Sessions or Logs filtered by it, with a copyable `show configuration` command.
+- `built` **Address books:** global, attached and legacy zone books, entries (prefix, range, DNS, wildcard, set) and "used by" counts, direct or through a set, or "unused". Deactivated books, attachments, entries and set members are shown as written but not in effect, and "used by" counts only active policies.
+- `built` **Applications and application sets** with protocol and ports, members (predefined `junos-*` marked) and usage. Predefined ports come from a table built into the UI, not from the device, and are tagged `catalog`; a set with predefined members shows `+N predefined`.
+- `built` **Detail panels** that expand sets, list the policies that use an object, and open Policies, Sessions or Logs filtered by it, with a copyable `show configuration` command. Configuration comments and settings J-Wicket does not display ("settings not shown") appear on every object type.
 - `built` **A query bar per tab** with its own keys and validation; `used:no` finds unused objects.
 
 </details>
@@ -244,18 +245,18 @@ Zones, address books and applications, each with where it is used, detail panels
 ### Console UX
 
 <p align="center">
-  <img src="docs/images/readme/overview.png" width="900" alt="J-Wicket Overview on fixture data: flow-session gauge and trend, top policies by live sessions, recent denies, warnings, zone-pair matrix and jump-to shortcuts">
+  <img src="docs/images/readme/overview.png" width="900" alt="J-Wicket Overview on fixture data: system health figures with 10-minute CPU and memory charts for the routing engine and data plane, then the flow-session gauge and trend, recent denies, warnings, and the top of the top-policies and zone-pair tiles">
 </p>
 
-*The Overview: session gauge and 10-minute trend, top policies, recent denies folded by flow, zone pairs, jump-to links built from the data. Synthetic fixture data.*
+*The Overview: system health first (routing-engine and data-plane CPU and memory charted over 10 minutes, with load, temperature and uptime), then the session gauge and 10-minute trend, recent denies folded by flow, warnings, top policies and zone pairs; the device card and jump-to links are further down. Synthetic fixture data.*
 
 An Overview with system health charts, a command palette, keyboard-first navigation, cross-links between every view, shareable URLs, three colour schemes in day and night, and a phone layout.
 
 <details>
 <summary>All 11 console features, and two more screenshots</summary>
 
-- `built` **Overview** with a LIVE, PAUSED or RETRYING pill: system health (routing-engine and data-plane CPU and memory charted over 10 minutes, with load, temperature and uptime, from `show chassis routing-engine` and `show security monitoring`, read on a lab SRX4100), flow-session gauge and trend, recent denies (repeats folded into one row with ×N), top policies by live sessions, a zone-pair mini-matrix, warnings word for word, the device card and "jump to" links computed from what was read.
-- `built` **Command palette** (Ctrl+K or Cmd+K): views, actions, incident presets, scopes, every policy and zone; paste an address, port or session ID to get the matching look-ups. Its footer says "Nothing here is sent anywhere."
+- `built` **Overview** with a LIVE, PAUSED or RETRYING pill: system health (routing-engine and data-plane CPU and memory charted over 10 minutes, with load, temperature and uptime, from `show chassis routing-engine` and `show security monitoring`, read on a lab SRX4100), flow-session gauge and trend, recent denies (repeats folded into one row with ×N), top policies by live sessions with the age of their read, a zone-pair mini-matrix, warnings word for word, the device card (with the configured time zone) and "jump to" links computed from what was read. The gauge reads the session summary alone every 30 s and the session list is read every 2 min while the Overview is open (owner decision OD-10's default, which the owner may veto).
+- `built` **Command palette** (Ctrl+K or Cmd+K): views, actions, incident presets, scopes, every policy and zone, and every address-book entry and set and every application and application set (each opens its Objects panel); paste an address, port or session ID to get the matching look-ups. With text typed, a Best match group comes first, and exact and prefix matches rank above looser ones. Its footer says "Nothing here is sent anywhere."
 - `built` **Keyboard first:** `g` then `o`, `p`, `s`, `l` or `b` for each view, `/` for the query bar, `j`/`k` and Enter, Space to pause live reads, `r` to refresh, `t` for the theme, `?` for the list.
 - `built` **Query bar** coloured as you type, with autocomplete from the current rows and the inventory, errors that point at the column, built-in help, and up to 20 saved queries per view (query text only, never device data).
 - `built` **Cross-links everywhere:** from a session to its policy and its logs, from a log line to the live session, from a policy or object to Sessions and Logs.
@@ -263,14 +264,14 @@ An Overview with system health charts, a command palette, keyboard-first navigat
 - `built` **Shareable URLs** that keep view, query, selection and scope, so Back, Forward and copy-link land on the same view.
 - `built` **Colour schemes:** HPE (the default), Obsidian & Phosphor for NOC screens, and Nordic Steel, colourblind-safe (allow is ice blue and deny magenta, never green against red); each in day and night, which follow the operating system until you pick one; every text colour measured at 4.5:1 or better. Dense or comfortable rows, and reduced motion honoured.
 - `built` **Phone layout:** bottom tab bar, session and log cards, full-screen detail sheet. Checked in emulated Chrome only, not on a real phone.
-- `built` **Accessibility aids:** skip link, throttled live announcements, ARIA listbox, combobox and grid roles, visible focus. Not tested with a screen reader and AA contrast not measured (UI-001-17 open), so no compliance is claimed.
-- `built` **Quiet when unattended:** live reads pause on a hidden tab and before the idle timeout, so an unattended console stops polling and its session can end.
+- `built` **Accessibility aids:** skip link, throttled live announcements, ARIA listbox, combobox and grid roles, visible focus. Not tested with a screen reader; text colours are measured (see colour schemes), but the AA and keyboard requirement as a whole (UI-001-17) is open, so no compliance is claimed.
+- `built` **Quiet when unattended:** live reads pause on a hidden tab and after 10 min without key or pointer input (5 min before the default 15-min idle timeout), and the LIVE pills say PAUSED. The browser marks its own polls as background, and those never keep a session alive, so an unattended session ends about 15 min (the default) after the last activity.
 
 <p align="center">
-  <img src="docs/images/readme/command-palette.webp" width="900" alt="J-Wicket command palette on fixture data: typing deny lists matching policies, saved filters and actions">
+  <img src="docs/images/readme/command-palette.webp" width="900" alt="J-Wicket command palette on fixture data: typing deny puts the deny-inbound policy first under Best match, then actions, the other deny policies and preset filters">
 </p>
 
-*Ctrl+K with `deny` typed. Synthetic fixture data.*
+*Ctrl+K with `deny` typed: the best match first, then actions, policies and filters. Synthetic fixture data.*
 
 <p align="center">
   <img src="docs/images/readme/mobile-sessions-logs.png" width="640" alt="J-Wicket on a phone-sized screen with fixture data: live sessions filtered by nat:dst and a highlighted traffic log filtered by -dport:53">
@@ -283,10 +284,10 @@ An Overview with system health charts, a command palette, keyboard-first navigat
 ### Sign-in and security model
 
 <p align="center">
-  <img src="docs/images/readme/auditor-denied.png" width="900" alt="J-Wicket Overview as a restricted user on fixture data: configuration-based panels show an explicit denied state while live sessions still render">
+  <img src="docs/images/readme/auditor-denied.png" width="900" alt="J-Wicket Overview as a restricted user on fixture data: configuration-based panels and the data-plane health figures show an explicit denied state while routing-engine health and live sessions still render">
 </p>
 
-*Signed in as `auditor`, whose simulated login class is denied the configuration read: those panels say DENIED while sessions still render. Synthetic fixture data.*
+*Signed in as `auditor`, whose simulated login class is denied the configuration read and the data-plane monitoring read (`show security monitoring`): those panels say DENIED or "denied for your login class", while routing-engine health and sessions still render. Synthetic fixture data.*
 
 Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with a fixed CSP, and settings that refuse to start when anything is unsafe.
 
@@ -295,11 +296,11 @@ Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with
 
 - `built` **Sign-in delegated to Junos:** your user name and password go to Junos in a NETCONF session to the device's own loopback, so Junos applies its authentication order (local, RADIUS, TACACS+) and your login class to every read. J-Wicket stores no password and has no roles ([ADR 0002](docs/adr/0002-junos-delegated-sign-in.md)). Worked for a super-user account on a lab SRX4100; least-privilege and remote-authentication users not tried yet (Q-AUTH-01, Q-AUTH-02, Q-AUTH-03).
 - `built` **Password only:** the daemon account's SSH keys and `~/.ssh/config` are never used; the NETCONF target must be a loopback address on a port below 1024.
-- `built` **Read-only RPC allowlist:** 15 `get-*` RPCs plus a separate configuration read with three constant filters that never fetch the whole configuration (password hashes) or all of `[edit security]` (IKE pre-shared keys). A test requires every allowlisted name to start with `get-` and checks that write RPCs are absent.
+- `built` **Read-only RPC allowlist:** 17 `get-*` RPCs plus a separate configuration read with three constant filters that never fetch the whole configuration (password hashes) or all of `[edit security]` (IKE pre-shared keys). A test requires every allowlisted name to start with `get-` and checks that write RPCs are absent.
 - `built` **No request value becomes command text:** scopes, filters, log files, report expressions, times and cursors are validated before any read; session filters travel as RPC parameters.
-- `built` **Bounded web server:** by default at most 8 connections, one 10 s deadline for the whole request and 8 KiB bodies (each setting can only be moved within a fixed range); 16 KiB of headers, fixed; GET and POST only, 11 routes, no upload route; the only POST routes are sign-in and sign-out.
+- `built` **Bounded web server:** by default at most 8 connections, one 10 s deadline for the whole request and 8 KiB bodies (each setting can only be moved within a fixed range); 16 KiB of headers, fixed; GET and POST only, 12 routes, no upload route; the only POST routes are sign-in and sign-out.
 - `built` **Browser hardening:** a fixed CSP (`default-src 'none'`, `'self'` only, Trusted Types required, no inline script or style), `nosniff`, `DENY` framing, `no-referrer`, `no-store`; `HttpOnly` `SameSite=Strict` cookie (`Secure` and `__Host-` under TLS); `Origin` must equal the page origin on sign-in and sign-out, and sign-out also needs the CSRF token header.
-- `built` **Web sessions:** fresh random token per sign-in (only its SHA-256 kept), by default 15-minute idle and 8-hour absolute timeouts, at most 4 web sessions at once (a sign-in over that cap is refused) and 2 per Junos user (a third sign-in by the same user closes their oldest); ending a web session closes its device session.
+- `built` **Web sessions:** fresh random token per sign-in (only its SHA-256 kept), by default 15-minute idle and 8-hour absolute timeouts, at most 4 web sessions at once (a sign-in over that cap is refused) and 2 per Junos user (a third sign-in by the same user closes their oldest); ending a web session closes its device session. Idle time counts from your last activity, not from the browser's own polls. A signed-out tab says why (idle, the absolute limit, the same user signing in elsewhere, signed out in another tab, device session lost). A sign-in refused at the cap says that all sessions are in use and when one must end at the latest, without naming anyone (owner decision OD-13's default, which the owner may veto). Two tabs of one sign-in share a read made moments earlier (at most 2 s; not system health or export) instead of one being told to wait (owner decision OD-07's default, likewise).
 - `built` **Sign-in throttling that only failed sign-ins count against:** limits per source address and user name and per source address, and by default at most 2 sign-ins checked by Junos at once, so requests that never reach Junos cannot lock anyone out.
 - `built` **Audit trail** as JSON lines: credential fields dropped, failed sign-ins recorded under a keyed hash of the name, floods of refusals aggregated. Local only and not tamper-evident ([SECURITY.md, known gaps](SECURITY.md#known-gaps)).
 - `built` **Fail-closed settings:** one INI file, unknown keys refuse the start, any non-loopback bind requires TLS 1.2 or later, and settings, token and key files must pass ownership and mode checks.
@@ -309,7 +310,7 @@ Sign-in delegated to Junos, a read-only RPC allowlist, a bounded web server with
   <img src="docs/images/readme/cluster-scope.png" width="900" alt="J-Wicket on a chassis-cluster fixture: device chip showing the redundancy-group role and a scope picker listing the root system, a logical system and a tenant system">
 </p>
 
-*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. This fixture serves no session table, so the session panels say unsupported. Synthetic fixture data.*
+*The `cluster-lsys` fixture, with the RG0 primary node in the device chip and the scope picker open. Its synthetic two-node session table feeds the session panels (backup copies not counted); it has no system-health replies, so that tile says unsupported. Synthetic fixture data.*
 
 </details>
 
@@ -339,9 +340,9 @@ A development server on synthetic fixtures with error injection and synthetic li
 <summary>All 5 developer-tooling features</summary>
 
 - `built` **Development server** (`make dev`): the real server and UI on loopback, fed from a synthetic fixture, refusing any non-loopback bind, with a FIXTURE DATA banner on every page.
-- `built` **Fixtures:** synthetic `branch/` (standalone branch firewall) and `cluster-lsys/` (two-node chassis cluster with a logical system and a deactivated tenant system), a CSV-injection case and a synthetic log sample, with addresses from RFC 1918 and RFC 5737 only; plus a parser corpus of log lines copied verbatim from Juniper documentation (`log-samples/juniper-docs.txt`), which also carries other addresses ([tests/fixtures/README.md](tests/fixtures/README.md), [log-samples/README.md](tests/fixtures/log-samples/README.md)).
+- `built` **Fixtures:** synthetic `branch/` (standalone branch firewall), `branch-edge/` (the same firewall with deactivated statements, configuration comments, hidden characters in names and a configured time zone), `log-states/` (every log-source state, no session table) and `cluster-lsys/` (two-node chassis cluster with a logical system, a deactivated tenant system and a two-node session table), a CSV-injection case and a synthetic log sample, with addresses from RFC 1918 and RFC 5737 only; two health replies recorded on the lab SRX4100 (`recorded-srx4100-25.2R1-S1.4/`); plus a parser corpus of log lines copied verbatim from Juniper documentation (`log-samples/juniper-docs.txt`), which also carries other addresses ([tests/fixtures/README.md](tests/fixtures/README.md), [log-samples/README.md](tests/fixtures/log-samples/README.md)).
 - `built` **Error injection** per user and RPC (denied, unsupported, failed) and **deterministic synthetic live traffic** that follows the fixture's policies.
-- `built` **Tests:** 441 Python `unittest` tests and 56 Node tests for the query language and log parser pass on 2026-11-24; static-asset tests ban `innerHTML`, `eval`, inline script and external URLs.
+- `built` **Tests:** 559 Python `unittest` tests and 114 Node tests (the query language, the log parser, and helpers of the API client, DOM, formatting, histogram, palette and Policies modules) pass on 2026-11-25; static-asset tests ban `innerHTML`, `eval`, inline script and external URLs.
 - `built` **CI:** ruff and strict mypy, tests plus an isolated bundle self-test on Python 3.7, 3.9, 3.11 and 3.13, Node tests on Node 22, and a reproducible bundle build with read-only permissions.
 
 </details>
@@ -352,7 +353,7 @@ A development server on synthetic fixtures with error injection and synthetic li
 | --- | --- | --- |
 | `specified` | Firewall Policy Builder, preview only: add, clone, edit, move or delete a rule and see the result; never commits. J-Web 24.4 has no security-policy wizard ([catalog, key findings](docs/catalog.md#key-findings)) | [Spec 003](docs/specs/003-firewall-policy-builder.md), gate G3 |
 | `specified` | Shared change protocol for every future write: private candidate, diff, confirmed commit that Junos rolls back unless confirmed. Design only; the code has no write path | [Spec 002](docs/specs/002-change-protocol.md), gate G4 |
-| `specified` | AA contrast in both themes and full keyboard reach; unmodelled settings shown on every object type, not only policies; close-reason badges | Specs 001 and 004 |
+| `specified` | Full keyboard reach and AA contrast checked across every view in both themes (UI-001-17; the text colours themselves are already measured) | Spec 001 |
 | `specified` | Explain Junos in place: each Junos concept explained where it appears, with the matching command alongside (read-only) | [ADR 0010](docs/adr/0010-usable-without-knowing-junos.md); [Spec 005](docs/specs/005-explain-junos-in-place.md) (Draft) |
 | `planned` | Sessions and logs scoped to a logical or tenant system (root only today) | [Spec 004](docs/specs/004-live-sessions-and-logs.md) open questions |
 | `planned` | More device-side session filters and single-session lookup; device-side report summaries for the histogram; stream files, archived and binary logs; PCAP download | Spec 004 out-of-scope table, ledger |
@@ -372,7 +373,7 @@ One language for Policies, Sessions, Logs and Objects. It is the owner's "powerf
 | `NOT`, `-`, `!` | exclude | `-dport:53`, `-inactive:yes` |
 | `( )` | group, any nesting | `(dport:80 OR dport:443) -src:10.0.0.0/8` |
 | `!=` `>` `>=` `<` `<=` | compare | `dport>=1024`, `sev>=warning`, `dur>5m` |
-| `~`, `/regex/flags` | regular expression, smart case | `policy~^pub` |
+| `~`, `/regex/flags` | regular expression, smart case; a pattern that could take seconds on one long line (nested, back-to-back or ambiguous repeats) is refused with the reason, and Logs stops a slow filter after a time budget and says so | `policy~^pub` |
 | `v1\|v2` | any of | `dport:80\|443\|8443` |
 | `"..."`, `'...'` | phrase | `reason:"TCP FIN"` |
 | addresses | IPv4 and IPv6 addresses, prefixes, ranges `a-b`, wildcards `10.10.*`, globs `10.*.0.1`, compared as addresses | `src:10.10.0.0/16` |
@@ -382,9 +383,9 @@ Where each term runs:
 
 | View | Keys | Runs on the device side | Everything else |
 | --- | --- | --- | --- |
-| Sessions (24 keys) | `src dst sport dport proto app iface ingress egress policy zone from to nat natsrc natdst bytes pkts rate dur timeout state id node` | Positive, top-level, AND-ed `:` or `=` terms with one value on `src`, `dst` (address or prefix), `sport`, `dport`, `proto`, `app`, `iface` become parameters of `get-flow-session-information` | In the browser, over the rows Junos returned |
+| Sessions (24 keys) | `src dst sport dport proto app iface ingress egress policy zone from to nat natsrc natdst bytes pkts rate dur timeout state id node` | Positive, top-level, AND-ed `:` or `=` terms with one value on `src`, `dst` (address or prefix), `sport`, `dport` (1 to 65535), `proto`, `app` (the RPC's own application-protocol types), `iface` become parameters of `get-flow-session-information` | In the browser, over the rows Junos returned |
 | Logs (31 keys) | `tag family daemon host sev src dst ip sport dport proto policy zone from to app service nested reason user iface session nat natsrc natdst bytes dur lsys time age msg` | Syslog file: up to four contains terms (plain words, or literal field values used as hints) and four excluded words, applied by the J-Wicket daemon on the box, not by Junos. On-box report: report keys become its `expression` (at most 256 bytes) and time terms its start and stop. Log buffer: `time>=` and `age<` set "since" | Terms not sent run in the browser. Field hints, address-like words, report terms and time bounds are checked again there; other plain words and excludes run once, on the box (a case-insensitive substring match) |
-| Policies (17 keys) | `name from to zone src dst addr app port action group inactive log count kind seq desc` | Nothing: the configuration snapshot is already in the browser | `addr`, `src` and `dst` compare against resolved addresses; rows J-Wicket cannot decide stay listed and are marked |
+| Policies (22 keys) | `name from to zone src dst addr app port action group inactive log count kind seq desc comment dynapp url identity profile` | Nothing: the configuration snapshot is already in the browser | `addr`, `src` and `dst` compare against resolved addresses; rows J-Wicket cannot decide stay listed and are marked |
 | Objects | Own keys per tab (zones, address books, applications) | Nothing | `used:no` finds unused objects |
 
 ## How it works

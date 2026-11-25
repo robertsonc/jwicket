@@ -1,6 +1,6 @@
 # Architecture and trust boundaries
 
-Status: living document. Describes [`src/jwicket/`](../src/jwicket/) as of 2026-11-24. Decisions
+Status: living document. Describes [`src/jwicket/`](../src/jwicket/) as of 2026-11-25. Decisions
 are recorded as ADRs in [`docs/adr/`](adr/README.md); this page explains how they fit together and
 what is still unproven.
 
@@ -93,9 +93,9 @@ operator's reads; with `lab-token` it applies to all of them.
 | Component | Code | Job | State |
 | --- | --- | --- | --- |
 | Listener | [`web/server.py`](../src/jwicket/web/server.py), [`web/http.py`](../src/jwicket/web/http.py) | Bounded threaded HTTP(S) server: connection cap, socket timeouts, TLS handshake in the worker thread, body caps, Host allowlist, strict response headers on every response | Implemented |
-| Routes and handlers | [`api.py`](../src/jwicket/api.py), [`live.py`](../src/jwicket/live.py) | Session status, sign-in, sign-out, policy inventory, export, flow sessions, log sources and lines. Read-only. | Implemented |
+| Routes and handlers | [`api.py`](../src/jwicket/api.py), [`live.py`](../src/jwicket/live.py) | Session status, sign-in, sign-out, policy inventory, export, flow sessions, log sources and lines, system health. Read-only. | Implemented |
 | Sign-in backends | [`auth/backends.py`](../src/jwicket/auth/backends.py) | `netconf`: hand the operator's user name and password to Junos. `lab-token`: one shared token, reads as the daemon account, loopback only. | `netconf` never run on a device (Q-AUTH-01) |
-| Web sessions | [`auth/sessions.py`](../src/jwicket/auth/sessions.py) | Random cookie token (only its SHA-256 is kept) under a cookie name with a random per-start suffix, CSRF token, idle and absolute timeouts, a cap on concurrent sessions, two sessions per Junos user by default (`max_sessions_per_user`; a third sign-in by the same user closes that user's oldest); each web session owns one device session | Implemented |
+| Web sessions | [`auth/sessions.py`](../src/jwicket/auth/sessions.py) | Random cookie token (only its SHA-256 is kept) under a cookie name with a random per-start suffix, CSRF token, idle and absolute timeouts (idle counted from the last foreground request), a cap on concurrent sessions, two sessions per Junos user by default (`max_sessions_per_user`; a third sign-in by the same user closes that user's oldest); each web session owns one device session. A bounded list of tombstones, each holding only why and when a session ended, so a later request with that cookie can be told why ([section 3.4](#34-session-end)) | Implemented |
 | Sign-in limits | [`auth/throttle.py`](../src/jwicket/auth/throttle.py) | Failed sign-ins per minute per (source address, user name) and per source address; sign-ins checked by the backend at once. Only sign-ins that reached Junos and failed count. | Implemented |
 | Device sessions | [`junos/session.py`](../src/jwicket/junos/session.py) | The only code that talks to Junos. RPC allowlist, fixed configuration filters, committed database, one RPC at a time per operator (a request waits at most 5 s for it, then gets 429) | Implemented |
 | Read adapters | [`junos/inventory.py`](../src/jwicket/junos/inventory.py), [`junos/facts.py`](../src/jwicket/junos/facts.py), [`junos/sessions.py`](../src/jwicket/junos/sessions.py), [`junos/logs.py`](../src/jwicket/junos/logs.py) | Turn replies into JSON-ready data. Match XML by local name. Never return raw XML. | Parsers written against documentation and synthetic fixtures (Q-REL-01) |
@@ -152,10 +152,10 @@ flowchart TB
 | --- | --- | --- | --- | --- |
 | **B1** Workstation to listener | HTTP requests and responses: the password once at sign-in, the session cookie, the CSRF token, device data | Lab path: sshd authenticates the tunnel user and decides whether TCP forwarding is allowed. A non-loopback bind would also need the zone's host-inbound services (spike: `webapi-ssl` admitted TCP 8443) or fxp0 reachability, and firewall filters. | Default bind `127.0.0.1`. Any other bind address needs a certificate and key; there is no plaintext switch ([ADR 0003](adr/0003-tls-off-loopback.md)). TLS 1.2 minimum, compression off, HSTS when TLS is on. Optional Host allowlist (HTTP 421 otherwise). | Tunnel: unverified (Q-NET-03). TLS on the device: unverified (Q-TLS-01). Host-inbound by port: one observation on one release (spike T4). |
 | **B2** Other origins in the same browser | Nothing should: cross-site requests, framing, injected script | Nothing | Content-Security-Policy `default-src 'none'`, scripts and styles from `'self'` only, Trusted Types required, `frame-ancestors 'none'`. Cookie `HttpOnly`, `SameSite=Strict`, `Secure` under TLS, named with a random suffix chosen at each start; cookies are not isolated by port, so other services on the same host can receive it ([gap 8](#15-known-gaps-in-the-current-code)). `Origin` must equal the page origin on both POST routes; sign-out also needs the `X-CSRF-Token` header. No CORS headers. `nosniff`, `no-referrer`, `Cache-Control: no-store`. | Implemented |
-| **B3** Unauthenticated to signed-in | Request line and headers (at most 16 KiB together), query (at most 20 fields), body (at most 8 KiB, `Content-Length` required) | Nothing | Without a session a client can fetch only `/`, `/static/*`, `/healthz` and `GET /api/session`, and can call `POST /api/login` and `POST /api/logout`. Every other route refuses to read without a session (401). One checks a parameter first: `GET /api/export?format=xml` without a session is 400, not 401, with no device read either way. Connection cap (8); the TLS handshake and the whole request must arrive within the socket timeout (10 s); one request per connection; route and method allowlist; scope pattern, filter and log-parameter validation; read-rate floors; sign-in limits. | Implemented |
+| **B3** Unauthenticated to signed-in | Request line and headers (at most 16 KiB together), query (at most 20 fields), body (at most 8 KiB, `Content-Length` required) | Nothing | Without a session a client can fetch only `/`, `/static/*`, `/healthz` and `GET /api/session`, and can call `POST /api/login` and `POST /api/logout`. Every other route refuses to read without a session (401, with a `reason` that says why when J-Wicket knows; [section 3.4](#34-session-end)). One checks a parameter first: `GET /api/export?format=xml` without a session is 400, not 401, with no device read either way. Connection cap (8); the TLS handshake and the whole request must arrive within the socket timeout (10 s); one request per connection; route and method allowlist; scope pattern, filter and log-parameter validation; read-rate floors; sign-in limits. | Implemented |
 | **B4** J-Wicket to mgd, as the operator | User name and password once per sign-in. Allowlisted RPCs with validated parameters. Replies: the configuration subtrees J-Wicket parses (for the inventory, `[edit security]` `policies`, `zones` and `address-book`, plus `applications`, per scope; never all of `[edit security]`, which holds IKE pre-shared keys) and operational data. | Authentication (local password, RADIUS, TACACS+, in the configured authentication order). The operator's login class on every RPC and configuration hierarchy, including logical-system and tenant confinement. NETCONF `connection-limit` and `rate-limit`. Login retry options. Each RPC logged as `UI_NETCONF_CMD`. | NETCONF host must be a loopback address and the port below 1024 (settings refuse anything else). Password only: PyEZ is told not to offer the daemon account's SSH keys and not to read its `~/.ssh/config`. RPC allowlist; RPC names are constants, or come from a fixed list (`REPORT_TYPES`) selected by a checked parameter, and every name is checked against the allowlist; configuration filters are constants. Committed database only. One RPC in flight per operator. At most 4 signed-in operators (`max_sessions`), two sessions per Junos user by default. RPC timeout 30 s. No password stored by J-Wicket. | Unproven (Q-AUTH-01, Q-AUTH-02, Q-AUTH-03) |
 | **B5** J-Wicket to mgd, as the daemon account (`lab-token` only) | Allowlisted RPCs and replies | Only the extension-service `username` account's login class. There is no per-operator identity. | Allowed only with a loopback bind. Token of at least 32 ASCII characters, from a mode-0600 file, compared in constant time. Every screen names the backend and the account. In the audit trail the `start` and `login` records name the backend; every record of a signed-in action names the account (`user`). | The PyEZ local path is verified by the spike (T5, as `jcluser`, class `j-super-user`). J-Wicket's use of it has not run on a device. |
-| **B6** Routing engine to data plane | Session-table entries sent from the SPUs to the routing engine for a session list | Nothing limits the size of a list request; the CLI has no count option (verified) | Device-side filters are pushed into the RPC. A (filtered) summary is read first; rows are listed only when the match count is known to be at most 5,000 (`MAX_UNFILTERED`), or, for a filtered request with no count, when the active count is. Rows capped at 2,000 per reply after parsing. | Cost unmeasured (Q-LOAD-02). The guard used to fail open ([gap 1](#15-known-gaps-in-the-current-code), closed). |
+| **B6** Routing engine to data plane | Session-table entries sent from the SPUs to the routing engine for a session list | Nothing limits the size of a list request; the CLI has no count option (verified) | Device-side filters are pushed into the RPC. A (filtered) summary is read first; rows are listed only when the match count is known to be at most 5,000 (`MAX_UNFILTERED`), or, for a filtered request with no count, when the active count is. At most 2,000 sessions per reply are kept after parsing; on a chassis cluster reply that counts sessions, not rows, so both nodes' copies of each kept session stay (the per-node reply layout is **inferred**, Q-REL-01). | Cost unmeasured (Q-LOAD-02). The guard used to fail open ([gap 1](#15-known-gaps-in-the-current-code), closed). |
 | **B7** Junos supervision to the process | The bundle file, the `username` identity, start and restart | Veriexec blocks unsigned binaries; only Python under `system scripts language python3` runs. Script owner must be root or a super-user-class user, owner-only write (verified for commit, event, op and SNMP scripts; inferred for JET). `jlaunchd`/`cscript` start the app at commit and respawn it. | The bundle is deterministic with a published SHA-256; its importer serves only embedded modules. No arguments under Junos; settings from one fixed file. | Supervision verified by the spike for the spike daemon (T1, T6). J-Wicket's bundle: Q-RT-02, Q-RT-03. |
 | **B8** Process to local files and other local accounts | Settings, lab token, TLS key and certificate, diagnostic log, audit trail | Unix ownership and modes | Settings, token and TLS files must be regular files, not symlinks, owned by the daemon account or root, not group- or world-writable; secrets mode 0600. Every directory from `/` down to each file must belong to root or the daemon account and must not be group- or world-writable unless sticky; a symbolic link on the way is followed only if root owns it, for at most 40 links. The settings file and the lab token are opened first (`O_NOFOLLOW`) and checked through the open file (`fstat`), and the name must still lead to the same device and inode. TLS files are checked, then loaded by path, because `ssl` takes only a path; the directory rule keeps other accounts from swapping them in between. `umask 077` for everything J-Wicket creates. A refused start writes its reason to `startup-refused.txt`. | Implemented; not run on a device |
 
@@ -216,12 +216,12 @@ sequenceDiagram
   W->>W: user name and secret format checks, else 401 (no throttle cost)
   W->>W: failed sign-ins for this name from this source (5 a minute) and from this source (20), else 429
   W->>W: a free backend slot (2 at once), else 429
-  W->>W: drop any session the browser already had
   W->>J: open NETCONF over SSH as the operator (port 830), password only
   J->>A: authenticate, if the authentication order says so
   A-->>J: accept, with a template user and its login class
   J-->>W: session open, or an authentication error (401, counted) or no answer (503, not counted)
-  W->>W: close this user's older session (1 per user), create the web session (cap 4), keep the token digest
+  W->>W: only now end the session this browser already had (a failed sign-in leaves it alive)
+  W->>W: close this user's oldest session if they hold 2 already, create the web session (cap 4, else 503), keep the token digest
   W-->>B: 200, HttpOnly SameSite=Strict cookie, CSRF token in the body
 ```
 
@@ -245,19 +245,35 @@ from one source address; `login_failures_per_source_per_min` (default 20) failur
 all names. With `lab-token` there is no user name, so the first limit also applies per source. At
 most `login_concurrent` (default 2) sign-ins are checked by the backend at once; more
 get 429 "Other sign-ins are being checked. Try again in a moment." with `Retry-After: 2`. Every
-429 sign-in body carries `retry_after_s`.
+429 sign-in body carries `retry_after_s` and a `reason`: `login-failures` or `login-busy`.
 
-**Session limits.** If `max_sessions` (default 4) sessions are open, the new device session is
-closed and sign-in is refused with 503; no other user's session is evicted. One Junos user holds at
-most `max_sessions_per_user` (default 2) sessions: a sign-in beyond that by the same name, compared
-case-insensitively, closes that user's oldest session first, and that session's next request gets
-401. The audit trail records `session_replaced` with the old session's user and source and the new
-sign-in's source (`by`). The per-user limit does not apply to `lab-token` sessions, which all carry
+**Session limits.** The cap is checked only after Junos has accepted the password. If
+`max_sessions` (default 4) sessions are open, the new device session is closed and sign-in is
+refused with 503; no other user's session is evicted. The 503 body says how full J-Wicket is and
+when a slot frees, and nothing about who holds the slots: no user name and no source address
+([`api._session_limit`](../src/jwicket/api.py), computed under the store lock):
+
+| Field | Meaning |
+| --- | --- |
+| `reason` | `session-limit` |
+| `sessions` | `{open, max}`: the sessions open now, and `max_sessions` |
+| `slot_free_by_s`, `slot_free_by` | Seconds until, and the UTC time when, the first open session reaches its absolute limit. A slot frees by then at the latest, because the absolute limit cannot be extended; another sign-in may still take it first. |
+| `slot_may_free_in_s` | Seconds until the first open session would end if its user did nothing more (idle or absolute limit, whichever comes first) |
+
+The 503 has no `Retry-After`, because an automatic retry would not help. Telling an operator whom
+Junos has accepted how many sessions are open and when one must end is owner decision OD-13: the
+default ships it, and the owner may veto it. The other sign-in 503, a management service that did
+not answer, carries `reason: unavailable`.
+
+One Junos user holds at most `max_sessions_per_user` (default 2) sessions: a sign-in beyond that
+by the same name, compared case-insensitively, closes that user's oldest session first, and that
+session's next request gets 401 with `reason: replaced`. The audit trail records
+`session_replaced` with the old session's user and source and the new sign-in's source (`by`). The per-user limit does not apply to `lab-token` sessions, which all carry
 the daemon account's name. Two accounts at the default can still fill `max_sessions`. The default
 is 2, not 1, so that one person in two browsers, or two engineers sharing an account, do not keep
 signing each other out; the owner may set 1 where accounts are strictly personal.
 
-**What sign-in writes to the audit trail** ([`logs.AuditTrail`](../src/jwicket/logs.py)):
+**What sign-in and session end write to the audit trail** ([`logs.AuditTrail`](../src/jwicket/logs.py)):
 
 | Event | When | Fields besides time and source |
 | --- | --- | --- |
@@ -267,6 +283,10 @@ signing each other out; the owner may set 1 where accounts are strictly personal
 | `login_refused` | `reason: cross-origin` (aggregated), or `reason: session-limit` with the accepted `user` | |
 | `login_throttled` | `reason: failures` or `busy`; aggregated | |
 | `session_replaced` | A second sign-in by the same user closed their older session | `user`, the old session's `source`, `by` (the new sign-in's source) |
+| `logout` | The operator signed out | `user` |
+| `logout` with `reason: new-sign-in` | Junos accepted a sign-in from a browser that still held a session, and that session was ended just before the new one was created | `user`: the ended session's user; `source`: the new sign-in's |
+| `session_ended` | A session reached its idle or absolute limit (noticed by its next request or by the 30 s reaper), or the daemon shut down | `user`, the session's own `source`, `reason`: `idle`, `absolute` or `shutdown` |
+| `session_lost` | The operator's device session was lost | `user`; `source` of the request that found it |
 
 Aggregated refusals come from clients with no session. They are counted per (event, source,
 fields) in 60 s windows: the first is written at once; repeats are written as one line with
@@ -283,8 +303,10 @@ sequenceDiagram
   participant M as mgd on the operator's own session
   B->>W: GET /api/inventory for one scope
   W->>W: find the session by the cookie digest, check the scope pattern
-  W->>W: at most one read per 2 s per operator for this endpoint, else 429
-  W->>W: wait at most 5 s for this operator's previous read on the device session, else 429
+  W->>W: this session read the same scope under 2 s ago, so answer with that read (meta.reused), no RPC and no audit line
+  W->>W: that same read is still running, so wait for it (one request at most, 5 s at most), else 429 busy
+  W->>W: at most one read per 2 s per operator for this endpoint, else 429 rate
+  W->>W: wait at most 5 s for this operator's previous read on the device session, else 429 busy
   W->>M: get-software-information
   W->>M: get-configuration, committed, inherit, groups, fixed subtree filter
   W->>M: get-chassis-cluster-status
@@ -300,9 +322,26 @@ no `<configuration>` element is a `failed` panel ("The device's reply could not 
 HTTP 500; the device and HA panels already read are kept. The live endpoints (`/api/sessions`,
 `/api/logs/sources`, `/api/logs`) follow the same pattern with their own read floors and caches
 ([section 12](#12-polling-cost)). Every read endpoint answers 429 `{error: "Another read for your
-session is still running. Try again shortly.", retry_after_s: 2}` with `Retry-After: 2` when the
-operator's previous read is still running after 5 s, so queued requests do not hold connection
-slots for a whole RPC timeout.
+session is still running. Try again shortly.", reason: "busy", retry_after_s: 2}` with
+`Retry-After: 2` when the operator's previous read is still running after 5 s, so queued requests
+do not hold connection slots for a whole RPC timeout. A read within the endpoint's floor answers
+429 `{error: "Reading too often.", reason: "rate", retry_after_s, interval_s}`.
+
+**A read just made, for the same session's other tabs**
+([`api.reuse_or_wait`](../src/jwicket/api.py)). The read floors are per web session, so every tab
+and window holding the same cookie shares them. A request identical to one this web session made
+within the floor (2 s for the inventory, 1.5 s for flow sessions and logs) gets that read instead
+of a 429: 200, the stored payload with its own `meta.read_at`, and `meta.reused: true`. It costs no
+RPC and no read slot and writes no audit line (owner decision OD-06: the default, which the owner
+may veto, is not to audit a reply that no device read produced). A request identical to a read
+still running for the same web session waits for it, at most 5 s and only one request at a time
+per endpoint (and log source); another gets the busy 429 at once, and so does the waiter when that
+read ends without a result. Each web session keeps at most one stored read per endpoint (and log
+source), never handed to another web session (login classes differ). A stored read is used for at
+most 2 s after it began, then dropped at the session's next request, its next stored read or the
+reaper's next pass (every 30 s), and with the session. Holding it that long is owner decision
+OD-07: the default ships it, and the owner may veto it. An export never reuses a read, because it
+promises a fresh one, and `/api/health` keeps none: a second tab within its 5 s floor gets the 429.
 
 ### 3.4 Session end
 
@@ -310,18 +349,62 @@ slots for a whole RPC timeout.
 stateDiagram-v2
   [*] --> SignedOut
   SignedOut --> Active: Junos accepts the sign-in
-  Active --> Active: a request resets the idle timer
+  Active --> Active: a foreground request resets the idle timer, X-JWicket-Background requests do not
   Active --> Closed: sign-out with Origin and CSRF token
   Active --> Closed: idle 15 min or absolute 8 h
   Active --> Closed: the NETCONF session is lost
   Active --> Closed: the same Junos user signs in again (max_sessions_per_user)
+  Active --> Closed: Junos accepts a new sign-in from the same browser
   Active --> Closed: the daemon shuts down
-  Closed --> SignedOut: device session closed, cookie cleared
+  Closed --> SignedOut: device session closed, why it ended kept in a tombstone
 ```
 
 Every way out closes the operator's NETCONF session on the server. A lost device session signs the
 operator out (401 with `signed_out: true`); J-Wicket keeps no password, so it cannot reconnect on
-its own. A reaper thread removes expired sessions every 30 s.
+its own. A reaper thread removes expired sessions every 30 s. Idle, absolute and shutdown ends are
+audited as `session_ended`; the others have their own events ([section 3.2](#32-sign-in)).
+
+**Idle time counts the operator's activity, not polls.** A GET that carries
+`X-JWicket-Background: 1` is answered as usual but leaves the session's idle clock where it was.
+Every other request does reset it: a GET without the header or with any other value, and every
+POST, whatever its headers ([`api.is_background`](../src/jwicket/api.py)). The browser sends the
+header on every GET unless the operator used the keyboard, pointer, wheel or touch screen, or
+brought the tab back into view, since its last foreground request. When such input has waited 60 s
+without a foreground request to report it, the browser sends a keep-alive (`GET /api/session`), at
+most once a minute ([`static/js/api.js`](../src/jwicket/static/js/api.js)). So a console left
+polling ends 15 minutes after its operator's last input. The header can only shorten a session:
+it skips one update of the idle clock and never moves a deadline later; an expired session is
+refused whatever the header says; and a forged header affects only the sender's own session. The
+server cannot tell a timer's poll from the operator's own request by itself, so this relies on the
+browser marking its polls: a client that never sends the header can keep its own session alive up
+to the absolute limit.
+
+**Why a session ended.** When a session ends, the store keeps a tombstone under the digest of its
+cookie token: the reason and the time, nothing else (no user name, source, CSRF token, token or
+device data). A tombstone never authenticates anything. The store keeps at most
+`max(64, 4 * max_sessions)` of them, drops the oldest when full, and drops any older than the
+absolute limit. None is kept after a shutdown (the memory is gone) or after a new sign-in from the
+same browser (its cookie is replaced). A request without a live session gets 401
+`{error, reason, at}` from one helper, [`api.signin_required`](../src/jwicket/api.py); `at` (UTC) is
+there only when a tombstone gave the reason. The texts below are those at the default limits:
+
+| `reason` | When | `error` |
+| --- | --- | --- |
+| `replaced` | The same Junos user signed in again elsewhere, beyond `max_sessions_per_user` | You were signed out: the same Junos user signed in again elsewhere. |
+| `idle` | The idle limit passed | Your session ended after 15 min without activity. |
+| `absolute` | The absolute limit passed | Your session reached its 8 h limit. |
+| `signed-out` | Sign-out, in this tab or another | You signed out in another tab or window. |
+| `session-lost` | The device session was lost. The 401 of the request that found it also carries `signed_out: true` | Your device session ended. Sign in again. |
+| `unknown` | A session cookie this process holds no tombstone for: dropped from the bounded list, older than the absolute limit, or a value it never issued | Your J-Wicket session has ended. |
+| `none` | No session cookie. After a restart this is what every browser gets, because the cookie name changes at each start | sign-in required |
+
+These 401s leave the cookie as it is, so every tab of the browser gets the same reason; the next
+sign-in replaces it. `GET /api/session` without a live session adds `ended: {reason, at}` when the
+cookie has a tombstone. The 401 does not say where a replacing sign-in came from: that is owner
+decision OD-09, whose default is no (the audit trail's `session_replaced` already records `by`),
+and which the owner may veto. A sign-in from a browser that still holds a session ends that
+session only once Junos has accepted the new password, so a failed sign-in leaves it alive; the new
+session always gets a new token, so a planted cookie still cannot fix a session.
 
 ### 3.5 How failures reach the screen
 
@@ -366,15 +449,18 @@ never merges them.
   `zones` and `address-book`, and its `applications` in the same filtered configuration read as
   the root's. That Junos answers this filter with the name and only those children for every
   entry, with the entry's `inactive` attribute, is **inferred** (Q-REL-01). `meta.scopes` lists `root`, every `lsys:<name>` and every `tenant:<name>`, each with its
-  policy count and whether it is deactivated. `?scope=` selects one; the pattern is
-  `root|lsys:<name>|tenant:<name>` with names of at most 63 characters.
+  policy count, whether it is deactivated, and whether J-Wicket can open it (`selectable`).
+  `?scope=` selects one; the pattern is `root|lsys:<name>|tenant:<name>` with names of at most 63
+  characters from `A-Z a-z 0-9 . _ -`. A logical or tenant system whose name falls outside it is
+  listed and warned about, but cannot be opened: owner decision OD-12's default, which the owner
+  may veto, keeps the pattern until the Junos character set for these names is verified.
 - Each scope has its own zones, address books, applications, policies and default policy. Address
   names resolve only inside the scope's own books (`test_lsys_resolves_in_its_own_books`). A
   deactivated LSYS or TSYS is marked and warned (`test_inactive_tenant_is_marked_and_warned`).
 - If the device rejects the full filter (for example a release without `tenants`), J-Wicket retries
   with the root's security policies, zones and address books and its applications only, and the
-  snapshot says that logical systems, tenant systems, central-management connections and Multinode
-  HA settings are not shown.
+  snapshot says that logical systems, tenant systems, central-management connections, the
+  configured time zone and Multinode HA settings are not shown.
 - Flow sessions are root only: `/api/sessions` with any other scope is refused with 400. Whether an
   unscoped session list on a device with logical systems returns only the root logical system or
   all of them is **unknown** (Q-REL-01).
@@ -491,13 +577,20 @@ the RG0-secondary node can read the configuration over NETCONF is **unknown** (Q
 - A "not supported" error from the cluster RPC reads as standalone; any other error except denied
   and timeout reads as standalone *with the reason shown*, because the standalone error wording is
   undocumented.
-- Session lists keep each node's copy apart (`id` is `node:session-id`), but do not de-duplicate
-  `Active` and `Backup` copies and do not pass the `node` option, so a cluster most likely sends both
-  copies (**inferred**).
+- Session lists keep each node's copy apart (`id` is `node:session-id`), but the server does not
+  de-duplicate `Active` and `Backup` copies and does not pass the `node` option, so a cluster most
+  likely sends both copies (**inferred**). On a reply with more than one node, `limit` counts
+  sessions, not rows: both copies of the first `limit` distinct session ids are kept
+  (`sessions_returned` counts distinct ids, `returned` counts rows). The Sessions view marks a copy
+  as a backup when the device says `Backup`, or, **inferred**, when it is the zero-counter copy of a
+  session another node also lists, and hides backup copies unless the operator shows them. Whether
+  both nodes report the same session id is **unknown**; the `cluster-lsys` fixture's two-node
+  session table is synthetic.
 - Session counts (the gauge's active and max, the matching count, the list's `device_count`) are the
-  largest node's value after summing that node's SPUs; `failed` is summed across nodes. With more
-  than one node the summary and the list carry a `nodes` array. Whether a node's count includes its
-  `Backup` copies is **unknown** (Q-HA-01); before this change the counts were summed over nodes
+  largest node's value after summing that node's SPUs. `failed` is not summed across nodes: with
+  more than one node it is null, and each node's value is in the `nodes` array that the summary and
+  the list then carry. Whether a node's count includes its `Backup` copies is **unknown**
+  (Q-HA-01); before 2026-11-24 the counts were summed over nodes
   ([gap 2](#15-known-gaps-in-the-current-code), closed).
 
 ### Multinode High Availability (MNHA)
@@ -529,7 +622,7 @@ reset, trace, view; `read-only` = view; `unauthorized` = none. Permission flags 
 | Device facts | `get-software-information` | Not researched | Unknown (inferred `view`) |
 | Overview health | `get-route-engine-information`, `get-performance-summary-information` | Not researched | Unknown (inferred `view`); replies recorded on SRX4100 25.2R1-S1.4 |
 | HA status | `get-chassis-cluster-status` | Not researched | Unknown |
-| Policy inventory | `get-configuration` of `security`, `applications`, `logical-systems`, `tenants`, `system services outbound-ssh`, `chassis high-availability` | Viewing `[edit security policies]` needs `security` ([policies-stmt]). `view-configuration` "can view all of the configuration excluding secrets, system scripts, and event options" ([access-priv]). Which bit shows `system services outbound-ssh` and `chassis high-availability` is not documented in the pages read. | Verified for `security`; the minimum set is unknown (Q-AUTH-03) |
+| Policy inventory | `get-configuration` of `security`, `applications`, `logical-systems`, `tenants`, `system time-zone`, `system services outbound-ssh`, `chassis high-availability` | Viewing `[edit security policies]` needs `security` ([policies-stmt]). `view-configuration` "can view all of the configuration excluding secrets, system scripts, and event options" ([access-priv]). Which bit shows `system time-zone`, `system services outbound-ssh` and `chassis high-availability` is not documented in the pages read; that `time-zone` needs the same bit as `outbound-ssh` is inferred. Reading the `time-zone` leaf is owner decision OD-05: the default ships it (no new RPC), and the owner may veto it. | Verified for `security`; the minimum set is unknown (Q-AUTH-03) |
 | Flow sessions | `get-flow-session-information` | `view` ("Required Privilege Level: view") | Verified ([sfs]) |
 | Syslog files | `get-log` (`show log`) | `trace` | `trace` needed: verified ([show-log], [perm-trace]). Predefined `read-only` therefore denied: inferred (Q-AUTH-03). `operator` includes `trace`: verified ([login-classes]) |
 | Security log buffer | `get-security-log-information` (`show security log`) | The CLI page says `view`; the permission-bit pages list it under `security` and `security-control`, not under `view` | Verified conflict ([cmd-log], [perm-security]); Q-AUTH-03 |
@@ -606,16 +699,21 @@ the `system services outbound-ssh` clients in the root configuration and returns
 name, targets (address and port), services and whether the client is deactivated (`inactive`);
 `managed` is true only when an active client exists (a deactivated client, or a deactivated
 `outbound-ssh`, `services` or `system`, does not count). It never returns `secret` or `device-id`
-(`test_secret_never_returned_even_when_shaped_like_a_target`). The UI shows "managed from" with the
-client name, and "managed from: unknown" when the configuration could not be read. It does not yet
+(`test_secret_never_returned_even_when_shaped_like_a_target`). The top bar shows "managed from"
+with the names of the clients in effect (a deactivated client is not named), and "managed from:
+not known" when the configuration could not be read, or when the device rejected the full
+configuration filter and J-Wicket fell back to the minimal one, which does not read central
+management. The Overview lists deactivated clients as deactivated. It does not yet
 tell Security Director Cloud from Mist from anything else; the host and port patterns above are
-candidates for that, to be confirmed by Q-MGMT-01. When no client is found the chip is hidden;
-nothing on screen claims the device is unmanaged.
+candidates for that, to be confirmed by Q-MGMT-01. When no client in effect is found the chip is
+hidden; nothing on screen claims the device is unmanaged.
 
 **Out-of-band changes.** J-Wicket keeps no copy of the configuration between reads (the per-session
 caches hold only the log-source list for 60 s, a failed log-source read for 60 s if denied or
 unsupported and 10 s otherwise, the device model and release for 10 minutes and the session gauge
-for 30 s), so a change a manager pushes shows on the next read. A future J-Wicket write is itself an
+for 30 s), so a change a manager pushes shows on the next read. The one exception: a web session's
+identical request within 2 s of its own read gets that read, marked `meta.reused`
+([section 3.3](#33-a-read)). A future J-Wicket write is itself an
 out-of-band change for the manager: Spec 002 must show the warning, record an acknowledgement in the
 audit trail and the commit comment, and may be blocked by a setting on managed devices ([ADR
 0009](adr/0009-central-management-coexistence.md)). Commit history (`get-commit-information`), which
@@ -767,7 +865,9 @@ RPC for these views. Every read costs the device something, and Junos logs every
 | --- | --- | --- | --- |
 | Inventory (`/api/inventory`) | 1 per 2 s | 3: `get-software-information`, `get-configuration` (filtered), `get-chassis-cluster-status` | Read on load, scope change and refresh; not polled |
 | Export (`/api/export`) | 1 per 2 s, its own bucket | 3, the same read | On demand |
-| Flow sessions (`/api/sessions`) | 1 per 1.5 s | 2: a (filtered) summary, then the rows. With a filter, plus one unfiltered summary at most every 30 s. When the match count is not known to be at most 5,000 the rows are skipped and the poll costs 1 RPC, plus the gauge when due (B6). | A list makes the SPUs send every matching session to the routing engine. A 2015 community-forum reply quoting the title of Juniper KB28956 says a large pull can drive routing-engine CPU to zero idle ([kb28956-thread]; the KB itself was not read). |
+| Flow sessions (`/api/sessions`, the list) | 1 per 1.5 s | 2: a (filtered) summary, then the rows. With a filter, plus one unfiltered summary at most every 30 s. When the match count is not known to be at most 5,000 the rows are skipped and the poll costs 1 RPC, plus the gauge when due (B6). | A list makes the SPUs send every matching session to the routing engine. A 2015 community-forum reply quoting the title of Juniper KB28956 says a large pull can drive routing-engine CPU to zero idle ([kb28956-thread]; the KB itself was not read). |
+| Session gauge (`/api/sessions?rows=none`, the Overview) | 1 per 1.5 s, its own bucket, so it never makes a Sessions poll answer 429 or the reverse | 1 unfiltered summary, or 0 when the gauge was read in the last 5 s; it takes no filters | A summary only; no session list |
+| System health (`/api/health`, the Overview) | 1 per 5 s | 2: `get-route-engine-information`, `get-performance-summary-information` | Unmeasured |
 | Log sources (`/api/logs/sources`) | No floor; bounded by its cache: a success for 60 s, a denied or unsupported read for 60 s, another failure for 10 s | 1 `get-configuration` on a cache miss, plus 1 `get-software-information` at most every 10 min | Small configuration subtrees |
 | Log file (`/api/logs?source=file:...`) | 1 per 1.5 s per source; while the sources cannot be read, 1 per 1.5 s for all sources together | 1 `get-log`, plus the sources refresh: 1 `get-configuration` at most every 60 s and 1 `get-software-information` at most every 10 min | `get-log` returns the whole file; there is no offset or tail parameter (**verified**, [yang-log], [show-log]). Default file size is 1 MB before rotation ([syslog-ov]). |
 | On-box report (`source=report`) | 1 per 1.5 s | 1 `get-sec-log-report-detail-<type>`, `count` at most 2,000 | A database query on the device |
@@ -775,8 +875,13 @@ RPC for these views. Every read costs the device something, and Junos logs every
 
 Every log parameter is checked before any device read, so a malformed request costs no RPC and no
 read slot. A request that waits more than 5 s for the operator's previous read gets 429 instead of
-queuing. The server suggests a 5 s interval to the browser (`suggested_interval_s`), and the
-browser stops polling while its tab is hidden ([`static/js/api.js`](../src/jwicket/static/js/api.js)).
+queuing. A request identical to one the same web session made within the floor (another tab, say;
+not system health or export) gets that read instead, at no device cost ([section 3.3](#33-a-read)).
+The server suggests a 5 s interval to the browser (`suggested_interval_s`; 10 s for health), and
+the browser stops polling while its tab is hidden
+([`static/js/api.js`](../src/jwicket/static/js/api.js)). The Overview reads the session gauge every
+30 s and the session list every 120 s, 3 RPCs a minute, which is owner decision OD-10's default
+(the owner may veto it; a faster gauge costs one RPC per read), and system health every 10 s.
 
 **Worked estimate (inferred).** One operator on the session list with a filter at 5 s sends about
 26 RPCs a minute, so about 26 `UI_NETCONF_CMD` lines a minute land in every syslog file that takes
@@ -837,7 +942,8 @@ hand-written web server in the same position on the routing engine, without a PS
 | Password guessing | (not a J-Web CVE class) | Failed sign-ins limited per user name and source and per source; at most 2 sign-ins checked at once; requests that never reach Junos cost nothing, so they cannot lock anyone out; session cap and two sessions per user by default; Junos retry options behind it | `ThrottleTests` ([`test_auth.py`](../tests/test_auth.py)), `test_login_is_throttled_with_retry_after`, `test_requests_that_never_reach_junos_do_not_lock_anyone_out`, `test_spraying_user_names_hits_the_per_source_cap`, `test_too_many_concurrent_sign_ins_is_429`, `test_one_account_cannot_hold_every_slot`, `test_session_cap_is_503_and_closes_the_new_device_session` |
 | Session fixation | (not a J-Web CVE class) | A sign-in always issues a fresh token; a cookie the server did not issue is never adopted | `test_new_login_replaces_the_old_session`, `test_planted_cookie_is_never_adopted` |
 | Audit-trail flushing by unauthenticated clients | (not a J-Web CVE class) | Refusals of clients without a session are aggregated per (event, source, reason) in 60 s windows, at most 64 sources apart; session polls are recorded only when their filters or outcome change | `RefusalAggregationTests` ([`test_audit.py`](../tests/test_audit.py)), `test_unauthenticated_refusals_cannot_flush_the_audit_trail`, `test_repeated_polls_are_audited_once` |
-| Slow or oversized requests holding connection slots | (not a J-Web CVE class) | One deadline for the TLS handshake and the whole request; request line and headers capped at 16 KiB; a read waits at most 5 s for the operator's previous read | `SlowClientTests`, `TlsDeadlineTests`, `HeadSizeTests` ([`test_http_server.py`](../tests/test_http_server.py)), `test_busy_device_session_is_429_not_a_queue` ([`test_live.py`](../tests/test_live.py)) |
+| Slow or oversized requests holding connection slots | (not a J-Web CVE class) | One deadline for the TLS handshake and the whole request; request line and headers capped at 16 KiB; a read waits at most 5 s for the operator's previous read; at most one request per web session and endpoint waits for an identical read in flight, and any other gets 429 at once | `SlowClientTests`, `TlsDeadlineTests`, `HeadSizeTests`, `test_only_one_request_waits_for_the_read_in_flight` ([`test_http_server.py`](../tests/test_http_server.py)), `test_busy_device_session_is_429_not_a_queue` ([`test_live.py`](../tests/test_live.py)) |
+| Unattended sessions kept alive by polling | (not a J-Web CVE class) | A GET marked `X-JWicket-Background: 1` does not reset the idle clock; the header can only shorten a session, never extend it, and only the sender's own. Why a session ended is kept as a bounded tombstone holding only a reason and a time, which never authenticates ([section 3.4](#34-session-end)) | `BackgroundTouchTests`, `TombstoneTests` ([`test_auth.py`](../tests/test_auth.py)); `BackgroundRequestTests` ([`test_http_server.py`](../tests/test_http_server.py)) |
 | Spreadsheet formula injection through exports | (not a J-Web CVE class) | CSV cells starting `=`, `+`, `-`, `@`, tab or carriage return are prefixed with `'`; file names sanitised | `CsvInjectionTests` ([`test_http_server.py`](../tests/test_http_server.py)), `test_formula_prefixes_are_neutralised` ([`test_api_units.py`](../tests/test_api_units.py)) |
 
 The October 2026 advisories (JSA112187, JSA112188: pre-authentication CGI execution, root command
@@ -859,7 +965,15 @@ connection, so the 2026 certificate validation advisory for Security Director Cl
   Python cannot guarantee it is wiped.
 - What the report `expression` language does with unusual input is unknown; the allowed characters
   exclude quotes and semicolons.
-- `GET /api/session` tells an unauthenticated client the J-Wicket version and sign-in backend.
+- `GET /api/session` tells an unauthenticated client the J-Wicket version and sign-in backend,
+  and, to a client presenting the cookie of a session that ended, why and when it ended (the 401s
+  say the same). Nothing else about that session.
+- An operator whom Junos accepted but the session cap refused learns how many sessions are open and
+  when one must end, without names or sources (owner decision OD-13's default).
+- A web session's last read per endpoint (the inventory snapshot, a sessions reply, a log file's
+  lines) stays in J-Wicket's memory after the read, for that session's other tabs. It is used for at
+  most 2 s and dropped at the session's next request or the reaper's next pass, within about 30 s
+  more (owner decision OD-07's default). It is never handed to another web session.
 - The audit trail is local. By default (`[log] audit_file` unset) it is written to the diagnostic
   log, which by default goes only to standard error; where a daemonized JET app's standard error
   goes is unknown (Q-RT-02). With `audit_file` set it is a rotated file of `max_bytes` times
@@ -875,19 +989,24 @@ connection, so the 2026 certificate validation advisory for Security Director Cl
 ## 15. Known gaps in the current code
 
 Each is an observation from reading the code on 2026-11-24, for the owners of those files and the
-Q-SEC-01 review. Gaps 1 and 2 were closed in the code on 2026-11-24 and gap 3 was narrowed; they
-keep their numbers, with what changed, so that links to them still lead here.
+Q-SEC-01 review, checked again against the code on 2026-11-25 after the UI follow-up. Gaps 1 and 2
+were closed in the code on 2026-11-24 and gap 3 was narrowed; they keep their numbers, with what
+changed, so that links to them still lead here.
 
 1. **Closed: the session-list guard failed open.** It used to pull the rows with no 5,000-session
    check when the summary read failed or a filtered summary had no match count. Now
    [`live._guard`](../src/jwicket/live.py) fails closed: a denied or unsupported summary gives that
-   state with no list RPC; an unknown match count gives `count-unknown` with a message and no list,
-   except for a filtered request whose active count (from the gauge) is at most 5,000
+   state with no list RPC, or, for a filtered request whose unfiltered gauge reads fine,
+   `filter-rejected`, which names the filters the device did not accept; an unknown match count
+   gives `count-unknown` with a `reason` (`summary-failed`, `no-count-over-limit` or `no-count`) and
+   no list, except for a filtered request whose active count (from the gauge) is at most 5,000
    (`SessionGuardTests` in [`test_live.py`](../tests/test_live.py)).
 2. **Closed: cluster counts could double.** [`parse_summary`](../src/jwicket/junos/sessions.py) used
-   to sum counts across nodes. It now sums the SPUs of each node and takes the largest node's value
-   (`failed` is still summed), and lists the nodes in `nodes`. Whether one node's count includes its
-   `Backup` copies is still **unknown** (Q-HA-01, Q-LOAD-02).
+   to sum counts across nodes. It now sums the SPUs of each node and takes the largest node's value,
+   and lists the nodes in `nodes`. `failed` is summed only within one node: on a reply with more
+   than one node it is null, and each node's own value stays in `nodes`, because whether each node
+   counts its own failures is **unknown**. Whether one node's count includes its `Backup` copies is
+   still **unknown** (Q-HA-01, Q-LOAD-02).
 3. **Narrowed: one sign-in budget behind the tunnel.** The throttle used to count every attempt,
    successful or malformed, per client address, so five bad requests a minute from anyone who could
    open a tunnel locked every operator out. Now only failed sign-ins that reached Junos count, per
@@ -896,8 +1015,10 @@ keep their numbers, with what changed, so that links to them still lead here.
    minute) is shared by every operator, and a named account can be locked out from one address by
    failing its sign-in ([section 7](#7-junos-aaa)).
 4. **Authentication is per handler.** Each route calls the session check itself; tests list the
-   protected paths by hand. A new route that forgets the check would not be caught. A test that walks
-   the router and expects 401 on every non-public route would close this.
+   protected paths by hand. A new route that forgets the check would not be caught. The 401 body now
+   comes from one helper ([`api.signin_required`](../src/jwicket/api.py)), but each route still
+   decides to call it. A test that walks the router and expects 401 on every non-public route would
+   close this.
 5. **No Host allowlist by default.** `allowed_hosts` is empty unless set, so any `Host` is accepted.
    [deploy-lab.md](deploy-lab.md) sets it; the default does not ([`settings.py`](../src/jwicket/settings.py)).
 6. **Confined users' scope label.** [`list_scopes`](../src/jwicket/junos/inventory.py) always

@@ -20,12 +20,14 @@ true **on synthetic fixtures only**. No recorded device reply has been parsed ye
 | Part | State | Evidence |
 | --- | --- | --- |
 | Configuration parser and resolver | Implemented | `test_inventory.py`, `test_xmlutil.py`: pass on fixtures |
-| Device facts (identity, HA, central management) | Implemented | `test_facts.py`, `test_api_units.py`: pass on fixtures |
+| Device facts (identity, HA, central management, configured time zone) | Implemented | `test_facts.py`, `test_api_units.py`: pass on fixtures |
 | Read path, explicit states, read throttle, audit | Implemented | `test_api_units.py`, `test_http_server.py`, `test_live.py` (`SnapshotVisibilityTests`): pass |
-| JSON and CSV export | Implemented | `test_http_server.py` (`InventoryTests`, `CsvInjectionTests`), `test_api_units.py` (`CsvTests`): pass |
+| A second tab of the same web session gets a read made under 2 s ago instead of a 429 (5.2) | Implemented (2026-11-25) | `test_http_server.py` (`ReuseHttpTests`): pass |
+| JSON and CSV export (22 CSV columns; 409 when the configuration was not read) | Implemented | `test_http_server.py` (`InventoryTests`, `CsvInjectionTests`), `test_api_units.py` (`CsvTests`): pass |
+| Snapshot fields added 2026-11-25 for honest wording in the UI: comments around policy settings, deactivated parts and provenance of objects, the filter used, scopes J-Wicket cannot address, the configured time zone (5.3) | Implemented | `test_inventory.py` (`DeactivatedStatementTests`, `CommentTests`, `ScopeTests`, `BranchEdgeFixtureTests` on the new `branch-edge` fixture), `test_facts.py` (`TimeZoneTests`), `test_api_units.py` (`ReadSnapshotTests`): pass |
 | UI v1 (`static/app.js`, as committed at `276f9a6`) | Built: evaluation-order sections, provenance badges, detail panel, CLI templates, matrix | Superseded by v2, which replaces it in the working tree |
-| UI v2 Policies and Objects views | **Built and committed; exercised by hand on the development server** (AC-001-21 not signed off) | The shared query engine for policies is unit-tested: `tests/js/query.test.mjs` passes |
-| On a device | **Not run.** The spike read the configuration as JSON without inheritance, as the daemon's account; this parser has never seen a real reply | [Spike report](../evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md), "What is not proven" |
+| UI v2 Policies and Objects views | **Built and committed; exercised by hand on the development server** (AC-001-21 not signed off). The UI follow-up of 2026-11-25 built the rows of section 8 marked "Built (fixtures)" | The shared query engine for policies is unit-tested: `tests/js/query.test.mjs` passes |
+| On a device | **Read once, not checked.** On a lab SRX4100 (Junos 25.2R1-S1.4) a super-user account read the inventory through J-Wicket (3 policies, configuration `ok`); no reply was recorded and no criterion was checked. That build predates the 2026-11-25 changes in this spec, which have run on fixtures only. Before that, the spike read the configuration as JSON without inheritance, as the daemon's account | [SRX4100 lab evidence](../evidence/2026-11-24-srx4100-lab/README.md), [spike report](../evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md), "What is not proven" |
 
 The fixtures in [`tests/fixtures/`](../../tests/fixtures/README.md) are written by hand. Their
 element names come from Juniper's published YANG for 24.4R2 and from Juniper documentation, so a
@@ -95,7 +97,7 @@ application objects. It does not cover Hits (section 4).
 - Applications and application sets defined in the configuration.
 - Name resolution for policy addresses and applications, with limits.
 - Device facts: hostname, model, release (per node in a cluster), HA classification, outbound-SSH
-  clients.
+  clients, the configured time zone.
 - Warnings for anything not modeled (per object: policies, zones, interfaces, address entries, sets
   and books, applications and application sets), deactivated, or possibly hidden. Configuration
   comments (`annotate`) are attached to what they annotate, never reported as unmodeled.
@@ -121,18 +123,19 @@ application objects. It does not cover Hits (section 4).
 
 | Request | Result |
 | --- | --- |
-| `GET /api/inventory?scope=<id>` | 200 snapshot (5.3). `scope` defaults to `root`; must match `root`, `lsys:<name>` or `tenant:<name>` with name `[A-Za-z0-9._-]{1,63}` |
-| `GET /api/export?scope=<id>&format=json\|csv` | 200 attachment `jwicket-<host>-<scope>-<YYYYMMDDTHHMMSSZ>.<fmt>`; JSON is the snapshot, CSV is described in 5.8 |
+| `GET /api/inventory?scope=<id>` | 200 snapshot (5.3). `scope` defaults to `root`; must match `root`, `lsys:<name>` or `tenant:<name>` with name `[A-Za-z0-9._-]{1,63}` (a scope whose name has other characters is listed with `selectable: false`, 5.3) |
+| `GET /api/export?scope=<id>&format=json\|csv` | 200 attachment `jwicket-<host>-<scope>-<YYYYMMDDTHHMMSSZ>.<fmt>`; JSON is the snapshot, CSV is described in 5.8. When the configuration was not read, CSV is 409 and the JSON filename ends `-config-<status>` (5.8) |
 
 Errors, all `{"error": "<operator-safe message>", ...}`:
 
 | Status | When | Extra fields |
 | --- | --- | --- |
 | 400 | Malformed `scope`; `format` not `json` or `csv` | |
-| 401 | No valid session cookie | `signed_out: true` when the operator's device session was lost during this read (the web session is dropped and audited as `session_lost`) |
+| 401 | No live web session | `reason` (and `at`) saying why: `none`, `replaced`, `idle`, `absolute`, `signed-out`, `session-lost` or `unknown` ([Spec 004, section 5.1](004-live-sessions-and-logs.md#51-endpoints)). `signed_out: true` and `reason: "session-lost"` when the operator's device session was lost during this read (the web session is dropped and audited as `session_lost`) |
 | 404 | `scope` is well formed but not in the configuration read | `scopes`: the scope summaries that do exist |
-| 429 | The same operator read the same endpoint less than 2 s ago (`MIN_READ_INTERVAL_S`) | `retry_after_s`, plus a `Retry-After` header rounded up to whole seconds. Inventory and export have separate buckets, so "load page, then export" works |
-| 429 | Another read on the same operator's device session (another tab, the Sessions or Logs view) is still running after 5 s (`SESSION_WAIT_S`) | `{error: "Another read for your session is still running. Try again shortly.", retry_after_s: 2}` and `Retry-After: 2` |
+| 409 | `format=csv` when the configuration was not read (`config.status` not `ok`) | `{error: "The configuration was not read (<status>: <message>), so there are no policies to export as CSV.", config: {status, message}}`, no `Content-Disposition` |
+| 429 | The same operator read the same endpoint less than 2 s ago (`MIN_READ_INTERVAL_S`) for another scope, or exported again | `reason: "rate"`, `retry_after_s`, `interval_s: 2.0`, plus a `Retry-After` header rounded up to whole seconds. Inventory and export have separate buckets, so "load page, then export" works. The same scope again within 2 s is answered from that read (5.2) |
+| 429 | Another read on the same operator's device session (another tab, the Sessions or Logs view) is still running after 5 s (`SESSION_WAIT_S`) | `{error: "Another read for your session is still running. Try again shortly.", reason: "busy", retry_after_s: 2}` and `Retry-After: 2` |
 
 A failed device read is **not** an HTTP error. The snapshot is 200 and the failed panel carries
 its state (5.4).
@@ -141,8 +144,14 @@ its state (5.4).
 
 One snapshot is one consistent read for one operator, holding that operator's session lock so two
 tabs cannot interleave RPCs on one NETCONF session. A request waits at most 5 s for the lock, then
-gets 429 rather than queuing for a whole RPC timeout. Every inventory GET reads the device again;
-nothing is cached between reads.
+gets 429 rather than queuing for a whole RPC timeout. Every inventory GET reads the device again,
+with one exception for the same web session's other tabs: a GET for the same scope within 2 s of
+that session's last read of it gets that read (200, its own `meta.read_at`, `meta.reused: true`),
+and a GET that arrives while that same read is running waits for it (at most 5 s, one request at a
+time) instead of getting a 429. Nothing else is kept between reads, a reused read is never handed
+to another web session, and an export always reads the device. Holding the snapshot that long is
+owner decision OD-07, shipped as its default, which the owner may veto
+([Spec 004, section 5.5](004-live-sessions-and-logs.md#55-rate-limits-and-device-cost)).
 
 ```mermaid
 sequenceDiagram
@@ -151,7 +160,7 @@ sequenceDiagram
     participant S as Operator's NETCONF session
     participant M as mgd
     B->>A: GET /api/inventory?scope=root
-    A->>A: session cookie, scope check, 2 s throttle, session lock (wait at most 5 s)
+    A->>A: session cookie, scope check, reuse of this session's read under 2 s old, 2 s throttle, session lock (wait at most 5 s)
     A->>S: get-software-information
     S->>M: RPC as the operator
     M-->>S: software-information (or error)
@@ -166,8 +175,8 @@ sequenceDiagram
     A-->>B: 200 snapshot (each panel ok or an explicit state)
 ```
 
-Three RPCs per read, four when the filter falls back. Junos logs NETCONF RPCs as
-`UI_NETCONF_CMD`, so each read can add lines to the device's own logs (section 7.10).
+Three RPCs per read, four when the filter falls back, none for a reused read. Junos logs NETCONF
+RPCs as `UI_NETCONF_CMD`, so each read can add lines to the device's own logs (section 7.10).
 
 ### 5.3 Snapshot shape
 
@@ -181,7 +190,7 @@ Three RPCs per read, four when the filter falls back. Junos logs NETCONF RPCs as
     "schema": "jwicket.inventory/1",
     "read_at": "2026-11-24T06:00:00Z",
     "scope": "root",
-    "scopes": [{"id": "root", "label": "Root system", "policies": 10, "inactive": false}],
+    "scopes": [{"id": "root", "label": "Root system", "policies": 10, "inactive": false, "selectable": true}],
     "read_as": {"user": "alice", "backend": "netconf"},
     "source": {"database": "committed", "inheritance": true, "groups_annotated": true},
     "fixture": false,
@@ -190,20 +199,25 @@ Three RPCs per read, four when the filter falls back. Junos logs NETCONF RPCs as
   "device": {"status": "ok", "hostname": "fw1", "model": "vsrx", "version": "24.4R2-S3.5", "nodes": []},
   "ha": {"status": "ok", "mode": "standalone"},
   "management": {"status": "ok", "clients": [{"client": "central-mgr", "targets": ["192.0.2.10:7804"], "services": ["netconf"], "inactive": false}], "managed": true},
-  "config": {"status": "ok"},
+  "config": {"status": "ok", "filter": "full"},
+  "clock": {"status": "ok", "time_zone": "Europe/Paris", "configured": true, "deactivated": null, "source": "configuration"},
   "scope": {
     "id": "root", "label": "Root system", "inactive": false,
+    "security_present": true, "applications_present": true,
     "policies": {
       "status": "ok", "rows": ["<policy row>"],
-      "default_policy": "deny-all", "default_policy_inactive": null, "default_policy_group": null,
-      "policy_rematch": false, "policy_rematch_inactive": false,
-      "pre_id_default_policy": false, "pre_id_default_policy_inactive": false,
-      "zone_pairs": [{"from": "trust", "to": "untrust", "count": 3, "inactive": 1, "permit": 2, "deny": 0, "reject": 0, "comment": null}],
+      "default_policy": "deny-all", "default_policy_inactive": null, "default_policy_inactive_reason": null,
+      "default_policy_group": null, "default_policy_comment": null,
+      "policy_rematch": false, "policy_rematch_inactive": false, "policy_rematch_extensive": false,
+      "policy_rematch_comment": null,
+      "pre_id_default_policy": false, "pre_id_default_policy_inactive": false, "pre_id_default_policy_comment": null,
+      "ancestor_inactive": null, "global_trailing_comment": null,
+      "zone_pairs": [{"from": "trust", "to": "untrust", "count": 3, "inactive": 1, "permit": 2, "deny": 0, "reject": 0, "comment": null, "trailing_comment": null}],
       "global_count": 2
     },
-    "zones": {"status": "ok", "rows": [{"name": "trust", "interfaces": [{"name": "ge-0/0/1.0", "services": ["ssh"], "protocols": [], "services_except": [], "protocols_except": [], "inactive_services": [], "inactive_protocols": [], "group": null, "inactive": false, "comment": null, "unmodeled": []}], "services": [], "protocols": [], "services_except": [], "protocols_except": [], "inactive_services": [], "inactive_protocols": [], "screen": null, "description": null, "group": null, "inactive": false, "comment": null, "unmodeled": []}]},
-    "address_books": {"status": "ok", "rows": [{"name": "global", "attach": [], "inactive_attach": [], "legacy_zone": null, "addresses": [{"name": "h1", "kind": "prefix", "value": "192.0.2.1/32", "description": null, "group": null, "inactive": false, "comment": null, "unmodeled": []}], "sets": [{"name": "s1", "addresses": ["h1"], "sets": [], "inactive_members": [], "description": null, "group": null, "inactive": false, "comment": null, "unmodeled": []}], "description": null, "group": null, "inactive": false, "comment": null, "unmodeled": []}]},
-    "applications": {"status": "ok", "rows": [{"name": "tcp-8443", "kind": "application", "protocol": "tcp", "destination_port": "8443", "source_port": null, "terms": 0, "members": [], "sets": [], "inactive_members": [], "description": null, "group": null, "inactive": false, "comment": null, "unmodeled": []}]},
+    "zones": {"status": "ok", "rows": [{"name": "trust", "interfaces": [{"name": "ge-0/0/1.0", "services": ["ssh"], "protocols": [], "services_except": [], "protocols_except": [], "inactive_services": [], "inactive_protocols": [], "host_inbound": "active", "services_present": true, "protocols_present": false, "host_inbound_group": null, "group": null, "inherited": [], "groups": [], "inactive": false, "inactive_parts": [], "comment": null, "unmodeled": []}], "services": [], "protocols": [], "services_except": [], "protocols_except": [], "inactive_services": [], "inactive_protocols": [], "host_inbound": "absent", "services_present": false, "protocols_present": false, "host_inbound_group": null, "screen": null, "description": null, "group": null, "inherited": [], "groups": [], "inactive": false, "inactive_parts": [], "comment": null, "part_comments": [], "unmodeled": []}], "unmodeled": []},
+    "address_books": {"status": "ok", "rows": [{"name": "global", "attach": [], "inactive_attach": [], "legacy_zone": null, "addresses": [{"name": "h1", "kind": "prefix", "value": "192.0.2.1/32", "description": null, "group": null, "inherited": [], "groups": [], "inactive": false, "inactive_parts": [], "comment": null, "unmodeled": []}], "sets": [{"name": "s1", "addresses": ["h1"], "sets": [], "inactive_members": [], "inactive_addresses": [], "inactive_sets": [], "description": null, "group": null, "inherited": [], "groups": [], "inactive": false, "comment": null, "part_comments": [], "unmodeled": []}], "description": null, "group": null, "inherited": [], "groups": [], "inactive": false, "comment": null, "part_comments": [], "unmodeled": []}]},
+    "applications": {"status": "ok", "rows": [{"name": "tcp-8443", "kind": "application", "protocol": "tcp", "destination_port": "8443", "source_port": null, "terms": 0, "members": [], "sets": [], "inactive_members": [], "inactive_applications": [], "inactive_sets": [], "description": null, "group": null, "inherited": [], "groups": [], "inactive": false, "inactive_parts": [], "comment": null, "part_comments": [], "unmodeled": []}]},
     "groups": [{"name": "corp-baseline", "policies": 2}],
     "warnings": ["Policy dmz-updates has settings J-Wicket does not display yet: then permit firewall-authentication."]
   },
@@ -233,7 +247,8 @@ Field notes:
 - Address `kind` is `prefix`, `dns`, `range`, `wildcard` or `unknown`. Address-book `name` for a
   legacy zone book is `zone <zone-name>`, with `legacy_zone` set and `attach` = `[zone-name]`.
 - Application `terms` is the number of `term` entries; `protocol` and ports are the top-level
-  values and are `null` for a term-only application.
+  values and are `null` for a term-only application, and for a leaf that is deactivated (then
+  listed in `inactive_parts`, for example `destination-port 2121`).
 - Deactivated statements are never shown as in effect. `default_policy` is `null` when
   `default-policy`, its `permit-all` or `deny-all` child, or an ancestor is deactivated, and
   `default_policy_inactive` names the deactivated action. `policy_rematch` and
@@ -254,6 +269,55 @@ Field notes:
   and J-Wicket does not display yet, for example `icmp-type`, `application-protocol`,
   `inactivity-timeout` on an application, `tcp-rst` on a zone. A configuration comment is never
   listed there.
+
+Fields added on 2026-11-25 (present wherever their parent object is, unless a condition is named):
+
+- `config.filter` is `full` or `minimal` (the fallback, 5.2) when `config.status` is `ok`. With
+  the minimal filter, `management` is `{status: "unsupported", message: "Central management was not
+  read: the device rejected the configuration filter that includes it."}` with no `clients` or
+  `managed`, `clock` is `{status: "unsupported", message: "The time zone was not read: the device
+  rejected the configuration filter that includes it."}`, and a standalone `ha.message` gains
+  "Multinode HA settings were not read (the device rejected the full configuration filter).",
+  after any message it already had.
+- `clock` is the configured `system time-zone`
+  ([`facts.time_zone`](../../src/jwicket/junos/facts.py), 6): `{status: "ok", time_zone,
+  configured, deactivated, source: "configuration"}`. `time_zone: null` with `configured: false`
+  means not configured, so the Junos default, UTC, applies (**verified**, 6). A deactivated
+  statement gives `configured: false` and the written value in `deactivated`. A value that is not
+  1 to 64 of `A-Z a-z 0-9 _ + - /` gives `{status: "failed", message: "The configured time zone is
+  not a value J-Wicket recognises."}`. When the configuration was not read, `clock` carries the
+  configuration's state and message: J-Wicket never assumes UTC then. It is the configured zone,
+  never "the zone in effect": a change takes effect for all processes only after a reboot
+  (**verified**, 6).
+- `meta.scopes[].selectable` is false for a logical or tenant system whose name J-Wicket cannot
+  put in a `scope` parameter (anything outside `[A-Za-z0-9._-]{1,63}`), with `reason: "J-Wicket
+  cannot address this name yet (it accepts letters, digits, dot, underscore and hyphen, up to 63
+  characters)."` and a snapshot warning. The accepted characters are unchanged until the Junos
+  character set for those names is verified (owner decision OD-12, whose default keeps them, and
+  which the owner may veto).
+- `scope.security_present` and `scope.applications_present` say whether the scope's configuration
+  has a `<security>` or `<applications>` element at all.
+- `scope.policies`: `policy_rematch_extensive` (an active `extensive` under an in-effect
+  `policy-rematch`); `ancestor_inactive` (`null`, `policies`, `security` or `scope`: the nearest
+  deactivated ancestor of `[edit security policies]`); `default_policy_inactive_reason` (`null`,
+  `self` when `default-policy` or its action is itself deactivated, or the ancestor);
+  `default_policy_comment`, `policy_rematch_comment` and `pre_id_default_policy_comment` (the
+  configuration comment before each); `global_trailing_comment` and `zone_pairs[].trailing_comment`
+  (a comment after the last rule of the global section or of the pair).
+- Zones and interfaces: `screen` is `null` when the `screen` statement is deactivated (it is then
+  in `inactive_parts`); `inactive_parts`, `inherited` and `groups` as on policies; `host_inbound`
+  is `absent`, `active` or `inactive` (the object's own `host-inbound-traffic`, and whether it is
+  deactivated); `services_present` and `protocols_present` say whether any entry is written, active
+  or not; `host_inbound_group` is the group of `host-inbound-traffic`, else of its first entry.
+  Zones also carry `part_comments`. `zones.unmodeled` is `["functional-zone management"]` when that
+  is configured (with a scope warning; it is not shown as a zone).
+- Address books carry `inherited`, `groups` and `part_comments`, and a legacy zone book its
+  `comment`; address entries carry `inactive_parts`, `inherited` and `groups`; address sets carry
+  `inherited`, `groups`, `part_comments`, and `inactive_addresses` and `inactive_sets`, whose union
+  is `inactive_members`. Application and application-set rows carry `inactive_parts`, `inherited`,
+  `groups` and `part_comments`, and `inactive_applications` and `inactive_sets`, whose union is
+  `inactive_members` (both are `[]` on an application; a set's deactivated members are listed there,
+  not in its `inactive_parts`).
 
 **Policy row** (every key is asserted by `test_snapshot_shape_keys`):
 
@@ -277,7 +341,7 @@ Field notes:
 | `groups` | Every group that contributed anything to the rule's subtree, first-seen order |
 | `unmodeled` | Configuration under the rule that J-Wicket does not display, as paths (`then permit firewall-authentication`). Configuration comments are never listed |
 | `comment`, `part_comments`, `pair_comment` | The rule's configuration comment; comments inside it as `[{before, text}]` (`before` names the statement the comment precedes, or is `null` at the end of a block); its zone-pair context's comment |
-| `resolved` | `source`, `destination`: `[{name, kind: any\|address\|set\|unresolved, book, leaves: [{name, kind, value}], truncated, unresolved: [names], inactive_skipped: ["book:name"]}]`; `application`: `[{name, kind: any\|application\|set\|predefined\|dynamic-defaults\|unresolved, leaves: [{name, protocol, destination_port, source_port, terms, unmodeled} \| {name, predefined: true}], unresolved, inactive_skipped?: [names]}]`. `inactive_skipped` lists deactivated entries of the same name that resolution passed over |
+| `resolved` | `source`, `destination`: `[{name, kind: any\|address\|set\|unresolved, book, leaves: [{name, kind, value}], truncated, unresolved: [names], inactive_skipped: ["book:name"]}]`; `application`: `[{name, kind: any\|application\|set\|predefined\|dynamic-defaults\|unresolved, leaves: [{name, protocol, destination_port, source_port, terms, unmodeled} \| {name, predefined: true}], unresolved, inactive_skipped: [names]}]`. `inactive_skipped`, always present, lists deactivated entries that resolution passed over; `unresolved` lists only names with no entry at all, active or deactivated (5.6) |
 
 ### 5.4 Explicit states
 
@@ -289,7 +353,7 @@ Each panel is independent: a denied software read does not hide the policies.
 | `device` | `ok`, `denied`, `unsupported`, `failed` | From `get-software-information`; `failed` also when the reply holds no `software-information` |
 | `config` (and `scope`, `management`) | `ok`, `denied`, `unsupported`, `failed` | From `get-configuration`; `failed` also when the reply holds no `<configuration>` element ("The device's reply could not be read."), with the device and HA panels kept; `scope` is `null` and `meta.scopes` is `[]` unless `ok` |
 | `ha` | modes above, or `denied` / `failed` | `unsupported` from the cluster RPC means standalone; `denied` and timeouts stay errors; other errors read as standalone with a message saying why |
-| Whole response | 401 `signed_out: true` | `session-lost` on any of the three RPCs ends the read and the web session |
+| Whole response | 401 `signed_out: true`, `reason: "session-lost"` | `session-lost` on any of the three RPCs ends the read and the web session |
 
 Errors are classified by [`errors.classify`](../../src/jwicket/junos/errors.py) into a closed set
 (`denied`, `unsupported`, `failed`, `rejected`, `unavailable`, `session-lost`). Each carries a
@@ -319,8 +383,10 @@ stateDiagram-v2
 
 Warnings are strings, shown, never dropped. Snapshot level (`warnings`):
 
-- The full filter was rejected, so logical systems, tenant systems, central-management connections
-  and Multinode HA settings are not shown (fallback to `INVENTORY_FILTER_MINIMAL`).
+- The full filter was rejected, so logical systems, tenant systems, central-management connections,
+  Multinode HA settings and the time zone are not shown (fallback to `INVENTORY_FILTER_MINIMAL`).
+- `<Logical system|Tenant system> <name> cannot be opened in J-Wicket: its name has characters
+  J-Wicket does not accept in a scope yet.` (5.3, `selectable`)
 - The configuration has no `security` section: "The configuration J-Wicket read has no security
   section (policies, zones or address books). Either nothing is configured, or `<user>`'s login
   class cannot view it (Junos may leave it out rather than refuse)." J-Wicket reads only those
@@ -337,11 +403,20 @@ Scope level (`scope.warnings`):
 - Policy `<name>` has no permit, deny or reject action J-Wicket recognises.
 - Policy settings J-Wicket does not display yet (children of `security policies` other than
   `policy`, `global`, `default-policy`, `pre-id-default-policy`, `policy-rematch`).
-- The default policy `<action>` is deactivated in the configuration, so the Junos default
-  (deny-all) applies (the default is **verified**, 7.3; that a deactivated statement is not in
-  effect is **inferred**, 7.5).
-- `policy-rematch` is configured but deactivated (not in effect); a pre-ID default policy is
-  configured but deactivated (not in effect).
+- A deactivated default policy, worded by `default_policy_inactive_reason`: `The default policy
+  <action> is deactivated in the configuration (not in effect).` (`self`), or `The default policy
+  <action> is not in effect because [edit security policies] is deactivated.` (likewise for
+  `[edit security]` and for the logical or tenant system). The Junos default, deny-all, is
+  **verified** (7.3); that a deactivated statement does not take effect is **verified** (7.5); that
+  deny-all then decides is **inferred**.
+- `policy-rematch` is configured but deactivated (not in effect); `policy-rematch extensive is
+  configured but deactivated (not in effect).`; a pre-ID default policy is configured but
+  deactivated (not in effect).
+- Any child of `policy-rematch` other than `extensive` is named in `Policy settings J-Wicket does
+  not display yet: policy-rematch <child>.`
+- `Functional zone management is configured; J-Wicket does not display it yet.`
+- `<Zone|Interface|Address|Application> <name> has deactivated parts (not in effect): <parts>.`
+  (for example a deactivated `screen` or `destination-port`).
 - A pre-ID default policy is configured; J-Wicket shows its presence but not its contents.
 - Per object, `<Object> <name> has settings J-Wicket does not display yet: <statements>.`, for
   address books, addresses, address sets, applications, application sets, zones and zone
@@ -362,8 +437,10 @@ Addresses ([`AddressResolver`](../../src/jwicket/junos/inventory.py)):
    zone, then the book named `global`. Sources use the from-zone, destinations the to-zone.
 3. Global policies use the `global` book only.
 4. An address set's members are looked up only in the book that holds the set.
-5. Expansion stops at depth 16 or 512 leaves; `truncated: true` says so. Cycles terminate. Names
-   not found anywhere are listed in `unresolved` and the entry's kind is `unresolved`.
+5. Expansion stops at depth 16 or 512 leaves; `truncated: true` says so. Cycles terminate. An
+   entry with no active definition has kind `unresolved`. The `unresolved` list names only what has
+   no entry at all, active or deactivated, in the books it is looked up in: a name whose only entry
+   there is deactivated is in `inactive_skipped`, not listed twice.
 6. Only what is in effect is used: a deactivated address book is skipped, and so is a book's
    deactivated `attach` (or a deactivated zone in it); a deactivated address entry or set is passed
    over in favour of the next book in the chain and recorded in `inactive_skipped` as
@@ -374,8 +451,10 @@ Applications ([`ApplicationResolver`](../../src/jwicket/junos/inventory.py)): `a
 protocols, not a predefined application; 7.8); a name defined, and active, in the scope's
 `applications` resolves to its leaves (sets recursively, active members only; each application
 leaf carries its `unmodeled` list); an undefined `junos-*` name is `predefined` and not expanded;
-anything else is `unresolved`. A deactivated application or set of that name is not used and is
-named in `inactive_skipped`.
+anything else is `unresolved`. A deactivated application or set, whether the name itself, a
+member or a nested set, is not used and is named in `inactive_skipped` (always present, `[]` when
+nothing was skipped), not in `unresolved`, which names only what has no definition at all. Kind
+`unresolved` still means no active definition.
 
 Rules 2 to 4 are J-Wicket's reading of the documentation, not verified behaviour (section 7.4).
 
@@ -387,22 +466,33 @@ carries that group.
 
 ### 5.8 Export
 
-- JSON: the snapshot itself, with `Content-Disposition: attachment`.
+- JSON: the snapshot itself, with `Content-Disposition: attachment`. When the configuration was
+  not read, the JSON is still 200 (its body states `config.status`) and the filename gets
+  `-config-<status>` before the extension.
 - CSV: first row `# J-Wicket policy inventory, read <read_at> from the committed configuration of
-  <hostname> as <user>; scope <scope>`; then a header row `scope, kind, seq, from, to, name,
-  action, source, destination, application, inactive, group, inherited, log_init, log_close,
-  count, scheduler, description`; then one row per policy. The `inactive` column holds the reason;
-  the `application` column shows an implicit `junos-defaults` or `any` (5.3).
+  <hostname> as <user>; scope <scope>`; then a header row of 22 columns, `scope, kind, seq, from,
+  to, name, action, source, destination, application, inactive, group, inherited, log_init,
+  log_close, count, scheduler, description, application_implicit, dynamic_application, comment,
+  pair_comment`; then one row per policy. The `inactive` column holds the reason; the `application`
+  column shows an implicit `junos-defaults` or `any` (5.3), and `application_implicit` is `true`
+  or `false`. `comment` is the rule's comment, then each comment inside it as `before <statement>:
+  <text>` (or `at the end: <text>`), joined by ` | `; `pair_comment` is its zone-pair context's.
   Lists are space-joined. A cell starting with `=`, `+`, `-`, `@`, tab or CR is prefixed with `'`
-  so a spreadsheet does not evaluate it. With no readable scope the CSV has the two header rows
-  only.
+  so a spreadsheet does not evaluate it. Other characters, control characters included, are
+  written as they are on the device, so the export is exact (owner decision OD-08, whose default
+  this is, and which the owner may veto in favour of writing them as `<U+XXXX>`).
+- CSV when the configuration was not read (`config.status` not `ok`): 409 `{error, config:
+  {status, message}}` and no file, because an empty CSV would read as "no policies" (5.1).
 - The filename's host and scope parts keep only `[A-Za-z0-9._-]`.
 
 ### 5.9 Audit
 
 `read_inventory` (user, source address, scope, policy count, config status) on every successful
-read; `export` (user, source, scope, format) on every export; `session_lost` when the device
-session ends mid-read. The audit trail never holds passwords, tokens, cookies or CSRF values
+read; `export` (user, source, scope, format, config status) on every export, the CSV 409
+included; `session_lost` when the device session ends mid-read. A snapshot answered from a read
+just made (5.2) writes no `read_inventory` line, because no device read happened (owner decision
+OD-06, whose default this is, and which the owner may veto in favour of recording it as reused).
+The audit trail never holds passwords, tokens, cookies or CSRF values
 ([`logs.AuditTrail`](../../src/jwicket/logs.py)).
 
 ## 6. Data sources
@@ -419,10 +509,11 @@ completed from a checked, fixed list.)
 | Read | RPC and options | Filter | Permission | Status |
 | --- | --- | --- | --- | --- |
 | Device identity | `get-software-information` | none | not recorded (Q-AUTH-03) | RPC and `host-name`, `product-model`, `junos-version` **verified** in the 24.4R2 RPC YANG. Per-node `multi-routing-engine-item/re-name` wrapping on clusters **inferred** |
-| Configuration | `get-configuration` with `database="committed" inherit="inherit" groups="groups"` (sent through PyEZ `rpc.get_config(filter_xml, options)`) | `INVENTORY_FILTER`: `security/{policies, zones, address-book}`, `applications`, `logical-systems` and `tenants` each narrowed to `name`, `security/{policies, zones, address-book}` and `applications`, `system/services/outbound-ssh`, `chassis/high-availability`. Fallback `INVENTORY_FILTER_MINIMAL`: `security/{policies, zones, address-book}`, `applications`. That Junos answers with the key and only the selected children of every list entry, with the entry's `inactive` attribute, is **inferred** (RFC 6241 subtree filtering as Junos implements it; Q-REL-01) | `security` bit to view `[edit security policies]` (**verified**, [security policies statement](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-edit-policies.html)); the rest **unknown**. Denied versus silently omitted: **unknown** (Q-AUTH-03) | Attributes **verified** ([get-configuration](https://networkingdocs.hpe.com/documentation/us/en/software/junos/junos-xml-protocol/topics/ref/tag/junos-xml-protocol-get-configuration.html), [groups output](https://networkingdocs.hpe.com/documentation/us/en/software/junos/junos-xml-protocol/topics/task/junos-xml-protocol-requesting-configuration-information-output-format-groups-ranges.html)). Behaviour of the fallback trigger (which error a release without `tenants` returns) **unknown** |
+| Configuration | `get-configuration` with `database="committed" inherit="inherit" groups="groups"` (sent through PyEZ `rpc.get_config(filter_xml, options)`) | `INVENTORY_FILTER`: `security/{policies, zones, address-book}`, `applications`, `logical-systems` and `tenants` each narrowed to `name`, `security/{policies, zones, address-book}` and `applications`, `system/time-zone` (one leaf, added 2026-11-25), `system/services/outbound-ssh`, `chassis/high-availability`. Fallback `INVENTORY_FILTER_MINIMAL`: `security/{policies, zones, address-book}`, `applications`. That Junos answers with the key and only the selected children of every list entry, with the entry's `inactive` attribute, is **inferred** (RFC 6241 subtree filtering as Junos implements it; Q-REL-01) | `security` bit to view `[edit security policies]` (**verified**, [security policies statement](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-edit-policies.html)); the rest **unknown**. Denied versus silently omitted: **unknown** (Q-AUTH-03) | Attributes **verified** ([get-configuration](https://networkingdocs.hpe.com/documentation/us/en/software/junos/junos-xml-protocol/topics/ref/tag/junos-xml-protocol-get-configuration.html), [groups output](https://networkingdocs.hpe.com/documentation/us/en/software/junos/junos-xml-protocol/topics/task/junos-xml-protocol-requesting-configuration-information-output-format-groups-ranges.html)). Behaviour of the fallback trigger (which error a release without `tenants` returns) **unknown** |
 | HA | `get-chassis-cluster-status` | none | not recorded | RPC and `cluster-id`, `redundancy-group/{redundancy-group-id, device-stats/{device-name, device-priority, redundancy-group-status}}` **verified** in YANG. Whether `device-stats` repeats per node or holds flat repeated fields: **unknown**, so the parser accepts both. Reply on a standalone device: **unknown** (Q-REL-01, Q-HA-01) |
 | MNHA | none (configuration) | `chassis/high-availability` presence, not deactivated | as configuration | Presence-only detection, **inferred**. Q-HA-03 |
 | Central management | none (configuration) | `system/services/outbound-ssh/client` | as configuration | Statement **verified** to exist; that a client means Security Director, SDC or Mist is **inferred** (Q-MGMT-01) |
+| Time zone | none (configuration) | `system/time-zone` | as configuration; the same `system` view permission the outbound-SSH part relies on is **inferred** | `time-zone` under `[edit system]`, default UTC, and "To have the time zone change take effect for all processes running on the router or switch, you must reboot" **verified** ([time-zone statement](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/time-zone-edit-system.html)). That a deactivated statement leaves the default in effect is **inferred**. Reading it adds one leaf to the existing configuration read and no RPC: owner decision OD-05, shipped as its default, which the owner may veto (the time-zone row of the device facts and the Logs view's device-zone option would go with it) |
 
 **Configuration element names the parser reads.** Names are local names (namespaces ignored, see
 7.6). Source for the tree: Juniper YANG 24.4R2 `junos-es-conf-security`, `-applications`,
@@ -505,7 +596,11 @@ This is the order J-Wicket displays, not a matcher it runs.
   were configured.
 - `pre-id-default-policy` exists: **verified**. Its role in evaluation (before application
   identification completes) is not modelled; J-Wicket reports its presence and warns.
-- `policy-rematch` presence: **verified**; its `extensive` option is not read.
+- `policy-rematch` presence: **verified**. Its `extensive` option (`policy-rematch <extensive>`,
+  **verified**, [policy-rematch statement](https://networkingdocs.hpe.com/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-edit-policy-rematch.html))
+  is read since 2026-11-25 as `policy_rematch_extensive`: true only when it is active under an
+  in-effect `policy-rematch`. A deactivated `extensive` is warned and not shown as in effect; any
+  other child is reported as a setting not displayed (5.5).
 
 ### 7.4 Address book lookup and set membership
 
@@ -514,24 +609,42 @@ This is the order J-Wicket displays, not a matcher it runs.
   **verified** to exist. A zone may be attached to only one book; otherwise commit fails with
   "Security zone must be unique in address books" (**verified**,
   [J-Web Global Addresses page](https://networkingdocs.hpe.com/documentation/us/en/software/jweb-srx24.4/jweb-srx/topics/concept/j-web-security-about-global-addresses-page.html)).
-- The lookup chain (legacy zone book, then attached book, then `global`), global policies using
-  only `global`, and set members resolving only in the set's own book: **inferred**. Another
-  reading of the documentation is that any unattached book applies to all zones, where J-Wicket
-  treats only the book *named* `global` that way. Whether legacy and global books can coexist: **unknown**. Open
-  question 2.
-- `any`, `any-ipv4`, `any-ipv6` as reserved names: **inferred** (common usage; no page found so
-  far defines them).
+- "A zone can use two address books at a time—the global address book and the address book that
+  the zone is attached to", and "Addresses in a user-defined address book have a higher lookup
+  priority than addresses in the global address book": **verified**
+  ([address books and address sets](https://networkingdocs.hpe.com/documentation/us/en/software/junos/security-policies/topics/topic-map/security-address-books-sets.html)).
+  So an attached book before `global` is verified. The legacy zone book coming first, global
+  policies using only `global`, and set members resolving only in the set's own book: **inferred**.
+- "Address sets can only contain address names that belong to the same security zone":
+  **verified** (same page). That J-Wicket looks members up in the set's own book is its reading of
+  that rule, not a statement of it.
+- Conflict: the [address-book statement page](https://networkingdocs.hpe.com/documentation/us/en/software/junos/security-policies/topics/ref/statement/security-edit-address-book.html)
+  says global entries "are available to all security zones that are not attached to address
+  books" (**verified**), which reads as if an attached zone did not use `global`; the topic page
+  above says it uses both. J-Wicket follows the topic page. Another reading of the documentation is
+  that any unattached book applies to all zones, where J-Wicket treats only the book *named*
+  `global` that way. Whether legacy and global books can coexist: **unknown**. Open question 2.
+- "Address names any, any-ipv4 and any-ipv6 are reserved; you cannot use them to create any
+  addresses": **verified** (the address books page above).
 
 ### 7.5 Inactive configuration
 
 - `inactive="inactive"` marks a deactivated element: **verified**.
+- Deactivated statements and identifiers "do not take effect when you issue the commit command",
+  and "you can only deactivate identifiers or complete one-liner statements. You cannot deactivate
+  just parts of a one-liner": **verified**
+  ([deactivating statements and identifiers](https://networkingdocs.hpe.com/documentation/en_US/junos13.1/topics/task/configuration/junos-software-configuration-statements-identifiers-deactivating-reactivating.html),
+  a Junos 13.1 page). That `screen <name>;` and `destination-port <n>;` are such one-liners, so
+  J-Wicket lists them in `inactive_parts`, is **inferred**.
 - An inactive ancestor makes its whole subtree ineffective: **inferred**. J-Wicket applies it to:
   a rule, its zone-pair context, the `global` container, `[edit security policies]`,
   `[edit security]`, a logical or tenant system (rows marked, scope warning), inactive leaf values
   and flags inside an active rule (`inactive_parts`), including global `from-zone` / `to-zone`
-  values; the default policy, `policy-rematch` and `pre-id-default-policy`; host-inbound entries;
-  and set members, address entries, address books, `attach` zones and applications during
-  resolution (5.6).
+  values; the default policy, `policy-rematch` (and its `extensive`) and `pre-id-default-policy`;
+  host-inbound entries; deactivated parts of zones, interfaces, address entries and applications
+  (a deactivated `screen` or application port or protocol is `null`, not shown as configured); and
+  set members, address entries, address books, `attach` zones and applications during resolution
+  (5.6).
 - **Not applied yet:** an inactive zone does not mark the policies that name it, and an inactive
   object referenced by a rule does not mark the rule itself (the resolution shows what was skipped).
   Open question 3.
@@ -592,31 +705,46 @@ Each read sends three RPCs on the operator's session. Junos has a `UI_NETCONF_CM
 **inferred**. How much log volume and mgd load the reads add is Q-LOAD-01 and Q-LOAD-03. The 2 s
 per-operator throttle and the session cap (`max_sessions`, default 4) bound it.
 
+### 7.11 Zones and host-inbound traffic
+
+- Host-inbound traffic can be set on a zone or on its interfaces, and "Interface configuration
+  overrides that of the zone": **verified**
+  ([security zones](https://networkingdocs.hpe.com/documentation/us/en/software/junos/security-policies/topics/topic-map/security-zone-configuration.html)).
+  The server returns both levels as configured; the Objects view applies the override.
+- "except can only be used if all has been defined": **verified** on the Junos ES 9.3
+  [system-services page](https://networkingdocs.hpe.com/documentation/software/junos-es/junos-es93/junos-es-swcmdref/system-services.html),
+  matching the 24.4R2 YANG note in 5.3.
+- `functional-zone management` exists as a hierarchy level: **verified** in the Junos ES 9.3
+  reference; its presence in 24.4 is **inferred**. J-Wicket reports it (5.5) and does not show it
+  as a zone.
+
 ## 8. UI requirements
 
 The UI is being rebuilt as UI v2. These are requirements, not a description of screens. Status
-is as of 2026-11-24: "v1" means the superseded `static/app.js` (as committed at `276f9a6`) did it; "engine" means the shared
-`static/js/query.js` does it and is unit-tested; "open" means not yet confirmed in v2. The v2 views
-are built and committed and have been exercised by hand on the development server, but no requirement
-has been signed off against AC-001-21 yet.
+is as of 2026-11-25: "v1" means the superseded `static/app.js` (as committed at `276f9a6`) did it; "engine" means the shared
+`static/js/query.js` does it and is unit-tested; "open" means not yet confirmed in v2; "built
+(fixtures)" means the UI follow-up of 2026-11-25 built it in v2 against the development server's
+fixtures (`branch`, `branch-edge`, `cluster-lsys`; `admin` and `auditor`), which is not a sign-off
+and not qualification. The v2 views are built and committed and have been exercised by hand on the
+development server, but no requirement has been signed off against AC-001-21 yet.
 
 | ID | Requirement | Status |
 | --- | --- | --- |
-| UI-001-01 | Every view shows the scope banner: device hostname, model and release; HA mode with cluster role when known (for example `RG0 primary node0`); scope (root, logical system, tenant); the Junos user the data was read as, with a distinct amber variant for `lab-token` ("as `<daemon account>`"); source (committed database, inheritance expanded); read time; "also managed from `<client>`" when outbound-SSH clients exist, worded as detected, never "not managed" | v1; open in v2 |
+| UI-001-01 | Every view shows the scope banner: device hostname, model and release; HA mode with cluster role when known (for example `RG0 primary node0`); scope (root, logical system, tenant); the Junos user the data was read as, with a distinct amber variant for `lab-token` ("as `<daemon account>`"); source (committed database, inheritance expanded); read time; "also managed from `<client>`" when outbound-SSH clients exist, worded as detected, never "not managed" | v1; built (fixtures) in v2, not signed off. The device facts add the configured time zone (5.3 `clock`, "not known" when the configuration was not read); the subtitle says "configuration not read" instead of naming a source when it was not; a deactivated management client is listed but not counted, and "managed from: not known" when the filter fell back; the HA chip reads `standalone?`, with the server's reason in its tooltip, when the standalone answer carries a message (the cluster status read failed, or the Multinode HA settings were not read) |
 | UI-001-02 | A full-width fixture banner whenever any response has `meta.fixture: true` | Shell (v2) |
 | UI-001-03 | Policies default to evaluation-order sections per zone pair: zone-pair rows by `seq`, then the global rows that apply to that pair, then the default policy row. Another sort is allowed only as a visible, labelled choice that one action undoes; the UI never re-sorts silently | v1; open in v2 |
-| UI-001-04 | Inactive rows stay in place, visibly skipped, with the reason (`policy`, `zone-pair`, `policies`, `security` or `scope`); deactivated parts listed on the row's detail; a deactivated default policy, rematch or pre-ID setting is never shown as in effect | v1 (policy and zone-pair only); open in v2 |
-| UI-001-05 | Provenance badges: `group`, `inherited` parts, all `groups`; on every object type, not only policies | v1; open in v2 |
-| UI-001-06 | Unmodeled settings shown on the row or object (policies, zones, interfaces, addresses, sets, books, applications) and in a warnings list; configuration comments shown as comments; scope and snapshot warnings shown verbatim | v1 (policies only); open in v2 |
+| UI-001-04 | Inactive rows stay in place, visibly skipped, with the reason (`policy`, `zone-pair`, `policies`, `security` or `scope`); deactivated parts listed on the row's detail; a deactivated default policy, rematch or pre-ID setting is never shown as in effect | v1 (policy and zone-pair only); built (fixtures, `branch-edge`) in v2 for every reason, not signed off. A deactivated ancestor gets a banner; a reference that resolution skipped because it is deactivated is tagged `deactivated`, not "not found" |
+| UI-001-05 | Provenance badges: `group`, `inherited` parts, all `groups`; on every object type, not only policies | v1; built (fixtures) in v2 on policies and every object type, not signed off |
+| UI-001-06 | Unmodeled settings shown on the row or object (policies, zones, interfaces, addresses, sets, books, applications) and in a warnings list; configuration comments shown as comments; scope and snapshot warnings shown verbatim | v1 (policies only); built (fixtures, `branch-edge`) in v2, not signed off. Configuration comments on rules, inside them, on zone pairs and the global section, on the default policy, rematch and pre-ID settings, and on objects are shown verbatim as comments, never as settings; hidden and direction-changing characters are badged, and no CLI command is offered for a name with a line break or control character |
 | UI-001-07 | Detail panel per rule: match lists with resolved leaves and the book each came from, `truncated` and `unresolved` stated; the exact `show configuration ...` path; the `show security match-policies from-zone A to-zone B source-ip X destination-ip Y source-port P destination-port Q protocol T` command, with LSYS/tenant option when scoped, pre-filled only with unambiguous values (a /32 or /128 host, a numeric destination port) and placeholders otherwise | v1; open in v2 |
-| UI-001-08 | `default_policy: null` reads "not configured (Junos default: deny-all)" | open |
+| UI-001-08 | `default_policy: null` reads "not configured (Junos default: deny-all)" | Built (fixtures) in v2, not signed off. A deactivated default policy reads as the Junos default with the configured action marked deactivated, and the reason when an ancestor is deactivated |
 | UI-001-09 | A zone-pair matrix from `zone_pairs`, linking into each pair's section | v1; open in v2 |
-| UI-001-10 | Query bar over policies with keys `name from to zone src dst app action group inactive addr log count`; `addr`/`src`/`dst` match resolved leaves CIDR-aware; parse errors inline with position. Policies have no device-side filtering, and the explain line says so | engine |
-| UI-001-11 | Objects view: Zones, Address books, Applications with the same table, provenance and detail patterns | open |
+| UI-001-10 | Query bar over policies with keys `name from to zone src dst app action group inactive addr log count`; `addr`/`src`/`dst` match resolved leaves CIDR-aware; parse errors inline with position. Policies have no device-side filtering, and the explain line says so | engine. The engine also has `port`, `kind`, `seq` and `desc`, and since 2026-11-25 `comment` (configuration comments, substring), `dynapp`, `url`, `identity` and `profile`; `inactive` takes the reasons `policy`, `zone-pair`, `policies`, `security` and `scope`. Free text also searches comments and those match lists |
+| UI-001-11 | Objects view: Zones, Address books, Applications with the same table, provenance and detail patterns | Built (fixtures, `branch`, `branch-edge`, `cluster-lsys`), not signed off. Deactivated objects, attach zones, members, interfaces and host-inbound entries are shown as written but not in effect; only active policies are counted as uses |
 | UI-001-12 | Cross-links: "N live sessions use this policy" from the last Sessions poll if one exists; "Sessions for this policy" and "Logs for this policy" (Spec 004) | open |
-| UI-001-13 | Every panel is data or an explicit state card (`denied`, `unsupported`, `failed`) with the server's message; `config: denied` shows no rows and says the login class did not allow the read; the "no security section" warning is prominent, not a footnote | v1; open in v2 |
+| UI-001-13 | Every panel is data or an explicit state card (`denied`, `unsupported`, `failed`) with the server's message; `config: denied` shows no rows and says the login class did not allow the read; the "no security section" warning is prominent, not a footnote | v1; built (fixtures, `auditor`) in v2, not signed off. A read that has to wait for another one on the same session waits instead of failing |
 | UI-001-14 | 401 returns to sign-in with the server's message (`signed_out: true` means the device session ended); 429 honours `Retry-After` | Shell (v2) |
-| UI-001-15 | Export buttons for JSON and CSV call `/api/export`; the user sees the stamp (device, scope, user, read time) before downloading | v1; open in v2 |
+| UI-001-15 | Export buttons for JSON and CSV call `/api/export`; the user sees the stamp (device, scope, user, read time) before downloading | v1; built (fixtures) in v2, not signed off: after the read and before the file is saved, a toast shows the file name, host, scope, read time and user with Save and Cancel; the CSV 409 is shown as its message |
 | UI-001-16 | No device data in `localStorage`, `sessionStorage` or IndexedDB; only UI preferences (theme) and query text the operator explicitly saved (shared with Spec 004 UI-004-05; Spec 004 open question 14). All text through `textContent`; no `innerHTML`; CSP and Trusted Types hold with no violations | Checked by `test_static.py`; enforced by the CSP |
 | UI-001-17 | Keyboard reachable, AA contrast in both themes, `role="grid"` with row counts for virtualised tables | open |
 
@@ -629,7 +757,8 @@ has been signed off against AC-001-21 yet.
 - **Least privilege from Junos.** With the `netconf` backend every read runs with the operator's
   login class (pending Q-AUTH-01, Q-AUTH-02). The `lab-token` backend runs as the daemon's account,
   is allowed only on a loopback bind, and is labelled in every snapshot.
-- **Secrets.** The filter never reads `system login` or other secret-bearing system hierarchies,
+- **Secrets.** The filter never reads `system login` or other secret-bearing system hierarchies
+  (from `[edit system]` it asks only for the `time-zone` leaf and `services outbound-ssh`),
   and within `[edit security]` it asks only for `policies`, `zones` and `address-book`, never the
   rest (which holds IKE pre-shared keys); each logical or tenant system is narrowed the same way
   instead of being read whole (`test_inventory_filter_is_narrow`, `test_minimal_filter`). That
@@ -645,7 +774,12 @@ has been signed off against AC-001-21 yet.
   (`test_public_message_does_not_echo_device_text`, `test_each_panel_fails_on_its_own`,
   `test_device_error_text_goes_to_the_diagnostic_log_only`).
 - **Load on mgd.** Per-operator 2 s throttle, one read at a time per operator (waiting at most
-  5 s), session cap. Sustained-load effects are Q-LOAD-01.
+  5 s), session cap; a second tab asking for the same scope within 2 s gets that read, not another
+  three RPCs (5.2). Sustained-load effects are Q-LOAD-01.
+- **Reads held for other tabs.** That reuse keeps a snapshot in the daemon's memory, on the web
+  session that made it: usable for 2 s, dropped within about 30 s after that at the latest, one per
+  endpoint, never handed to another web session (login classes differ), and dropped with the
+  session.
 - **Browser.** Strict CSP with Trusted Types; no device data in browser storage
   ([ADR 0007](../adr/0007-offline-capable-meaning.md)). The v2 shell keeps query state in the URL
   hash, which puts policy and object names into browser history on a shared workstation (open
@@ -663,11 +797,11 @@ criterion is met on a device. Test names are `Class.method` in the linked file.
 | AC-001-01 | Zone-pair rules in configuration order per context, then global rules in order; `seq` per context; ids unique | [`test_inventory.py`](../../tests/test_inventory.py): `BranchFixtureTests.test_evaluation_order_zone_pairs_then_global`, `.test_row_identity_and_zones`, `.test_zone_pairs_summary`, `EvaluationOrderTests.test_zone_pairs_in_config_order_then_global_regardless_of_xml_position` | Met (fixtures) |
 | AC-001-02 | Default policy (present, absent, from a group, deactivated), `policy-rematch`, pre-ID presence, each deactivated form warned and not shown as in effect | `EvaluationOrderTests.test_default_policy_absent_and_group`, `.test_policy_rematch_and_pre_id`, `ClusterLsysFixtureTests.test_default_policy_present_and_absent`, `DeactivatedStatementTests.test_deactivated_default_policy_rematch_and_pre_id`, `.test_active_settings_are_unchanged` | Met (fixtures) |
 | AC-001-03 | Actions (including `reject` and `unknown`), log, count, scheduler, application services | `BranchFixtureTests.test_actions_log_count_scheduler`, `EvaluationOrderTests.test_reject_and_unknown_actions` | Met (fixtures) |
-| AC-001-04 | Inactive with the nearest reason (`policy`, `zone-pair`, `policies`, `security`, `scope`); deactivated parts, global zone values, host-inbound entries, set members, entries, books and `attach` zones not shown or used as active; deactivated scopes warned | `BranchFixtureTests.test_inactive_policy`, `InactiveReasonTests.test_policy_vs_zone_pair`, `.test_inactive_match_entry_is_not_shown_as_active`, `ClusterLsysFixtureTests.test_inactive_tenant_is_marked_and_warned`, `LsysTenantInlineTests.test_scopes_never_merge_and_inactive_lsys`, `DeactivatedStatementTests.*` (10 tests) | Met (fixtures) |
+| AC-001-04 | Inactive with the nearest reason (`policy`, `zone-pair`, `policies`, `security`, `scope`); deactivated parts, global zone values, host-inbound entries, set members, entries, books and `attach` zones not shown or used as active; deactivated scopes warned | `BranchFixtureTests.test_inactive_policy`, `InactiveReasonTests.test_policy_vs_zone_pair`, `.test_inactive_match_entry_is_not_shown_as_active`, `ClusterLsysFixtureTests.test_inactive_tenant_is_marked_and_warned`, `LsysTenantInlineTests.test_scopes_never_merge_and_inactive_lsys`, `DeactivatedStatementTests.*` (15 tests) | Met (fixtures) |
 | AC-001-05 | Group provenance, partial and full inheritance, namespaced and stripped `group` attribute | `BranchFixtureTests.test_group_provenance`, `ProvenanceTests.test_policy_inherits_group_from_zone_pair`, `.test_partial_inheritance`, `.test_fully_inherited_policy`, `.test_plain_group_attribute_after_pyez_strips_namespaces`, `ClusterLsysFixtureTests.test_group_named_like_a_node`; [`test_xmlutil.py`](../../tests/test_xmlutil.py): `ProvenanceTests.*`, `LocalNameTests.test_group_attribute_under_any_release_uri` | Met (fixtures) |
 | AC-001-06 | Nothing dropped silently: unmodeled settings reported per policy level and per object (zones, interfaces, address entries, sets, books, applications, application sets); configuration comments attached, never reported as unmodeled | `BranchFixtureTests.test_unmodeled_permit_option_reported`, `UnmodeledTests.test_each_level_is_reported`, `.test_policies_level_settings_are_warned`, `.test_modeled_policy_has_no_unmodeled`, `.test_children_of_modeled_containers_are_not_dropped_silently`, `.test_match_fields_are_copied`, `ObjectUnmodeledTests.test_application_settings`, `.test_zone_interface_and_address_settings`, `.test_branch_fixture_has_no_object_warnings`, `CommentTests.test_comments_on_rules_contexts_and_objects` | Met (fixtures) |
 | AC-001-07 | Address resolution: chain order, nested sets, own-book members, any, unresolved, limits, cycles | `BranchFixtureTests.test_address_resolution_nested_sets_and_attached_book`, `.test_address_kinds`, `.test_every_resolved_address_has_the_documented_keys`, `AddressResolutionTests.*` (8 tests), `ExpansionLimitTests.*` (6 tests) | Met (fixtures), against the **inferred** order in 7.4 |
-| AC-001-08 | Application resolution: any, predefined, `dynamic-defaults`, the implicit unified-policy application, unresolved, terms, nested sets with cycles | `BranchFixtureTests.test_application_resolution`, `.test_applications_panel`, `ApplicationResolutionTests.*` (5 tests), `UnifiedPolicyTests.*` (3 tests) | Met (fixtures) |
+| AC-001-08 | Application resolution: any, predefined, `dynamic-defaults`, the implicit unified-policy application, unresolved, terms, nested sets with cycles | `BranchFixtureTests.test_application_resolution`, `.test_applications_panel`, `ApplicationResolutionTests.*` (7 tests), `UnifiedPolicyTests.*` (3 tests) | Met (fixtures) |
 | AC-001-09 | Scopes kept apart; LSYS resolves in its own books; unknown scope 404 with list; malformed scope 400 | `BranchFixtureTests.test_only_root_scope`, `.test_scope_summaries`, `ClusterLsysFixtureTests.test_scopes_are_separate`, `.test_lsys_resolves_in_its_own_books`; [`test_api_units.py`](../../tests/test_api_units.py): `ReadSnapshotTests.test_lsys_scope_and_unknown_scope`; [`test_http_server.py`](../../tests/test_http_server.py): `InventoryTests.test_unknown_scope_is_404_with_scopes`, `.test_malformed_scope_is_400`, `.test_scope_with_trailing_newline_is_malformed`, `ClusterHttpTests.test_cluster_scopes_and_ha` | Met (fixtures) |
 | AC-001-10 | Snapshot shape and stamp (`meta` fields, read-as, source, fixture flag) | `BranchFixtureTests.test_snapshot_shape_keys`, `InventoryTests.test_inventory_snapshot_shape`, `ReadSnapshotTests.test_ok_snapshot` | Met (fixtures) |
 | AC-001-11 | Each panel fails on its own with an explicit state; denied configuration shows no rows; a reply with no `<configuration>` is a failed panel; device error text reaches the diagnostic log only; hidden `security` section warned; cluster errors classified | `ReadSnapshotTests.test_each_panel_fails_on_its_own`, `.test_denied_configuration`, `.test_reply_without_configuration_is_a_failed_panel`, `.test_device_error_text_goes_to_the_diagnostic_log_only`, `ConfigurationRootTests.test_no_configuration_is_a_failed_read`, `InventoryTests.test_auditor_is_denied_the_configuration`; [`test_live.py`](../../tests/test_live.py): `SnapshotVisibilityTests.test_missing_security_section_is_not_presented_as_empty`, `.test_unexpected_cluster_error_reads_as_standalone_with_reason`, `.test_denied_cluster_status_stays_denied`; [`test_errors.py`](../../tests/test_errors.py): `ClassifyTests.*` | Met (fixtures). Real error wording: Q-REL-01, Q-AUTH-03 |
@@ -705,9 +839,9 @@ Definitions, methods and pass criteria are in [governance.md](../governance.md).
 | # | Question | Who decides | Settled by |
 | --- | --- | --- | --- |
 | 1 | Zone-pair before global and first match are documented (7.1). Confirm on a device that the default policy comes last and that global zone matching treats an empty list as any zone. No qualification test names this check; propose adding a `show security match-policies` comparison to Q-REL-01's method | Owner (governance) | Lab vSRX |
-| 2 | Address-book lookup: does an unattached book other than `global` apply to all zones? Can legacy zone books and global books coexist? Are set members limited to the set's own book? | Contributors, then lab owner certifies | Lab vSRX, `show security policies detail` |
+| 2 | Address-book lookup: does an unattached book other than `global` apply to all zones? Can legacy zone books and global books coexist? Are set members limited to the set's own book? Two Juniper pages disagree on whether a zone attached to an address book still uses `global`: the address books topic says a zone "can use two address books at a time—the global address book and the address book that the zone is attached to", while the address-book statement says global entries "are available to all security zones that are not attached to address books" (both **verified** as quoted, 7.4). J-Wicket follows the topic page (attached book, then `global`) | Contributors, then lab owner certifies | Lab vSRX, `show security policies detail` |
 | 3 | Resolution now skips inactive members, entries, books, `attach` zones and applications (5.6). Still open: should a rule that names an inactive zone or object be marked on the rule itself? | Contributors (spec change, then code) | Unit tests, then Q-REL-01 |
-| 4 | Read the YANG `default-action` form if a release emits it; render `null` as "not configured (Junos default: deny-all)" | Contributors | Q-REL-01 |
+| 4 | Read the YANG `default-action` form if a release emits it; render `null` as "not configured (Junos default: deny-all)". The rendering is built (UI-001-08); reading `default-action` is still open | Contributors | Q-REL-01 |
 | 5 | Parse the YANG `address-range` address form (today kind `unknown`). If `match source-end-user-profile` is a container (as YANG shows) rather than a leaf, today's parser drops its value without a warning, because the tag is on the known list | Contributors | Q-REL-01 |
 | 6 | Application expansion stops at the same limits as addresses but has no `truncated` flag, so a cut is silent. Add the flag | Contributors | Unit test |
 | 7 | For an LSYS- or TSYS-scoped login class, how does the reply look, and how should the scope be labelled? Today it would read as "Root system" | Owner, after Q-AUTH-03 | Q-AUTH-03 |
