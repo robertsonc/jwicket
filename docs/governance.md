@@ -19,8 +19,10 @@ denied the contents of a listed log. The same day, a
 uncommitted, lab-only build derived from dev3, not J-Wicket's own released bundle. It recorded
 partial observations for Q-RT-02, Q-TLS-01, Q-NET-01, Q-NET-03, Q-AUTH-01 and Q-AUTH-03, five
 session and log replies that the tests replay (Q-REL-01 stays partial, now on two platforms and
-releases), and a Q-HA-03 detection gap; whether those observations may change a status is the
-owner's (D20). Every other reply the tests parse is synthetic. G1 remains open.
+releases), and a Q-HA-03 detection gap. By owner decision D20 (2026-11-26), those observations
+count as partial vSRX statuses for that proof build only, each labelled as such; they say nothing
+about J-Wicket's own bundle, which has not run on a vSRX. Every other reply the tests parse is
+synthetic. G1 remains open.
 None of these results is certified, and nothing is qualified
 ([section 3.2](#32-what-qualified-platform-means)).
 The installers of [Spec 006](specs/006-installation.md) are built against fakes only, are
@@ -255,7 +257,7 @@ These block a gate or a qualification run. Each is the owner's unless the row sa
 | D17 | The installers' refusals and gate wording, proposals in ADR 0012: an override stamped "not qualification evidence" or a hard refusal when veriexec is not enforcing, and the one fixed shell read (open question 4); refusing chassis cluster, MNHA and dual routing engines until Q-HA-01 and Q-HA-03 (5); `--ack-managed` and `--ack-commit-scripts` (6); no host name before the prompt, the production signs, and whether a lab marker that only the lab owner sets is wanted (14) | The installers' first lab run | [Spec 006, section 8.11](specs/006-installation.md#811-refusals) |
 | D18 | Confirm the lead engineer's scope cuts C1 to C3 (setup mode D1 deferred, no `serve` mirror, ZTP documented only; open question 29), and accept the bundle changes D2 and D3 (open question 3; with the security reviewer, as new surface for Q-SEC-01) | Spec 006 acceptance | [Spec 006, section 4.1](specs/006-installation.md#41-scope-cuts-in-this-change) |
 | D19 | The other open questions of Spec 006 (2, 7, 11, 12, 15 to 19, 21 to 27 and 31), each with a proposed answer recorded in ADR 0012. Open questions 20, 28 and 30 (R-MODEL with `--lab-hardware` and a typed `lab only`; root's one-time directory step; `--access tls` by default) were decided by the owner on 2026-11-25 ([ADR 0011](adr/0011-owner-decisions-lab-gated-install.md), decision 4). **Proposed** [ADR 0015](adr/0015-verified-installer-profiles.md) and [Spec 006 section 7.12](specs/006-installation.md#712-adaptive-preflight-proposed) reopen open questions 28 and 30: they keep the decided defaults but offer an account-owned state directory, an exact-interface listener and a same-device pinned operator NETCONF address as alternatives, from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md). Tracked as Spec 006 open question 32 | Spec 006 acceptance; ADR 0015 | [Spec 006, section 21](specs/006-installation.md#21-open-questions-owner-decisions); [ADR 0015](adr/0015-verified-installer-profiles.md) |
-| D20 | May results from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) of 2026-11-26 change a status cell? Its runs used an uncommitted, lab-only build derived from dev3 (account-owned settings path, HelperVM-only HTTPS listener, provisioned ECDSA pin, on-box SSH and NETCONF compatibility code), not J-Wicket's own released bundle, so its results apply to no committed build ([evidence rule 2](#6-evidence-rules)). Affected: Q-RT-02, Q-TLS-01, Q-AUTH-03, Q-NET-03 and Q-REL-01, and the observations recorded under Q-AUTH-01 and Q-NET-01. Until decided they are recorded beside the statuses and change none. Owner, with the lab owner | Any vSRX 24.4 status change from that record | [Section 4](#4-qualification-test-catalogue); [section 6](#6-evidence-rules) |
+| D20 | **Decided** (owner, 2026-11-26, in the owner's words: "Yes, with notes/documentation"). Results from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) of 2026-11-26 may change a status cell. Its runs used an uncommitted, lab-only build derived from dev3 (account-owned settings path, HelperVM-only HTTPS listener, provisioned ECDSA pin, on-box SSH and NETCONF compatibility code), not J-Wicket's own released bundle, so its results apply to that build only ([evidence rule 2](#6-evidence-rules)). The rule: a cell that counts it, and its status bullet, say it is the proof build (uncommitted, lab-only, dev3-derived, not J-Wicket's own released bundle), cite its SHA-256 as the lab record gives it, and link the record ([4.1](#41-how-to-read-an-entry)). Applied on 2026-11-26 to Q-RT-02, Q-TLS-01, Q-AUTH-01, Q-AUTH-03, Q-NET-01 and Q-NET-03, each now **partial** on vSRX 24.4R2-S3.5; the Q-REL-01 entry is not changed here. Certification is still the lab owner's (D2, [evidence rule 6](#6-evidence-rules)) | Nothing now (decided) | [Section 4](#4-qualification-test-catalogue); [section 6](#6-evidence-rules) |
 | D21 | Does a native Junos confirmed-commit timeout, observed with no J-Wicket write path, count toward Q-CHG-03? The vSRX lab follow-up recorded one ([4.11](#411-change-protocol-q-chg-01-to-q-chg-16)). Until decided it changes no status. Owner, with the lab owner | Q-CHG-03 | [Section 4.11](#411-change-protocol-q-chg-01-to-q-chg-16) |
 
 ## 3. Gates G0 to G5
@@ -392,7 +394,16 @@ is not certified and does not qualify a cell.
 Entries marked **proof build** come from the
 [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) of 26 November 2026, which ran an
 uncommitted, lab-only build derived from dev3. They are neither spike-equivalent nor J-Wicket's own
-bundle. They are recorded beside the statuses; whether they may change one is D20.
+released bundle. By owner decision D20 (2026-11-26) they may change a status cell, provided the
+cell and its status bullet say it is the proof build (uncommitted, lab-only, dev3-derived, not
+J-Wicket's own released bundle), cite its SHA-256 as the lab record gives it, and link the record.
+The record gives one bundle SHA-256, for the final proof bundle, `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb` (payload
+`18208dbfc1f8fdb961fedd020162b9a8606cd512e2f3eebf38cc576228ea6218`); it says the later runs used
+distinct proof builds and gives no digest for the earlier ones, so an entry says when an
+observation came from an earlier trial. A proof-build status applies to that build only
+([evidence rule 2](#6-evidence-rules)), says nothing about J-Wicket's own bundle, and is not
+certified until the lab owner checks it (rule 6). The method words still hold: a proof-build
+result that did not follow the method is **partial**, never passed or failed.
 
 A pass criterion that depends on a budget (memory, CPU, log volume) needs that budget written into
 its entry before the test runs (D9). A test run without one records numbers; it cannot pass.
@@ -402,18 +413,18 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | ID | Test | Gate | Status (all cells "not run" unless stated) |
 | --- | --- | --- | --- |
 | [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Pass** on SRX4100 25.2R1-S1.4 (Python 3.7.10, every module `ok`); **partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
-| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **spike-equivalent partial** on vSRX 24.4R2-S3.5 (`wicket_spike.py`); **proof build** on the same release, not J-Wicket's own bundle: ten-minute idle memory, one signed-in operator's memory, and recovery after SIGTERM and SIGKILL recorded ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#ten-minute-idle-and-jet-supervisor-recovery); no status change, D20) |
+| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **spike-equivalent partial** on vSRX 24.4R2-S3.5 (`wicket_spike.py`); **partial** on the same release with the **proof build** (uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): ten-minute idle memory, one signed-in operator's memory, and recovery after SIGTERM and SIGKILL recorded ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#ten-minute-idle-and-jet-supervisor-recovery); counted by D20) |
 | [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | **Works** on SRX4100 25.2R1-S1.4 (`/var/db/scripts/jet` is first on `sys.path`) |
 | [Q-RT-04](#q-rt-04-survives-reboot) | Survives reboot | G2 (proposed) | Not run |
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
-| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Met except the SSH-key case** on SRX4100 25.2R1-S1.4 (read-only, operator and super-user accounts; RPCs attributed to the operator; sign-out, replacement and cap checked); **proof build** on vSRX 24.4R2-S3.5: loopback NETCONF did not answer, and a pinned sign-in to an interface address, outside this test's loopback method, was observed ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); no status change, D20) |
+| [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Met except the SSH-key case** on SRX4100 25.2R1-S1.4 (read-only, operator and super-user accounts; RPCs attributed to the operator; sign-out, replacement and cap checked); **partial** on vSRX 24.4R2-S3.5 with the **proof build** (uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): loopback NETCONF on TCP 830 did not answer, and a pinned sign-in to an interface address, outside this test's loopback method, was observed ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); counted by D20) |
 | [Q-AUTH-02](#q-auth-02-radius-and-tacacs-template-users) | RADIUS and TACACS+ template users | G1 | Not run |
-| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Partial, not certified.** Predefined-class observations and a [dev3 restricted-class trial](evidence/2026-11-26-srx4100-dev3/README.md) on SRX4100 25.2R1-S1.4; **proof build** on vSRX 24.4R2-S3.5: restricted-class log denial, sign-out and attribution observed ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); no status change, D20) |
+| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Partial, not certified.** Predefined-class observations and a [dev3 restricted-class trial](evidence/2026-11-26-srx4100-dev3/README.md) on SRX4100 25.2R1-S1.4; **partial, not certified,** on vSRX 24.4R2-S3.5 with the **proof build** (uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): restricted-class log denial, sign-out and attribution observed ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); counted by D20) |
 | [Q-AUTH-04](#q-auth-04-junos-lockout-and-j-wickets-throttle) | Junos lockout and J-Wicket's throttle | G2 (proposed) | Not run |
-| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Met except a provisioning path** on SRX4100 25.2R1-S1.4 (1.2 and 1.3 served, 1.0 and 1.1 refused, `__Host-` Secure cookie, HSTS, bad key mode refused); **proof build** on vSRX 24.4R2-S3.5: certificate-verified HTTPS to an internal lab client on fxp0 observed, the method's checks not run ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); no status change, D20) |
-| [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **fxp0 part met** on SRX4100 25.2R1-S1.4 (TLS, through `mgmt_junos`); **vSRX part spike-equivalent partial** (`wicket_spike.py`: clear text, one port checked); **proof build** on vSRX 24.4R2-S3.5: TLS on the fxp0 address reached from an internal lab client, outside the method's hardware set-up ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); no status change, D20); revenue zone on hardware not run |
+| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Met except a provisioning path** on SRX4100 25.2R1-S1.4 (1.2 and 1.3 served, 1.0 and 1.1 refused, `__Host-` Secure cookie, HSTS, bad key mode refused); **partial** on vSRX 24.4R2-S3.5 with the **proof build** (uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): certificate-verified HTTPS to an internal lab client on fxp0 observed, the method's checks not run ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); counted by D20) |
+| [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **fxp0 part met** on SRX4100 25.2R1-S1.4 (TLS, through `mgmt_junos`); **vSRX part spike-equivalent partial** (`wicket_spike.py`: clear text, one port checked); vSRX part also **partial** on 24.4R2-S3.5 with the **proof build** (uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): TLS on the fxp0 address reached from an internal lab client, outside the method's hardware set-up ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); counted by D20); revenue zone on hardware not run |
 | [Q-NET-02](#q-net-02-port-8443-collisions) | Port 8443 collisions | G2 (proposed) | Not run |
-| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | **Fails** on SRX4100 25.2R1-S1.4 (`administratively prohibited`; the documented statement is a syntax error); on vSRX 24.4R2-S3.5, forwarding refused under default settings (`administratively prohibited`), to an existing device service, not the full method ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); no status change, D20) |
+| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | **Fails** on SRX4100 25.2R1-S1.4 (`administratively prohibited`; the documented statement is a syntax error); **partial** on vSRX 24.4R2-S3.5: forwarding refused under default settings (`administratively prohibited`), to an existing device service, not the full method; recorded in the lab follow-up that ran the **proof build** (uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`), though this check used no J-Wicket code ([vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md#test-results); counted by D20) |
 | [Q-HW-01](#q-hw-01-srx300-class-runtime-and-resources) | SRX300-class runtime and resources | G2 | Not run |
 | [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
 | [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
@@ -494,10 +505,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   [report, what we tested](evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md#what-we-tested),
   [`junos/baseline.set`](evidence/2026-11-23-vsrx-spike/junos/baseline.set). The spike daemon read
   options from `/var/tmp/wicket.args`; J-Wicket reads `/var/db/jwicket/jwicket.ini`.
-- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** partial evidence, recorded beside
-  the spike result above and not counted toward the status (D20); not J-Wicket's own bundle. The
-  build is an uncommitted, lab-only derivative of dev3 (its bundle and payload SHA-256 are in the
-  lab record).
+- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** **partial**, counted toward the
+  vSRX status by owner decision D20 (2026-11-26), beside the spike result above. It is the proof
+  build: uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; the lab
+  record gives the final proof bundle's SHA-256 as `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`. The result applies to that build only.
   - Met by the proof build: it started as a JET app with no arguments and answered an internal lab
     client over certificate-verified HTTPS; after SIGTERM and SIGKILL, JET started a new supervised
     PID with no manual start, and HTTPS answered again in 1.62 s and 6.28 s (timings include the
@@ -512,8 +523,8 @@ its entry before the test runs (D9). A test run without one records numbers; it 
     restart after a committed statement change are recorded; the one-operator run was a scripted
     client with bounded read refreshes, not a browser or sustained run; where standard error goes is not recorded; the stock installer and J-Wicket's own
     released bundle were not used.
-  - Owner decision pending (D20): whether this proof-build result may change the vSRX status.
-    Evidence: [lab record](evidence/2026-11-26-vsrx-vlab/README.md#ten-minute-idle-and-jet-supervisor-recovery).
+  - Not certified: the lab owner has not checked it (D2). Evidence:
+    [lab record](evidence/2026-11-26-vsrx-vlab/README.md#ten-minute-idle-and-jet-supervisor-recovery).
 - **Status, SRX4100 25.2R1-S1.4:** **met except idle memory**, J-Wicket's own bundle.
   - Met: it listened as a daemonized app with no arguments; the self-test's `payload_sha256`
     matched the build; a refused start (an address the default instance cannot bind) wrote its
@@ -622,8 +633,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   timeout observed on the device. Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's reads ran as the daemon's
   account (`jcluser`, class `j-super-user`) through a no-argument local `Device()` session; that is
   not this test.
-- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** partial evidence, not counted (D20),
-  and largely outside this test's method, which signs in to loopback. In the JET diagnostic, TCP 830
+- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** **partial**, counted toward the
+  vSRX status by owner decision D20 (2026-11-26), and largely outside this test's method, which
+  signs in to loopback. It is the proof build: uncommitted, lab-only, derived from dev3, not
+  J-Wicket's own released bundle; the lab record gives the final proof bundle's SHA-256 as
+  `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`, and no digest for the earlier pinned trials below. In the JET diagnostic, TCP 830
   did not answer on either IP loopback, while the device's interface addresses answered. The proof
   build instead opened operator NETCONF to an address on the same device: it compared the full
   provisioned ECDSA host key before password authentication, signed in a restricted operator,
@@ -632,8 +646,8 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   nonmatching key and a SHA-1 host signature stopped other trials before password authentication.
   Not recorded: loopback sign-in, super-user and read-only class sign-ins, the operator-safe message
   and `user_hash` audit for the wrong password, the SSH-key case, timeout, replacement and the cap.
-  Owner decision pending (D20). Evidence: [lab
-  record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
+  The working sign-in does not show the loopback path ADR 0002 relies on. Not certified (D2).
+  Evidence: [lab record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
 
 #### Q-AUTH-02 RADIUS and TACACS+ template users
 
@@ -679,8 +693,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   (AC-004-06). These are **partial, uncertified observations**. The complete custom-class
   and CLI comparison, raw replies, regexp-limited classes, and both scope-bound classes
   remain open.
-- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** partial evidence, uncertified and
-  not counted (D20). A temporary class with `interface security system trace view` signed in through
+- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** **partial, not certified**,
+  counted toward the vSRX status by owner decision D20 (2026-11-26). It is the proof build:
+  uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; the lab record
+  gives the final proof bundle's SHA-256 as `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`. A temporary class with `interface security system trace view` signed in through
   the pinned device-local NETCONF path. The root configuration and log sources reported `ok`;
   `messages` was listed but its contents returned `denied` and zero lines (AC-004-06). Sign-out
   returned HTTP 200 and the next inventory request 401. Junos attributed the committed reads,
@@ -688,7 +704,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   class received Junos's file-open permission denial for a synthetic log, stored as a recorded reply
   ([`get-log-denied.xml`](../tests/fixtures/recorded-vsrx-24.4R2-S3.5/SOURCE.md)). Not done: a
   minimum-privilege recipe, write denial, the full class matrix and CLI comparison, regexp-limited
-  and scope-bound classes, and a browser rendering check. Owner decision pending (D20). Evidence:
+  and scope-bound classes, and a browser rendering check. Evidence:
   [lab record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
 
 #### Q-AUTH-04 Junos lockout and J-Wicket's throttle
@@ -740,13 +756,15 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   `max-age=31536000`; and a key at mode 0644 refused the start with a message naming the file.
   Not done: compression, handshake time, a directory-owner refusal, and a provisioning path. Evidence:
   [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The spike's T8 (TLS) was not run.
-- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** partial evidence, not counted (D20);
-  the method was not followed. The HelperVM, an internal lab client, got HTTP 200 from `/` and
+- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** **partial**, counted toward the
+  vSRX status by owner decision D20 (2026-11-26); the method was not followed. It is the proof
+  build: uncommitted, lab-only, derived from dev3, not J-Wicket's own released bundle; the lab
+  record gives the final proof bundle's SHA-256 as `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`. The HelperVM, an internal lab client, got HTTP 200 from `/` and
   `/api/session` on fxp0 TCP 9443, with the certificate and its IP SAN checked; the listener served
   only that client. Not recorded: the protocol versions offered and refused, the cookie and HSTS
   checks, compression, handshake time, the settings refusals for wrong owner and mode, and a
   provisioning path. IPv6 HTTP and other ingress paths were not tested, and the run did not use the
-  tunnel (Q-NET-03). Owner decision pending (D20). Evidence: [lab
+  tunnel (Q-NET-03). Not certified (D2). Evidence: [lab
   record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
 
 #### Q-NET-01 Reachability through fxp0 and a revenue zone
@@ -790,13 +808,16 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   ([architecture](architecture.md)); TLS on TCP 9443 answered from a lab workstation, and a foreign
   `Host` got 421. No host-inbound statement was involved: fxp0 is not in a security zone.
   Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
-- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** an observation outside the method,
-  not counted (D20). The method runs on lab hardware with Q-TLS-01 passed; neither holds. JET's
+- **Status, vSRX 24.4R2-S3.5, proof build (26 November 2026):** vSRX part **partial**, counted by
+  owner decision D20 (2026-11-26), from an observation outside the method: the method runs on lab
+  hardware with Q-TLS-01 passed, and neither holds. It is the proof build: uncommitted, lab-only,
+  derived from dev3, not J-Wicket's own released bundle; the lab record gives the final proof bundle's SHA-256
+  as `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`. JET's
   bind-only diagnostic refused `127.0.0.1` but could bind `::1`, the address on `lo0.0` and the
   address on `fxp0.0`. Bound to the fxp0 address, the listener answered an internal lab client over
   TLS on TCP 9443 (HTTP 200, certificate and IP SAN checked). The proof's source check is not a
-  Junos ingress filter. Not tested: a revenue zone, `webapi-ssl`, other ports and IPv6 HTTP. Owner
-  decision pending (D20). Evidence: [lab
+  Junos ingress filter. Not tested: a revenue zone, `webapi-ssl`, other ports and IPv6 HTTP. Not
+  certified (D2). Evidence: [lab
   record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
 
 #### Q-NET-02 Port 8443 collisions
@@ -836,13 +857,16 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). Because of this, the installers
   default to TLS on the management address (`--access tls`), and none of their health checks opens
   an SSH forwarding channel ([Spec 006](specs/006-installation.md), revision 4).
-- **Status, vSRX 24.4R2-S3.5 (26 November 2026):** partial evidence, not counted (D20); the method
-  was not followed in full. With the device's default SSH settings, SSH authenticated and the
+- **Status, vSRX 24.4R2-S3.5 (26 November 2026):** **partial**, counted toward the vSRX status by
+  owner decision D20 (2026-11-26); the method was not followed in full. It comes from the lab
+  follow-up that ran the proof build (uncommitted, lab-only, derived from dev3, not J-Wicket's own
+  released bundle; final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb` in the lab record), though this
+  check used no J-Wicket code. With the device's default SSH settings, SSH authenticated and the
   workstation opened its local socket, but vSRX1 rejected the forwarding channel as
   `administratively prohibited`. The remote target was an existing device service, not J-Wicket's
   listener. The statement deploy-lab.md names was not checked with `?`, the account's login class is
-  not recorded, and a second class was not tried; no SSH policy was changed. Owner decision pending
-  (D20). Evidence: [lab record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
+  not recorded, and a second class was not tried; no SSH policy was changed. Not certified (D2).
+  Evidence: [lab record](evidence/2026-11-26-vsrx-vlab/README.md#test-results).
 
 ### 4.6 Hardware and load
 
@@ -1285,7 +1309,7 @@ platform and release, and is "qualified" only as [3.2](#32-what-qualified-platfo
 
 | Platform | 22.4 | 23.4 | 24.4 | 25.2 |
 | --- | --- | --- | --- | --- |
-| vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). [24.4R2-S3.5 lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md), two standalone vSRXs, with an uncommitted lab-only **proof build** derived from dev3: partial observations beside Q-RT-02, Q-TLS-01, Q-NET-01, Q-NET-03, Q-AUTH-01 and Q-AUTH-03; five recorded replies for Q-REL-01 (partial); Q-HA-03 partial (dev3 inventory logic run off-box did not detect MNHA); one native Junos rollback observation for Q-CHG-03. No proof-build result changes a status until the owner decides (D20); whether the rollback observation counts toward Q-CHG-03 is D21. J-Wicket's own bundle: not run. Every other test: not run. Not qualified |
+| vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). [24.4R2-S3.5 lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md), two standalone vSRXs, with an uncommitted, lab-only **proof build** derived from dev3, not J-Wicket's own released bundle (final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): Q-RT-02, Q-TLS-01, Q-AUTH-01, Q-AUTH-03, Q-NET-03 and the vSRX part of Q-NET-01 partial, for that build only (counted by owner decision D20, 2026-11-26); five recorded replies for Q-REL-01 (partial); Q-HA-03 partial (dev3 inventory logic run off-box did not detect MNHA); one native Junos rollback observation for Q-CHG-03 (whether it counts is D21). J-Wicket's own bundle: not run. Every other test: not run. Not qualified |
 | SRX300 class | not run | not run | not run | not run |
 | SRX1500 | not run | not run | not run | not run |
 | SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01, Q-REL-01 partial; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). [Dev3 follow-up](evidence/2026-11-26-srx4100-dev3/README.md): Q-AUTH-03 partial (restricted-class inventory and log denial). Not qualified |
