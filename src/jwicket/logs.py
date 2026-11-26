@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import logging
 import logging.handlers
@@ -30,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from jwicket.settings import ConfigError, LogSettings, check_output_directory, check_output_stat
 
@@ -96,7 +97,7 @@ class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
             raise ConfigError(f"log output {path} has no usable parent directory: {exc}") from exc
         super().__init__(path, maxBytes=max_bytes, backupCount=backups)
 
-    def _open(self) -> TextIO:
+    def _open(self) -> io.TextIOWrapper:
         path = Path(self.baseFilename)
         label = "log output"
         check_output_directory(path, label=label)

@@ -11,9 +11,13 @@ without letting anyone who cannot sign in lock everyone else out:
   over all user names stops one address from spraying names. Behind the SSH tunnel every client is
   127.0.0.1, so for tunnel users that looser count is a daemon-wide budget; filling it still takes
   real failed sign-ins, each of which Junos itself logs and applies its retry options to.
-* Named accounts also have an across-source failure budget. IPv6 sources use one /64 bucket and
-  IPv4-mapped addresses share the corresponding IPv4 bucket. The shared lab token has no named
-  account, so its existing source budget is unchanged.
+* Sources are compared as networks, not spellings: an IPv6 source counts as its /64 and an
+  IPv4-mapped address as the IPv4 address, so rotating addresses inside one /64 does not reset the
+  source's budget.
+* There is no failure count per user name across sources, on the owner's decision (2026-11-26):
+  it would let anyone who can reach the listener and knows a user name keep that account out of
+  J-Wicket. Junos's own ``system login retry-options`` apply to every attempt that reaches it, and
+  are where an across-source lockout policy belongs.
 * There is no daemon-wide per-minute budget. Instead at most ``concurrent`` sign-ins are checked by
   the backend at once, which bounds the load on Junos and its AAA servers.
 
@@ -26,13 +30,12 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict, deque
-from typing import Callable, Deque, Dict, Optional, Tuple, TypeVar
+from typing import Callable, Deque, Optional, Tuple, TypeVar
 
 from jwicket.peer import peer_key
 
 MAX_TRACKED_SOURCES = 1024
 MAX_TRACKED_NAMES = 4096
-MAX_TRACKED_ACCOUNTS = 4096
 K = TypeVar("K")
 
 
@@ -53,14 +56,11 @@ class LoginThrottle:
     ) -> None:
         self._per_name = per_name
         self._per_source = per_source
-        self._per_account = per_name * 2
         self._window = window_s
         self._clock = clock
         self._lock = threading.Lock()
         self._names: OrderedDict[Tuple[str, str], Deque[float]] = OrderedDict()
         self._sources: OrderedDict[str, Deque[float]] = OrderedDict()
-        self._accounts: OrderedDict[str, Deque[float]] = OrderedDict()
-        self._pending_accounts: Dict[str, int] = {}
         self._slots = threading.BoundedSemaphore(concurrent)
 
     def _prune(self, q: Deque[float], now: float) -> None:
@@ -81,7 +81,6 @@ class LoginThrottle:
             for w in (
                 self._wait(self._names.get((source, account)), self._per_name, now),
                 self._wait(self._sources.get(source), self._per_source, now),
-                self._wait(self._accounts.get(account), self._per_account, now) if account else None,
             )
             if w is not None
         ]
@@ -93,38 +92,18 @@ class LoginThrottle:
             return self._check(peer_key(source), name_key(user), self._clock())
 
     def begin_for(self, source: str, user: str) -> Tuple[Optional[float], bool]:
-        """Atomically check budgets and reserve a backend slot, or return a retry interval.
-
-        An in-flight check can become a failed check. Reserve capacity for it so simultaneous
-        attempts cannot overrun the account budget. A transient reservation itself is not a
-        recorded failure and only returns the ordinary short backend-busy retry.
-        """
-        account = name_key(user)
+        """Check the budgets and take a backend slot under one lock: ``(wait, False)`` when a budget is
+        used up, ``(None, False)`` when every slot is busy, ``(None, True)`` when admitted. The caller
+        records the outcome, then calls :meth:`end_for`."""
         with self._lock:
-            wait = self._check(peer_key(source), account, self._clock())
+            wait = self._check(peer_key(source), name_key(user), self._clock())
             if wait is not None:
                 return wait, False
-            pending = self._pending_accounts.get(account, 0)
-            failures = self._accounts.get(account)
-            if account and pending + (len(failures) if failures is not None else 0) >= self._per_account:
-                return None, False
-            if not self.begin():
-                return None, False
-            if account:
-                self._pending_accounts[account] = pending + 1
-            return None, True
+            return None, self.begin()
 
     def end_for(self, user: str) -> None:
-        """Release the reservation after recording the outcome, including backend unavailability."""
-        account = name_key(user)
-        with self._lock:
-            if account:
-                pending = self._pending_accounts[account] - 1
-                if pending:
-                    self._pending_accounts[account] = pending
-                else:
-                    del self._pending_accounts[account]
-            self.end()
+        """Release the slot taken by :meth:`begin_for` for ``user``, after the outcome is recorded."""
+        self.end()
 
     def _record(self, table: OrderedDict[K, Deque[float]], key: K, cap: int, now: float) -> None:
         q = table.get(key)
@@ -146,16 +125,12 @@ class LoginThrottle:
             now = self._clock()
             self._record(self._names, (source_key, account), MAX_TRACKED_NAMES, now)
             self._record(self._sources, source_key, MAX_TRACKED_SOURCES, now)
-            if account:
-                self._record(self._accounts, account, MAX_TRACKED_ACCOUNTS, now)
 
     def succeeded(self, source: str, user: str) -> None:
-        """Clear the account and source/account failures, but not the source spray budget."""
-        account = name_key(user)
+        """A successful sign-in clears that user name's failures from that source, not the source's
+        own budget."""
         with self._lock:
-            self._names.pop((peer_key(source), account), None)
-            if account:
-                self._accounts.pop(account, None)
+            self._names.pop((peer_key(source), name_key(user)), None)
 
     def begin(self) -> bool:
         """Take one of the concurrent backend sign-in slots without waiting. False if none is free."""

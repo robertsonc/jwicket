@@ -3,8 +3,11 @@
 Differences from the spike, each closing a specific gap:
 
 * A hard cap on concurrent connections. ``ThreadingHTTPServer`` starts one thread per connection
-  without limit; on a small routing engine that is a denial-of-service lever. External binds also
-  reserve capacity for different peers and refuse excess connections without waiting on accept.
+  without limit; on a small routing engine that is a denial-of-service lever. A connection over the
+  cap waits briefly for a slot (``CONNECTION_QUEUE_S``), so a browser burst of static files is
+  served rather than cut (F1). On an external bind one peer (an IPv4 address or an IPv6 /64) may
+  hold at most three quarters of the slots and of the waiting places, so others keep some of both,
+  and the wait happens in its own thread: the accept thread never blocks on a slot.
 * TLS handshakes happen in the worker thread with a socket timeout. Wrapping the listening socket
   (as the spike did) runs every handshake inside ``accept()`` on the single accept thread, so one
   slow client stalls everyone.
@@ -43,9 +46,17 @@ Route = Callable[[Request], Response]
 
 # Request line plus headers. Browsers send a few KiB; the cap keeps a slot from pinning megabytes.
 MAX_HEAD_BYTES = 16 * 1024
-# The local SSH-tunnel/loopback path retains the short burst accommodation for several profiles
-# loading static files (F1). Never wait on the accept thread of a network-exposed listener.
+# A connection over the cap waits this long for a slot before it is closed. A browser loading the app
+# opens about six connections at once, so two browser profiles loading together go over a cap of 8;
+# their requests for static files take milliseconds, so a short wait serves them instead of failing
+# the page's module graph (F1). On loopback the accept loop itself waits (further connections queue
+# in the listen backlog, holding no thread); on an external bind the wait runs in a bounded number of
+# waiter threads instead, so a peer holding every slot cannot stall accept for everyone.
 CONNECTION_QUEUE_S = 1.5
+# Waiting places on an external bind, per connection slot. A waiter is a thread asleep on a condition
+# (no request read, no handler), so a few browser profiles behind one address (a jump host) loading
+# at once fit (4 x 8 = 32 places at the default cap, at most 24 for one peer).
+QUEUE_PLACES_PER_SLOT = 4
 HEAD_TIMEOUT_S = 3.0
 
 
@@ -164,7 +175,7 @@ class Router:
 
 
 class _PeerSlots:
-    """Non-waiting admission for an external listener, bounded by the global slot count."""
+    """Admission for an external listener: a global count, at most three quarters of it per peer."""
 
     def __init__(self, capacity: int) -> None:
         self._capacity = capacity
@@ -173,27 +184,31 @@ class _PeerSlots:
         self._per_peer = max(1, (3 * capacity) // 4)
         self._active = 0
         self._peers: Dict[str, int] = {}
-        self._lock = threading.Lock()
+        self._cond = threading.Condition(threading.Lock())
 
-    def acquire(self, peer: str) -> bool:
+    def _admissible(self, key: str) -> bool:
+        return self._active < self._capacity and self._peers.get(key, 0) < self._per_peer
+
+    def acquire(self, peer: str, timeout: float = 0.0) -> bool:
+        """Take a place for ``peer``, waiting up to ``timeout`` seconds (0: do not wait)."""
         key = peer_key(peer)
-        with self._lock:
-            active = self._peers.get(key, 0)
-            if self._active >= self._capacity or active >= self._per_peer:
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._admissible(key), timeout=timeout):
                 return False
             self._active += 1
-            self._peers[key] = active + 1
+            self._peers[key] = self._peers.get(key, 0) + 1
             return True
 
     def release(self, peer: str) -> None:
         key = peer_key(peer)
-        with self._lock:
+        with self._cond:
             active = self._peers[key] - 1
             if active:
                 self._peers[key] = active
             else:
                 del self._peers[key]
             self._active -= 1
+            self._cond.notify_all()
 
 
 class JWicketServer(ThreadingHTTPServer):
@@ -226,6 +241,8 @@ class JWicketServer(ThreadingHTTPServer):
             # assume it is safely local merely because of its spelling.
             external = True
         self._peer_slots = _PeerSlots(max_connections) if external else None
+        # Places for connections waiting for a slot on an external bind, with the same per-peer share.
+        self._peer_waiters = _PeerSlots(QUEUE_PLACES_PER_SLOT * max_connections) if external else None
         self._local = threading.local()
         super().__init__(address, Handler)
 
@@ -251,9 +268,7 @@ class JWicketServer(ThreadingHTTPServer):
         peer = str(client_address[0])
         if self._peer_slots is not None:
             if not self._peer_slots.acquire(peer):
-                # No warning per refused network connection: keep the admission path cheap.
-                LOG.debug("connection limit reached; closing connection from %s", peer)
-                self.shutdown_request(request)
+                self._queue_external(request, client_address, peer)
                 return
         elif not self._slots.acquire(timeout=CONNECTION_QUEUE_S):
             LOG.warning("connection limit reached; closing connection from %s", peer)
@@ -264,6 +279,40 @@ class JWicketServer(ThreadingHTTPServer):
         except Exception:
             self._release_connection(peer)
             raise
+
+    def _queue_external(self, request: Any, client_address: Any, peer: str) -> None:
+        """Over the cap on an external bind: wait for a slot in a waiter thread, if a waiting place is
+        free for this peer; otherwise close now. Never waits on the accept thread."""
+        waiters = self._peer_waiters
+        if waiters is None:
+            raise RuntimeError("waiting places exist only on an external bind")
+        if not waiters.acquire(peer):
+            # No warning per refused network connection: keep the admission path cheap.
+            LOG.debug("connection limit reached; closing connection from %s", peer)
+            self.shutdown_request(request)
+            return
+        try:
+            threading.Thread(
+                target=self._wait_then_serve, args=(request, client_address, peer), daemon=True
+            ).start()
+        except Exception:
+            waiters.release(peer)
+            self.shutdown_request(request)
+            raise
+
+    def _wait_then_serve(self, request: Any, client_address: Any, peer: str) -> None:
+        slots, waiters = self._peer_slots, self._peer_waiters
+        if slots is None or waiters is None:
+            raise RuntimeError("waiting places exist only on an external bind")
+        try:
+            admitted = slots.acquire(peer, timeout=CONNECTION_QUEUE_S)
+        finally:
+            waiters.release(peer)
+        if not admitted:
+            LOG.debug("connection limit reached; closing connection from %s", peer)
+            self.shutdown_request(request)
+            return
+        self.process_request_thread(request, client_address)  # releases the slot when done
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         deadline = _ReadDeadline(self.socket_timeout_s)

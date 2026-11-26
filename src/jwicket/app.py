@@ -211,7 +211,7 @@ def record_startup_refusal(config_path: Path, reason: str) -> None:
         tmp = Path(name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(f"jwicket {__version__} refused to start: {reason}\n")
-        os.replace(tmp, target)
+        tmp.replace(target)
         tmp = None
     except (ConfigError, OSError) as exc:
         LOG.debug("could not record startup refusal in %s: %s", target, exc)
