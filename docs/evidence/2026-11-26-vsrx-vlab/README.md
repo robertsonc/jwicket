@@ -33,7 +33,7 @@ passed its workstation self-test and matched its on-box SHA-256.
 | Operator NETCONF (Q-AUTH-01) | TCP 830 did not answer on either IP loopback in the JET diagnostic. The same device's interface addresses answered. The compatible proof compared the full provisioned ECDSA host key before password authentication, signed in, performed bounded reads and signed out. A wrong password was rejected in an earlier pinned trial; a nonmatching key and a SHA-1 host signature stopped other trials before password authentication. | Does not qualify new production trust rules, NETCONF sign-in on other builds, or the wrong-password case with a usable daemon account key. |
 | Restricted reads (Q-AUTH-03, AC-004-06) | A temporary class with `interface security system trace view` signed in via the pinned path. The root configuration and log sources reported `ok`; the `messages` source was listed but its contents returned `denied` and zero lines. Sign-out was HTTP 200; the next inventory request was 401. Junos attributed the committed reads, `get-log`, and `close-session` to that user. | A custom class on one release; not a minimum privilege recipe, write denial, full class matrix or browser rendering check. |
 | Reply compatibility (Q-REL-01) | Baseline NETCONF reads on both devices showed that the full inventory filter was rejected at `tenants`; the minimal filter was accepted. The final application run used that fallback. | Same-release repeatability only. No recorded-reply fixtures are added by this record. |
-| MNHA baseline (Q-HA-03) | The direct data link was up on both nodes and carried the lab's established IKEv1/IPsec tunnel. Both reported HA mode not configured; the native CLI maps to `get-chassis-high-availability-information`. Both ran `kmd`; no mounted optional IKE package or running unified `iked` was observed. | No MNHA configuration, encrypted peer formation, J-Wicket live detection, or failover test. Preserve the existing VPN and use a lab image with the supported encrypted ICL stack. |
+| MNHA baseline (Q-HA-03) | The direct data link was up on both nodes and carried the lab's established IKEv1/IPsec tunnel. Both reported HA mode not configured; the native CLI maps to `get-chassis-high-availability-information`. Both ran `kmd`; no mounted optional IKE package or running unified `iked` was observed. | No MNHA was configured during baseline capture. See the separate paired configuration trial below; no operational HA pair was formed. |
 
 No NETCONF credentials or traffic contents are included. Device and lab addresses,
 passwords and hashes, certificates and keys, raw syslog and VPN details are omitted. The
@@ -51,10 +51,30 @@ registration. The original scripts language and REST configuration were restored
 unchanged. The HelperVM could no longer reach the listener. The test state and
 certificate files were removed, and Veriexec still reported `loaded active enforce`.
 
-The MNHA prerequisite check did not change either vSRX. Juniper documents an encrypted
-ICL for supported MNHA and the unified IKE package for that encryption on this release.
-The existing VPN was not interrupted. J-Wicket's installer still refuses `R-MNHA`;
-the application can label MNHA from committed configuration but does not report live
-peer health or failover. Neither was exercised on an actual pair here.
-[Juniper MNHA overview](https://networkingdocs.hpe.com/documentation/us/en/software/junos/high-availability/topics/concept/mnha-overview.html) ·
+## Paired MNHA configuration trial
+
+With the lab owner's approval, the trial temporarily deactivated the existing lab VPN
+and its IKE gateway, then configured reciprocal MNHA peers and SRG0 on the direct link.
+The exact candidate diff was checked under a configuration lock on both devices.
+No management, filter, peer-commit, firmware or package changes were made. This was a
+configuration trial, not an attempt to run an unencrypted operational pair.
+
+Both confirmed commits succeeded with Junos's HA mode change reboot warning. Without
+a reboot, both native peer and SRG0 status commands still reported HA mode not
+configured. The trial did not verify service roles, state synchronization, encryption,
+or failover. The live test still requires a lab image with the supported encrypted ICL
+stack and a controlled reboot. [Juniper 24.4 MNHA example](https://www.juniper.net/documentation/stage/us/en/software/junos2024.4/high-availability/topics/example/mnha-configuration-example.html) ·
 [Juniper 24.4 ICL encryption prerequisites](https://www.juniper.net/documentation/us/en/software/ccfips24.4/cc_security/cc-security5k/topics/concept/configuring-multinode-ha-link-encryption.html)
+
+A separate narrow committed read found `chassis high-availability` on both nodes.
+The unchanged J-Wicket inventory logic, exercised off-box against the live replies,
+returned `standalone` with a warning that the MNHA settings had not been read. Junos
+rejected the full inventory filter at `tenants`, and the fallback does not request the
+chassis subtree. This is a detection gap, not evidence of peer health or a live browser
+UI test. A future narrow HA read should distinguish absent configuration from denied
+or unreadable configuration; it must not infer that a peer is up. The installer still
+refuses `R-MNHA`.
+
+Neither timed commit was confirmed. After rollback, the scoped committed configuration
+digests (HA, IKE and IPsec) matched both pre-trial baselines, SSH management was still
+reachable, and each device again showed one active IPsec tunnel.
