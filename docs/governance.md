@@ -930,11 +930,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Pass:** MNHA detected on both nodes; the UI says it is one node of two independent devices; any
   RPC added goes through the allowlist rule with its recorded reply.
 - **Platforms:** a lab MNHA pair (record the platform).
-- **Status:** partial, not certified. Both lab vSRXs accepted a temporary MNHA configuration
-  but required a reboot to activate it. In an off-box replay of the unchanged J-Wicket
-  inventory logic against live replies, the minimal-filter fallback missed configured MNHA
-  on both nodes. A narrow chassis read saw it. No operational pair, encrypted peer link,
-  failover or on-box MNHA UI was exercised ([lab record](evidence/2026-11-26-vsrx-vlab/README.md)).
+- **Status:** partial, not certified. Both lab vSRXs booted with the MNHA configuration
+  and reported local SRG0 online, but the peer link was down on both. J-Wicket dev3's
+  off-box inventory against live NETCONF replies misclassified both nodes as standalone;
+  a narrow committed chassis read saw MNHA. No operational pair, encrypted peer link,
+  failover or on-box MNHA UI was demonstrated ([lab record](evidence/2026-11-26-vsrx-vlab/README.md)).
 
 ### 4.9 Coexistence and logs
 

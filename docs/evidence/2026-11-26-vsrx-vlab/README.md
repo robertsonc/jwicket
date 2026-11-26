@@ -56,14 +56,16 @@ certificate files were removed, and Veriexec still reported `loaded active enfor
 With the lab owner's approval, the trial temporarily deactivated the existing lab VPN
 and its IKE gateway, then configured reciprocal MNHA peers and SRG0 on the direct link.
 The exact candidate diff was checked under a configuration lock on both devices.
-No management, filter, peer-commit, firmware or package changes were made. This was a
-configuration trial, not an attempt to run an unencrypted operational pair.
+No management, filter, peer-commit, firmware or package changes were made. The follow-up
+exercised only SRG0 over the direct lab data link. No test application traffic was
+generated, and configuration synchronization was not enabled. It did not test an
+encrypted or production HA deployment.
 
 Both confirmed commits succeeded with Junos's HA mode change reboot warning. Without
 a reboot, both native peer and SRG0 status commands still reported HA mode not
 configured. The trial did not verify service roles, state synchronization, encryption,
-or failover. The live test still requires a lab image with the supported encrypted ICL
-stack and a controlled reboot. [Juniper 24.4 MNHA example](https://www.juniper.net/documentation/stage/us/en/software/junos2024.4/high-availability/topics/example/mnha-configuration-example.html) ·
+or failover. Encrypted qualification still requires a lab image with the supported IKE stack.
+[Juniper 24.4 MNHA example](https://www.juniper.net/documentation/stage/us/en/software/junos2024.4/high-availability/topics/example/mnha-configuration-example.html) ·
 [Juniper 24.4 ICL encryption prerequisites](https://www.juniper.net/documentation/us/en/software/ccfips24.4/cc_security/cc-security5k/topics/concept/configuring-multinode-ha-link-encryption.html)
 
 A separate narrow committed read found `chassis high-availability` on both nodes.
@@ -78,3 +80,31 @@ refuses `R-MNHA`.
 Neither timed commit was confirmed. After rollback, the scoped committed configuration
 digests (HA, IKE and IPsec) matched both pre-trial baselines, SSH management was still
 reachable, and each device again showed one active IPsec tunnel.
+
+### Reboot follow-up
+
+A fresh confirmed commit rolled back on vSRX1 during its first reboot; after SSH
+returned, neither the MNHA stanza nor a pending rollback remained. The second node
+was held until its own pending change was explicitly restored. The lab owner
+authorized rebooting both nodes. After verifying the original scope and exact
+candidate on each device, the same lab-only configuration was committed without a
+timer. The nodes were rebooted one at a time and the change was verified to persist.
+
+| Observation after both nodes rebooted | vSRX1 | vSRX2 |
+| --- | --- | --- |
+| MNHA and peer configured, per Junos | Yes | Yes |
+| Local SRG0 | ONLINE | ONLINE |
+| Peer connection / BFD | DOWN / DOWN | DOWN / DOWN |
+| J-Wicket dev3 inventory against live replies, off-box | `standalone` with incomplete-read warning | `standalone` with incomplete-read warning |
+
+The two local SRG0s activated, but they did not form an operational peer pair in
+this trial. Cold sync showed `IN PROGRESS`, with no SRG status messages exchanged
+in the captured counters. The cause of the down peer was not isolated. No on-box
+J-Wicket, successful state sync, encrypted ICL, or failover was demonstrated.
+Q-HA-03 remains partial, and the installer still refuses `R-MNHA`.
+
+The scoped restore matched the pretrial HA, IKE and IPsec configuration digests
+on both nodes. Because native HA state persisted after restoring the
+configuration, each node was rebooted once more. After that, Junos reported HA
+mode not configured on both and each again showed one active original IPsec
+tunnel. Management access was verified after every reboot.
