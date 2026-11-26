@@ -37,10 +37,10 @@ not here. If a J-Wicket finding depends on a Junos behaviour, say so in the repo
 
 | Version | Supported |
 | --- | --- |
-| `0.1.0.dev1` (the default branch) | **No.** Foundation stage: development and lab qualification only |
-| Lab pre-releases `vX.Y.Z.devN` (none published yet; the first, `v0.1.0.dev1`, waits for the owner's go) | **No.** Lab only and unsupported: for qualification runs on a disposable lab vSRX, or lab hardware attested with `--lab-hardware` and a typed `lab only`, never a production firewall. A fix lands in a later pre-release, not in a published one, which is immutable |
+| Default branch | **No.** Foundation stage: development and lab qualification only |
+| Published lab pre-releases `vX.Y.Z.devN` ([GitHub Releases](https://github.com/robertsonc/jwicket/releases)) | **No.** Lab only and unsupported: for qualification runs on a disposable lab vSRX, or lab hardware attested with `--lab-hardware` and a typed `lab only`, never a production firewall. A fix lands in a later pre-release, not in a published one, which is immutable |
 
-No release or pre-release has been made. Fixes land on the default branch. Support and
+No production release has been made. Fixes land on the default branch. Support and
 signed-package positions are decided at gates G4 and G5 ([governance.md](docs/governance.md)).
 Until then J-Wicket runs only on lab devices: by the lab procedure in
 [docs/deploy-lab.md](docs/deploy-lab.md) (a disposable vSRX or owner-approved lab hardware; a loopback bind behind
