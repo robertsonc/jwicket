@@ -435,7 +435,7 @@ One language for Policies, Sessions, Logs and Objects. It is the owner's "powerf
 | `NOT`, `-`, `!` | exclude | `-dport:53`, `-inactive:yes` |
 | `( )` | group, any nesting | `(dport:80 OR dport:443) -src:10.0.0.0/8` |
 | `!=` `>` `>=` `<` `<=` | compare | `dport>=1024`, `sev>=warning`, `dur>5m` |
-| `~`, `/regex/flags` | regular expression, smart case; a pattern that could take seconds on one long line (nested, back-to-back or ambiguous repeats) is refused with the reason, and Logs stops a slow filter after a time budget and says so | `policy~^pub` |
+| `~`, `/regex/flags` | regular expression, smart case, with the browser's own character classes, escapes and flags `i m s u`; it runs in J-Wicket's linear-time matcher, so no pattern can backtrack for seconds on a long line ([ADR 0013](docs/adr/0013-user-regexes-run-in-a-linear-time-matcher.md)); lookaround and back-references are refused with the reason, and Logs still stops a slow filter after a time budget and says so | `policy~^pub` |
 | `v1\|v2` | any of | `dport:80\|443\|8443` |
 | `"..."`, `'...'` | phrase | `reason:"TCP FIN"` |
 | addresses | IPv4 and IPv6 addresses, prefixes, ranges `a-b`, wildcards `10.10.*`, globs `10.*.0.1`, compared as addresses | `src:10.10.0.0/16` |

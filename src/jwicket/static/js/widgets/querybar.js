@@ -621,7 +621,8 @@ export class QueryBar {
       ['key:v1|v2', 'any of these values'],
       ['bytes>1M  dur>=5m', 'compare sizes (k M G = 1000-based, KiB MiB = 1024) and durations (s m h)'],
       ['src:10.10.0.0/16', 'addresses are CIDR-aware'],
-      ['"two words"  /re/i  key~re', 'phrase, regular expression'],
+      ['"two words"', 'a phrase'],
+      ...query.REGEX_HELP,
     ];
     const dl = el('dl', 'qb-help-dl');
     for (const [k, v] of rows) dl.append(text('dt', null, k), text('dd', null, v));

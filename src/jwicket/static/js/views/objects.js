@@ -313,7 +313,8 @@ function makeBar(ctx, tab, getRows) {
         ['key:v1|v2', 'any of these values'],
         ['addr:10.20.0.0/16', 'addresses are CIDR-aware'],
         ['port:8000-8100  port>=1024', 'port numbers and ranges'],
-        ['"two words"  /re/i  key~re', 'phrase, regular expression'],
+        ['"two words"', 'a phrase'],
+        ...(ctx.query.REGEX_HELP || []),
       ];
       const tryBtn = (e) =>
         h('button', {

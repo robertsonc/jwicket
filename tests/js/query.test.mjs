@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as q from '../../src/jwicket/static/js/query.js';
 import * as lp from '../../src/jwicket/static/js/logparse.js';
+import { ENGINE_QUIRKS } from '../../src/jwicket/static/js/regexvm.js';
 
 const wingIn = (src, sport, dst, dport, proto, iface, bytes, packets) => ({ direction: 'In', src, sport, dst, dport, proto, iface, bytes, packets, tunnel: null });
 function session(id, policy, a, b, extra = {}) {
@@ -870,157 +871,195 @@ test('PREDEFINED_SOURCE says where the catalog comes from', () => {
   assert.equal(q.PREDEFINED_APPS['junos-https'].port, '443');
 });
 
-test('regexRisk refuses nested, back-to-back and back-referenced repeats', () => {
-  const refused = { '(a+)+$': '(a+)+', '(\\w+\\s?)+$': '(\\w+\\s?)+', '(.+)+=': '(.+)+', '.*.*=.*zzz': '.*.*', '(\\d+)*x': '(\\d+)*', '(.*a){12}': '(.*a){12}' };
-  for (const [src, piece] of Object.entries(refused)) {
-    const r = q.regexRisk(src);
-    assert.ok(r, src);
-    assert.equal(r.piece, piece, src);
-    assert.equal(src.slice(r.at, r.at + r.length), piece);
-    assert.equal(r.message, `This pattern can take seconds on one long line: '${piece}' ${r.why}. Write it without nested or back-to-back repeats (for example a+ instead of (a+)+).`);
-  }
-  assert.equal(q.regexRisk('(a+)+$').why, 'repeats a repeat');
-  assert.equal(q.regexRisk('.*.*=.*zzz').why, 'has two repeats in a row that can match the same text');
-  assert.equal(q.regexRisk('((a)\\2)+').why, 'repeats a back-reference');
-  for (const src of ['\\w*\\w+', '.+\\S*', 'a*a?a*', '(?:x|.*)\\d+', '[a-c]+[c-f]+']) assert.ok(q.regexRisk(src), src);
-  // S-9 listed /.*=.*zzz/ as accepted, but it is cubic on a line of '=' (2.4 s on 2048 of them): two
-  // repeats around one character both can match. It is refused now; =.*zzz finds the same lines.
-  for (const src of ['RT_FLOW_SESSION_(CLOSE|DENY)', '10\\.10\\.\\d+\\.\\d+', '=.*zzz', '[^=]*=.*zzz', '^Nov 24', '\\s*\\S+', 'a*b*', '(ab){3}', 'x{', '', '(?<n>a)\\k<n>', '[']) {
-    assert.equal(q.regexRisk(src), null, src);
-  }
-});
+// --- regular expressions: J-Wicket's linear-time matcher (ADR 0013) -------------------------------------
 
-test('regexRisk fails closed and reads modifier groups, whatever this engine compiles (SEC-1)', () => {
-  // Chromium compiles (?i:...) groups; node 22 does not, so the shape check is tested directly.
-  for (const [src, piece] of [['(a+)+$|(?i:x)', '(a+)+'], ['(?i:(a+)+)$', '(a+)+'], ['(?-i:a)(a|a)+$', '(a|a)+'], ['(.*)*zzz9|(?i:y)', '(.*)*'], ['(?i-m:.*.*)', '.*.*']]) {
-    const r = q.regexShapeRisk(src);
-    assert.ok(r, src);
-    assert.equal(r.piece, piece, src);
+// Lines on which a backtracking engine takes seconds for one of the shapes below.
+const SLOW_LINES = [
+  `${'a'.repeat(2047)}!`, '='.repeat(2048), '1'.repeat(2048), ' '.repeat(2048), `${'x'.repeat(2047)}y`,
+  'ab'.repeat(1024), `${'a='.repeat(1023)}a!`, '\u{1F600}'.repeat(1024),
+];
+// A free /regex/ filter over plain strings, with the flags the filter runs it with.
+function regexFilter(src, flags) {
+  const ast = ok(`/${src}/${flags}`, 'logs');
+  return q.compile(ast, q.FIELDS.logs, {});
+}
+// Accepted, gives the browser's answer on short texts, and stays fast on every slow line.
+function acceptedAndFast(src, flags) {
+  assert.equal(q.regexRisk(src, flags), null, `/${src}/${flags}: ${JSON.stringify(q.regexRisk(src, flags))}`);
+  const f = regexFilter(src, flags);
+  const native = new RegExp(src, flags);
+  for (const s of ['', 'a', 'aa!', 'aaaa', '=a=', 'x=y=zzz', 'aaaaaazzz', '12 34', '  \n', 'ab\nab', '\u{1F600}\u{1F600}', 'a=1=zzz']) {
+    assert.equal(f(s), native.test(s), `/${src}/${flags} on ${JSON.stringify(s)}`);
   }
-  for (const src of ['(?i:close)', '(?-i:RT_FLOW)_SESSION', '(?ims-:x)y']) assert.equal(q.regexShapeRisk(src), null, src);
-  // Syntax the check does not read is refused, not waved through.
-  const unread = q.regexShapeRisk('(?z:x)');
-  assert.equal(unread.why, 'cannot be checked');
-  assert.match(unread.message, /^J-Wicket cannot check this pattern for slow repeats, so it does not run it/);
-  // The validity probe uses the flags the pattern runs with: '.' matches a line break only with s.
-  assert.equal(q.regexRisk('(.|\\n)+$', 'i'), null);
-  assert.equal(q.regexRisk('(.|\\n)+$', 'is').why, 'repeats a choice whose branches can match the same text');
-  // Node 22 does not compile (?s:...) (the pattern is invalid, so null); Node 24 does, and then the
-  // check must refuse it. Either way it never runs.
-  const sGroup = q.regexRisk('(?s:.|\\n)+', '');
-  assert.ok(sGroup === null || sGroup.why === 'repeats a choice whose branches can match the same text', JSON.stringify(sGroup));
-  assert.ok(q.regexShapeRisk('(?s:.|\\n)+', { dotAll: false }), 'a (?s:) group turns dotAll on');
-});
-
-test('regexRisk refuses ambiguous choices, shared separators, wide ranges and long optional runs (SEC-2)', () => {
-  const refused = {
-    '(a|a)+$': ['(a|a)+', 'repeats a choice whose branches can match the same text'],
-    '(\\w|\\d)+$': ['(\\w|\\d)+', 'repeats a choice whose branches can match the same text'],
-    '(a|aa)+$': ['(a|aa)+', 'repeats a choice whose branches can match the same text'],
-    '.*a.*a.*zzz': ['.*a.*', 'has two repeats that can both match what is between them'],
-    '\\w*a\\w*b': ['\\w*a\\w*', 'has two repeats that can both match what is between them'],
-    '.+=.+=.+=zzz': ['.+=.+', 'has two repeats that can both match what is between them'],
-    '.*=.*zzz': ['.*=.*', 'has two repeats that can both match what is between them'],
-    '.*\\d\\d.*zzz': ['.*\\d\\d.*', 'has two repeats that can both match what is between them'],
-    '.*==.*zzz': ['.*==.*', 'has two repeats that can both match what is between them'],
-    'a{0,2000}a{0,2000}zzz': ['a{0,2000}a{0,2000}', 'has two repeats in a row that can match the same text'],
-    '(a?){24}a{24}': ['(a?){24}', 'repeats a repeat'],
-    '(\\s?\\s)+$': ['(\\s?\\s)+', 'repeats a repeat'],
-    '(a{1,3}a)+$': ['(a{1,3}a)+', 'repeats a repeat'],
-    '(\\w+)\\1!': ['\\w+)\\1', 'has two repeats in a row that can match the same text'],
-  };
-  for (const [src, [piece, why]] of Object.entries(refused)) {
-    const r = q.regexRisk(src, 'i');
-    assert.ok(r, src);
-    assert.equal(r.piece, piece, src);
-    assert.equal(r.why, why, src);
-  }
-  const run = q.regexRisk(`${'a?'.repeat(20)}${'a'.repeat(20)}`, 'i');
-  assert.equal(run.why, 'can split the same text in too many ways');
-  assert.equal(q.regexRisk(`${'(a|a)'.repeat(18)}z`, 'i').why, 'can split the same text in too many ways');
-  assert.match(q.regexRisk('.*=.*zzz', 'i').message, /Drop a leading or trailing \.\*/);
-  assert.match(q.regexRisk('(a|aa)+$', 'i').message, /Write the branches so that they start differently/);
-  // Kept: deterministic choices and separators, and two different plain characters between repeats.
-  for (const src of ['(\\d{1,3}\\.){3}\\d{1,3}', '([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}', '(TCP|UDP|ICMP) .{0,20}', 'src=\\S+ dst=\\S+', '.*error.*', 'RT_FLOW.*CLOSE', '(\\w+)=(\\S+)', '(foo|bar)+', '(a|b)'.repeat(200), '(.|\\n)+$', '^\\w{3} +\\d+ \\d\\d:\\d\\d', '\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}']) {
-    assert.equal(q.regexRisk(src, 'i'), null, src);
-  }
-  // The check itself stays quick on a long pattern.
-  const t0 = performance.now();
-  q.regexRisk('(?:x|y|z|w)+'.repeat(60), 'i');
-  q.regexRisk('[a-z]'.repeat(400), 'i');
-  assert.ok(performance.now() - t0 < 500);
-});
-
-test('regexRisk: escapes it cannot read exactly, deep nesting and long patterns are refused, quickly (recheck residuals)', () => {
-  const slow = (fn) => {
+  for (const line of SLOW_LINES) {
     const t0 = performance.now();
-    const r = fn();
-    return { r, ms: performance.now() - t0 };
-  };
-  // Under the u flag, \u{..} is the character it names: these are the same choice twice.
-  for (const src of ['(=|\\u{3d})+$', '( |\\u{20})+$', '(\\s|\\u{20})+$', '(\\d|\\u{30})+$']) {
-    const r = q.regexRisk(src, 'u');
-    assert.ok(r, src);
-    assert.equal(r.why, 'repeats a choice whose branches can match the same text', src);
+    f(line);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 50, `/${src}/${flags} took ${ms.toFixed(1)} ms on a ${line.length}-character line`);
   }
-  assert.equal(q.regexRisk('.*\\u{3d}.*zzz', 'u').why, 'has two repeats that can both match what is between them');
-  assert.equal(q.regexRisk('\\u{61}*\\u{61}*zzz', 'u').why, 'has two repeats in a row that can match the same text');
-  // The same character written two ways counts once between two repeats.
-  assert.ok(q.regexRisk('.*=\\x3d.*zzz', 'i'));
-  // Without the u flag the engine reads \u{1,3} and \p{1,9} as a letter and a quantifier: refused.
-  for (const src of ['(?:\\u{1,3})+$', '\\p{1,9}x', '\\P{2}']) {
-    const r = q.regexRisk(src, 'i');
-    assert.equal(r && r.why, 'cannot be checked', src);
-    assert.match(r.message, /without the u flag/, src);
+}
+
+test('regular expressions: shapes the old static check refused now run, fast, with the browser answer', () => {
+  // Nested, back-to-back and ambiguous repeats: each took seconds in the native engine on one of
+  // SLOW_LINES. The old heuristic refused them; the matcher runs them in linear time.
+  const shapes = [
+    '(a+)+$', '(\\w+\\s?)+$', '(.+)+=', '.*.*=.*zzz', '(\\d+)*x', '(.*a){12}', '\\w*\\w+', '.+\\S*', 'a*a?a*',
+    '(?:x|.*)\\d+', '[a-c]+[c-f]+', '(a|a)+$', '(\\w|\\d)+$', '(a|aa)+$', '.*a.*a.*zzz', '\\w*a\\w*b',
+    '.+=.+=.+=zzz', '.*=.*zzz', '.*\\d\\d.*zzz', '.*==.*zzz', '(a?){24}a{24}', '(\\s?\\s)+$', '(a{1,3}a)+$',
+    `${'a?'.repeat(20)}${'a'.repeat(20)}`, `${'(a|a)'.repeat(18)}z`, '.*=\\x3d.*zzz', '.*\\075.*zzz',
+    '(\u{1F600}|\u{1F600})+$', '(.*=)*.*!', '(?:a|b|ab)*c',
+  ];
+  for (const src of shapes) for (const flags of ['', 'i']) acceptedAndFast(src, flags);
+  for (const src of ['(.|\\n)+$', '(?:.|\\s)*!']) acceptedAndFast(src, 'is');
+  // Under u, \u{..} is the character it names.
+  for (const src of ['(=|\\u{3d})+$', '( |\\u{20})+$', '(\\s|\\u{20})+$', '(\\d|\\u{30})+$', '.*\\u{3d}.*zzz', '\\u{61}*\\u{61}*zzz', '(\u{1F600}|\u{1F600})+$', '\\p{L}+-\\d+']) {
+    acceptedAndFast(src, 'u');
   }
-  // Legacy octal: \075 is '='.
-  const oct = q.regexRisk('.*\\075.*zzz', 'i');
-  assert.equal(oct && oct.why, 'cannot be checked');
-  assert.match(oct.message, /octal escape/);
-  // Astral characters are compared whole, with or without u.
-  for (const f of ['', 'u']) assert.ok(q.regexRisk('(\u{1F600}|\u{1F600})+$', f), `astral, flags '${f}'`);
-  // Kept under u: property classes and named characters that do not overlap.
-  for (const src of ['\\p{L}+-\\d+', 'id=\\u{3d}?\\d+', '^\\u{41}BC']) assert.equal(q.regexRisk(src, 'u'), null, src);
-  // Deep nesting is refused at once; at the limit it is checked quickly.
-  const deep = `${'(?:'.repeat(200)}ab${'){1,2}'.repeat(200)}`; // 1,802 characters
-  const d = slow(() => q.regexRisk(deep, 'i'));
-  assert.equal(d.r && d.r.why, 'cannot be checked');
-  assert.match(d.r.message, /nested more than 16 deep/);
-  assert.ok(d.ms < 50, `deep pattern took ${d.ms} ms`);
-  const atLimit = `${'(?:'.repeat(16)}ab${'){1,2}'.repeat(16)}`;
-  const l = slow(() => q.regexShapeRisk(atLimit));
-  assert.ok(l.ms < 50, `16-deep pattern took ${l.ms} ms`);
-  // A long pattern: checked quickly up to the cap, refused above it.
-  const wideP = slow(() => q.regexRisk('(?:ab|cd){1,2}x'.repeat(130), 'i'));
-  assert.ok(wideP.ms < 200, `wide pattern took ${wideP.ms} ms`);
-  const long = q.regexRisk('x'.repeat(2049), 'i');
-  assert.equal(long && long.why, 'cannot be checked');
-  assert.match(long.message, /longer than 2048 characters/);
+  // Without u the engine reads \u{1,3} and \p{1,9} as a letter and a repeat, and so does the matcher.
+  for (const src of ['(?:\\u{1,3})+$', '\\p{1,9}x', '\\P{2}']) acceptedAndFast(src, 'i');
+  // Patterns operators write every day, as before.
+  for (const src of ['RT_FLOW_SESSION_(CLOSE|DENY)', '10\\.10\\.\\d+\\.\\d+', '=.*zzz', '[^=]*=.*zzz', '^Nov 24', '\\s*\\S+', 'a*b*', '(ab){3}', 'x{', '(\\d{1,3}\\.){3}\\d{1,3}', '([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}', '(TCP|UDP|ICMP) .{0,20}', 'src=\\S+ dst=\\S+', '.*error.*', 'RT_FLOW.*CLOSE', '(\\w+)=(\\S+)', '(foo|bar)+', '^\\w{3} +\\d+ \\d\\d:\\d\\d', '\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}']) {
+    acceptedAndFast(src, 'i');
+  }
+  // A pattern that is not a valid regular expression is not the matcher's to refuse.
+  assert.equal(q.regexRisk('['), null);
+  assert.equal(q.regexRisk(''), null);
 });
 
-test('regexRisk: refused patterns are inline errors; accepted ones stay fast on long lines', () => {
-  const bad = q.parse('/.*.*=zzz/', { view: 'logs' });
-  assert.equal(bad.ast, null);
-  assert.match(bad.error.message, /^This pattern can take seconds on one long line: '\.\*\.\*' has two repeats in a row/);
-  assert.equal(bad.error.pos, 0);
-  const keyed = q.parse('msg:/(a+)+$/', { view: 'logs' });
-  assert.match(keyed.error.message, /^msg: This pattern can take seconds/);
-  assert.match(q.parse('msg~"(x+)+y"', { view: 'logs' }).error.message, /^msg: This pattern can take seconds.*repeats a repeat/);
+test('regular expressions: the matcher refuses lookaround, back-references and oversized patterns, and says why', () => {
+  const refused = {
+    '(?=x)y': ['lookaround', '(?='],
+    'a(?!b)': ['lookaround', '(?!'],
+    '(?<=id=)\\d+': ['lookaround', '(?<='],
+    '(?<!x)y': ['lookaround', '(?<!'],
+    '(a)\\1': ['backreference', '\\1'],
+    '((a)\\2)+': ['backreference', '\\2'],
+    '(\\w+)\\1!': ['backreference', '\\1'],
+    '(?<n>a)\\k<n>': ['backreference', '\\k<n>'],
+  };
+  for (const [src, [why, piece]] of Object.entries(refused)) {
+    const r = q.regexRisk(src, 'i');
+    assert.ok(r, src);
+    assert.equal(r.why, why, src);
+    assert.equal(r.piece, piece, src);
+    assert.equal(src.slice(r.at, r.at + r.length), piece, src);
+  }
+  assert.match(q.regexRisk('(?=x)y').message, /^J-Wicket does not run lookahead or lookbehind such as '\(\?=' \(at character 1\)\. Write the pattern without/);
+  assert.match(q.regexRisk('(a)\\1').message, /^J-Wicket does not run back-references such as '\\1' \(at character 4\)\. Write the repeated text out/);
+  // Too large for the state budget, nested too deep, or too long: refused, and refused quickly.
+  // (each with a part on both sides: a part at either end that cannot change the answer is dropped)
+  for (const src of ['ya{0,2000}a{0,2000}zzz', 'x'.repeat(2049), `${'(?:'.repeat(200)}ab${'){1,2}'.repeat(200)}`, '(?:ab|cd){1,2}x'.repeat(130)]) {
+    const t0 = performance.now();
+    const r = q.regexRisk(src, 'i');
+    const ms = performance.now() - t0;
+    assert.equal(r && r.why, 'too-large', src.slice(0, 40));
+    assert.ok(ms < 200, `refusing ${src.slice(0, 40)} took ${ms} ms`);
+  }
+  assert.match(q.regexRisk('x'.repeat(2049)).message, /longer than 2048 characters/);
+  // Nested counts multiply: sixteen levels of {1,2} would be 65,536 copies, refused at once.
+  assert.equal(q.regexRisk(`x${'(?:'.repeat(16)}ab${'){1,2}'.repeat(16)}y`, 'i').why, 'too-large');
+  // At either end of the pattern only one copy of each level counts: it answers like ab.
+  acceptedAndFast(`${'(?:'.repeat(16)}ab${'){1,2}'.repeat(16)}`, 'i');
+  // Deep nesting that stays small runs (the old check refused anything deeper than 16).
+  acceptedAndFast(`${'(?:'.repeat(100)}ab${')?'.repeat(100)}`, 'i');
+  acceptedAndFast(`${'(?:a'.repeat(40)}${')*'.repeat(40)}!`, '');
+});
+
+test('regular expressions: two case-insensitive branches with letters beyond ASCII run under smart case', () => {
+  // Smart case adds i to a pattern without capitals A-Z; \u1e9e (capital sharp s) is not one. Such
+  // two-branch patterns were refused with a message that blamed the browser.
+  for (const src of ['stra\u00dfe|stra\u1e9ee', 's|\u017f', 'k|\u212a', '\u00e5|\u00c5']) {
+    assert.equal(q.regexRisk(src, 'i'), null, src);
+    assert.equal(q.parse(`/${src}/`, { view: 'logs' }).error, null, src);
+  }
+  const f = regexFilter('stra\u00dfe|stra\u1e9ee', '');
+  const native = new RegExp('stra\u00dfe|stra\u1e9ee', 'i');
+  for (const [s, want] of [['stra\u00dfe', true], ['STRA\u00dfE', true], ['stra\u1e9ee', true], ['Stra\u00dfe', true], ['strasse', false]]) {
+    assert.equal(f(s), want, s);
+    assert.equal(native.test(s), want, `native ${s}`);
+  }
+});
+
+test('regular expressions: refused patterns are inline errors; compile never throws', () => {
+  const look = q.parse('/(?=x)y/', { view: 'logs' });
+  assert.equal(look.ast, null);
+  assert.match(look.error.message, /^J-Wicket does not run lookahead or lookbehind/);
+  assert.equal(look.error.pos, 0);
+  assert.equal(look.error.end, 8);
+  assert.match(q.parse('msg:/(a)\\1/', { view: 'logs' }).error.message, /^msg: J-Wicket does not run back-references/);
+  assert.match(q.parse('msg~"(?<!a)b"', { view: 'logs' }).error.message, /^msg: J-Wicket does not run lookahead or lookbehind/);
   assert.match(q.parse('/(/', { view: 'logs' }).error.message, /^Invalid regular expression/);
-  assert.doesNotThrow(() => q.compile(q.parse('/(a+)+$/').ast, q.FIELDS.logs, {}), 'compile never throws');
-  // '=' runs (banners), digit runs and spaces as well as the S-14 lines; /.*=.*zzz/ is refused now
-  // (see above), and /=.*zzz/ is what it finds.
-  const texts = ['a'.repeat(2047) + '!', 'y'.repeat(2048), '='.repeat(2048), '1'.repeat(2048), ' '.repeat(2048)];
-  for (const src of ['RT_FLOW_SESSION_(CLOSE|DENY)', '10\\.10\\.\\d+\\.\\d+', '=.*zzz', '^Nov 24', '.*error.*', '(\\d{1,3}\\.){3}\\d{1,3}']) {
+  // The shapes the old check refused parse without an error now.
+  for (const t of ['/.*.*=zzz/', 'msg:/(a+)+$/', 'msg~"(x+)+y"']) assert.equal(q.parse(t, { view: 'logs' }).error, null, t);
+  assert.doesNotThrow(() => q.compile(q.parse('/(?=x)/').ast, q.FIELDS.logs, {}), 'compile never throws');
+  // Smart case, and g and y are dropped: a filter only tests.
+  assert.equal(regexFilter('close', '')('RT_FLOW_SESSION_CLOSE'), true);
+  assert.equal(regexFilter('Close', '')('RT_FLOW_SESSION_CLOSE'), false);
+  assert.equal(regexFilter('close', 'g')('RT_FLOW_SESSION_CLOSE'), false, 'explicit flags turn smart case off');
+  const gy = regexFilter('close', 'giy');
+  assert.equal(gy('close close'), true);
+  assert.equal(gy('close close'), true, 'no lastIndex state between tests');
+});
+
+test('regular expressions: modifier groups run in the matcher where the engine reads them', () => {
+  let modifiers = true;
+  try {
+    new RegExp('(?i:a)'); // eslint-disable-line no-new
+  } catch (_e) {
+    modifiers = false; // Node 22 without --js-regexp-modifiers
+  }
+  // Under smart case (no capital letter) the filter runs with i, so (?i:...) leaves i as it is and
+  // (?-i:...) changes it. Where the engine applies such a change wrongly (V8 12.4 and 13.6, see
+  // regexvm.js caseModifierGroupsDiffer), a group that changes i is refused with a plain message.
+  for (const src of ['(a+)+$|(?i:x)', '(?i:(a+)+)$', '(?-i:a)(a|a)+$', '(?i-m:.*.*)!', '(?s:.|\\n)+!']) {
     const r = q.parse(`/${src}/`, { view: 'logs' });
+    if (!modifiers) {
+      assert.match(r.error.message, /^Invalid regular expression/, src);
+      continue;
+    }
+    if (ENGINE_QUIRKS.caseModifierGroups && src.startsWith('(?-i:')) {
+      assert.match(r.error.message, /^This browser does not apply the i of a group such as '\(\?-i:' \(at character 1\)/, src);
+      continue;
+    }
     assert.equal(r.error, null, src);
     const f = q.compile(r.ast, q.FIELDS.logs, {});
-    for (const line of texts) {
+    for (const line of SLOW_LINES) {
       const t0 = performance.now();
-      f({ line, fields: {} });
-      assert.ok(performance.now() - t0 < 50, `${src} took ${performance.now() - t0} ms`);
+      f(line);
+      assert.ok(performance.now() - t0 < 50, `${src} on a ${line.length}-character line`);
     }
   }
+  if (!modifiers) return;
+  // The flags apply to the atoms inside the group only.
+  const f = (src) => q.compile(ok(`/${src}/`, 'logs'), q.FIELDS.logs, {});
+  if (ENGINE_QUIRKS.caseModifierGroups) {
+    // the capital X turns smart case off, so (?i:...) changes i: refused on this engine
+    assert.match(q.parse('/(?i:close)_X/', { view: 'logs' }).error.message, /does not apply the i of a group/);
+    assert.match(q.parse('/(?i:deny)|drop|DISCARD/', { view: 'logs' }).error.message, /does not apply the i of a group/);
+  } else {
+    assert.equal(f('(?i:close)_X')('CLOSE_X'), true);
+    assert.equal(f('(?i:close)_X')('CLOSE_x'), false);
+  }
+  assert.equal(f('(?-i:RT_FLOW)_SESSION')('rt_flow_SESSION'), false);
+  assert.equal(f('a(?s:.)b')('a\nb'), true);
+  assert.equal(f('a.b')('a\nb'), false);
+});
+
+test('regular expressions: keyed terms and the text cap', () => {
+  // A keyed regex (~ or :/.../) runs in the matcher too, over at most REGEX_INPUT_MAX characters.
+  const row = { line: `${'a'.repeat(5000)}!`, fields: {} };
+  const f = q.compile(ok('msg~"(a+)+!"', 'logs'), q.FIELDS.logs, {});
+  const t0 = performance.now();
+  assert.equal(f(row), false, 'the ! is past the first REGEX_INPUT_MAX characters');
+  assert.ok(performance.now() - t0 < 50);
+  assert.equal(q.compile(ok('msg~"(a+)+$"', 'logs'), q.FIELDS.logs, {})({ line: 'a'.repeat(5000), fields: {} }), true);
+  assert.equal(q.REGEX_INPUT_MAX, 2048);
+});
+
+test('regular expressions: the help panel says what is supported and what is not', () => {
+  const help = q.REGEX_HELP.map((r) => r.join(' ')).join('\n');
+  assert.match(help, /\{n,m\}/);
+  assert.match(help, /not supported: lookahead, lookbehind and back-references/);
 });
 
 test('logs reason: the 28 documented close reasons are offered', () => {
@@ -1033,4 +1072,82 @@ test('logs reason: the 28 documented close reasons are offered', () => {
   assert.ok(q.examples('logs').includes('reason:*RST'));
   const close = lp.parse('Jan 12 13:53:44 fw RT_FLOW: RT_FLOW_SESSION_CLOSE: session closed TCP CLIENT RST: 30.0.0.2/46488->50.0.0.2/23 junos-telnet 30.0.0.2/46488->50.0.0.2/23 None None None None 6 p1 green red 240003072 2(100) 1(60) 2 UNKNOWN UNKNOWN N/A(N/A) ge-11/0/0.0 UNKNOWN');
   assert.equal(q.compile(ok('reason:*RST', 'logs'), q.FIELDS.logs, {})(close), true);
+});
+
+// --- round 3: the regular expressions of one query together -------------------------------------
+
+const BIG = (k) => `/(?:\\b|\\B|.){${153 - (k >> 3)}}${'!#%&,;<>'[k % 8]}/`; // about MAX_STATES states each
+
+test('regular expressions: a query gets the budget of one pattern, however many it holds (round 3)', () => {
+  // 16 regex alternatives of one free term each near the state budget ran one after the other on
+  // every row: 224 ms per 2048-character log line, 7 s per filter of 500 sessions.
+  assert.equal(q.parse(BIG(0), { view: 'logs' }).error, null);
+  for (const text of [`${BIG(0)}|${BIG(1)}`, `${BIG(0)} ${BIG(1)}`, `${BIG(0)} OR -${BIG(1)}`, `${BIG(0)} policy~"(?:a|b)+c"`]) {
+    const r = q.parse(text, { view: 'logs' });
+    assert.ok(r.error, text);
+    assert.match(r.error.message, /^(?:policy: )?The regular expressions of this query are too large together for J-Wicket's matcher: with this one they need more than 768 parts\. Use fewer or smaller regular expressions/);
+    assert.ok(r.error.pos > BIG(0).length - 1, `${text}: the second value is named (${r.error.pos})`);
+  }
+  // small ones fit together
+  assert.equal(q.parse('/deny|drop/ /trust-\\d+/ reason~"TCP (FIN|RST)" /\\bweb\\b/', { view: 'logs' }).error, null);
+  assert.equal(q.QUERY_REGEX_STATES, 768);
+  // different classes are counted across the query, the same class once
+  const classes = (from, n) => `/${Array.from({ length: n }, (_, k) => `[x${String.fromCharCode(0x4e00 + from + k)}]`).join('')}/`;
+  assert.equal(q.parse(`${classes(0, 20)} ${classes(0, 20)}`, { view: 'logs' }).error, null);
+  assert.match(q.parse(`${classes(0, 20)} ${classes(20, 20)}`, { view: 'logs' }).error.message, /^The regular expressions of this query have more than 32 different classes and escapes/);
+  // compile() without validate() runs the values that fit and no others; no row costs more than one pattern
+  const many = Array.from({ length: 16 }, (_, k) => BIG(k)).join('|');
+  const pred = q.compile(q.parse(many).ast, q.FIELDS.logs, {});
+  const line = `${'a '.repeat(1023)}a!`;
+  pred(line);
+  const t0 = performance.now();
+  for (let k = 0; k < 3; k += 1) pred(`${line.slice(0, -2)}${k}!`);
+  const ms = (performance.now() - t0) / 3;
+  assert.ok(ms < 60, `one 2048-character line took ${ms.toFixed(1)} ms`);
+  assert.equal(pred('x!'), true);
+});
+
+test('regular expressions: a query holds at most 32 of them, and they stay compiled (round 3)', () => {
+  // 65 distinct values evicted each other from the 64-entry cache, so every keystroke recompiled them all.
+  const vals = (n, tag) => Array.from({ length: n }, (_, k) => `/${tag}${k}x+/`).join('|');
+  assert.equal(q.parse(vals(32, 'a'), { view: 'logs' }).error, null);
+  const r = q.parse(vals(33, 'b'), { view: 'logs' });
+  assert.match(r.error.message, /^This query has more than 32 regular expressions, so J-Wicket does not run it\. Use fewer, for example one \/a\|b\/ instead of \/a\/\|\/b\/\.$/);
+  assert.equal(q.parse(`${vals(16, 'c')} ip~"10\\.1" ${vals(16, 'd')} /e/`, { view: 'logs' }).error.message.startsWith('This query has more than 32'), true);
+  // re-reading the same query compiles nothing (a value being edited joins the 32 in the cache)
+  const text = vals(32, 'f');
+  q.parse(text, { view: 'logs' });
+  const Native = globalThis.RegExp;
+  let made = 0;
+  globalThis.RegExp = class extends Native {
+    constructor(...args) {
+      super(...args);
+      made += 1;
+    }
+  };
+  try {
+    q.parse(`${text} `, { view: 'logs' });
+    q.parse(`${text}|/f31x+y/`, { view: 'logs' });
+    q.parse(`${text} `, { view: 'logs' });
+  } finally {
+    globalThis.RegExp = Native;
+  }
+  assert.ok(made <= 4, `${made} RegExps made on re-reading`);
+});
+
+test('filterTimed reads its clock before every row, so a slow row cannot overrun the budget by 64 rows (round 3)', () => {
+  let t = 0;
+  const res = q.filterTimed(Array.from({ length: 5000 }, (_, i) => i), () => { t += 10; return true; }, 150, () => t);
+  assert.equal(res.complete, false);
+  assert.ok(res.checked <= 16, `${res.checked} rows of 10 ms in a 150 ms budget`);
+  // the real thing: a Logs refilter with a pattern near the state budget over 2048-character lines
+  const pred = q.compile(ok('/(?:\\b|\\B|.){153}!/', 'logs'), q.FIELDS.logs, {});
+  const rows = Array.from({ length: 300 }, (_, k) => `${'a'.repeat(2047 - String(k).length)}${k}~`);
+  for (const budget of [150, 50]) {
+    const t0 = performance.now();
+    const out = q.filterTimed(rows, pred, budget);
+    const wall = performance.now() - t0;
+    assert.equal(out.complete, false);
+    assert.ok(wall < budget + 60, `budget ${budget} ms: ${wall.toFixed(0)} ms for ${out.checked} rows`);
+  }
 });
