@@ -1,0 +1,5 @@
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/24.4R2-S3.5/junos" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="13">
+<file-content filename="jwicket-qrel" junos:seconds="1795723296" filesize="66" encoding="text">
+Nov 26 20:00:00  vSRX-LAB JWICKET-QREL[4242]: JWICKET-QREL-20261126
+</file-content>
+</rpc-reply>

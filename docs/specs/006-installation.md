@@ -8,7 +8,7 @@
 | Decides scope | Project owner. The installers change the lab procedure and the device's security posture, so **acceptance also needs the lab owner (D2) and the security reviewer (D1)** ([governance, who decides what](../governance.md#who-decides-what): "Changes to the lab procedure: Lab owner; Security reviewer, when a step changes the device's security posture"). Both roles are unnamed, so this spec cannot be accepted yet |
 | Code | [`tools/jwicket_install/`](../../tools/jwicket_install/) (never shipped to a device; the shared plan is [`plan.py`](../../tools/jwicket_install/plan.py), [`state.py`](../../tools/jwicket_install/state.py), [`render.py`](../../tools/jwicket_install/render.py)), `deploy/`, the release tooling of section 11 and bundle changes D2 and D3 (section 10); section 19 lists every file. `ALLOWED_RPCS` in [`junos/session.py`](../../src/jwicket/junos/session.py) is untouched and no installer code goes into `dist/jwicket.py`: the daemon keeps no write path |
 | Tests | Section 17 (for example [`test_install_plan.py`](../../tests/test_install_plan.py) and [`tests/fixtures/install/`](../../tests/fixtures/install/README.md)). They run under `PYTHONPATH=src python -m unittest discover -s tests`, on Python 3.7 too, without `junos-eznc`, `paramiko` or `scp` (imported lazily; tests that need them skip unless `JWICKET_REQUIRE_PYEZ=1`, which a dedicated CI job sets) |
-| Decisions it rests on | [ADR 0001](../adr/0001-on-box-pure-python-single-file.md), [0003](../adr/0003-tls-off-loopback.md), [0009](../adr/0009-central-management-coexistence.md), [0010](../adr/0010-usable-without-knowing-junos.md). New: [ADR 0011](../adr/0011-owner-decisions-lab-gated-install.md) records the owner's decisions of 2026-11-24 and 2026-11-25 (Accepted); [ADR 0012](../adr/0012-installer-design.md) records this spec's proposals (Proposed, governance D11), three of which the owner accepted on 2026-11-25 (2.2) |
+| Decisions it rests on | [ADR 0001](../adr/0001-on-box-pure-python-single-file.md), [0003](../adr/0003-tls-off-loopback.md), [0009](../adr/0009-central-management-coexistence.md), [0010](../adr/0010-usable-without-knowing-junos.md). New: [ADR 0011](../adr/0011-owner-decisions-lab-gated-install.md) records the owner's decisions of 2026-11-24 and 2026-11-25 (Accepted); [ADR 0012](../adr/0012-installer-design.md) records this spec's proposals (Proposed, governance D11), three of which the owner accepted on 2026-11-25 (2.2). [ADR 0015](../adr/0015-verified-installer-profiles.md) records section 7.12's adaptive preflight (Accepted 2026-11-26, owner decision, open question 32; security review pending, D1; not built). For the offered account-owned state directory only, it supersedes ADR 0011 decision 4 item 2 and ADR 0012 decision 4 |
 
 ## 1. Status
 
@@ -31,6 +31,7 @@ they contradict it: TLS access, no directory creation, Python 3.7, hardware atte
 | Bundle changes D2 and D3 | In this change | AC-006-37, AC-006-38 |
 | Release workflow | In this change; no tag pushed (the first, `v0.1.0.dev1`, waits for the owner's go) | AC-006-39 to AC-006-41 |
 | Cut (4.1) | Setup mode D1, `serve` mirror, ZTP renderer | AC-006-27 rewritten; AC-006-33, AC-006-36 withdrawn |
+| Adaptive preflight (7.12, [ADR 0015](../adr/0015-verified-installer-profiles.md)) | Design accepted by the owner on 2026-11-26; security review pending (D1); **not built** | AC-006-45 to AC-006-50 (not met) |
 | On a device | **No installer has run.** The spike verified `scp -O`, the four extension-service statements, start at commit, respawn and the CLI start of a non-daemonized app, with its own daemon on one vSRX ([spike evidence](../evidence/2026-11-23-vsrx-spike/README.md)). The bundle then ran by hand on a lab SRX4100, 25.2R1-S1.4: the diagnostic and runtime statements, `commit confirmed 5` confirmed after a check, TLS on fxp0 in `mgmt_junos` ([srx4100]; section 14) | Q-INST-06 |
 
 A passing unit test shows what the installer sends and how it reacts to fakes; it proves nothing
@@ -958,6 +959,71 @@ embeds the three with `health.py` and `transport.py` (the check judges and `INST
 with a DTD or entity declaration is refused before parsing (expat's expansion limits depend on its
 version, **inferred**, so those are the controls). Parsed state keeps only strict-pattern keys, names, users, ports and hashes (AC-006-22).
 
+<a id="712-adaptive-preflight-proposed"></a>
+
+### 7.12 Adaptive preflight
+
+The installer should select the strongest **verified** supported path on the attached SRX.
+It should not turn a vLab workaround into a default. The owner accepted this section and
+[ADR 0015](../adr/0015-verified-installer-profiles.md) on 2026-11-26 (open question 32). The
+security reviewer (D1, unnamed) has not reviewed either, so the acceptance counts toward no gate.
+Nothing in it is built: acceptance changes the design, not the installer or daemon code. Until each
+part is implemented and qualified (Q-INST-06, Q-AUTH-01, Q-NET-01, Q-TLS-01, Q-SEC-01), today's
+defaults, refusals, production gate and trust boundary stay as 5.1, 7.2, 8.11 and 9.3 state them,
+and the code enforces them. Once built, it changes these current rules (each cited in
+[ADR 0015, Consequences](../adr/0015-verified-installer-profiles.md#consequences)):
+
+- **The state path** (State row): the daemon's fixed settings path under `/var/db/jwicket`
+  (`DEFAULT_CONFIG_PATH`, and `STATE_DIR` with it, 7.11), R-STATEDIR (8.11) and root's one-time
+  step (9.3). For the offered account-owned alternative only, ADR 0015 supersedes the decisions
+  behind open question 28 (ADR 0011 decision 4 item 2;
+  [ADR 0012](../adr/0012-installer-design.md) decision 4). The default, `/var/db/jwicket` made once
+  by root, is unchanged and stays preferred.
+- **Operator NETCONF** (Operator NETCONF row): the daemon's rule that `netconf_host` is a loopback
+  address and [ADR 0002](../adr/0002-junos-delegated-sign-in.md)'s NETCONF session to the device's
+  own loopback. The daemon's NETCONF session checks no SSH host key today, so an off-loopback
+  target would also need a pinned host key checked before the password is sent. This changes the
+  sign-in trust boundary.
+- **The listener** (Web listener row): INV-10 and R-BIND gain proofs and refusals for an
+  address other than the default. Nothing is loosened: R-BIND refuses only loopback, wildcard,
+  multicast, link-local, reserved and IPv6 addresses, so a routable address on `lo0.0` with TLS
+  already passes it today.
+
+The [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md) shows why storage, web
+ingress and operator NETCONF must be evaluated independently.
+
+| Choice | Prefer | Offer only when the preferred path is unavailable | Refuse |
+| --- | --- | --- | --- |
+| State | Already trusted `/var/db/jwicket`, made once by root (9.3; the current rule) | **For this alternative only, ADR 0015 supersedes ADR 0011 decision 4 item 2 and ADR 0012 decision 4; open question 28's default stands.** Operator-selected private account-owned directory with a trusted parent chain; verify ownership, modes, persistence and space on the actual device | Unsafe path, symlinks not covered by the existing trust rules, permissive output files, or an unverified path. No silent temporary directory fallback |
+| Web listener | The current default (open question 30, decided; ADR 0011 decision 4): `--access tls`, TLS on one operator-named unicast IPv4 address of the device, meant to be the management address, which the installer does not check (`--listen-address`, by default `--host` when that is an IP literal), port 9443, with `[server] routing_instance mgmt_junos` when `system management-instance` is set (INV-10, R-BIND, 7.2). `--access tunnel` (`127.0.0.1` without TLS, reached by `ssh -L`) stays an option with its warning: SSH local forwarding was refused on the SRX4100 and on the vSRX (Q-NET-03), and the vSRX's bind-only diagnostic refused `127.0.0.1` | Another address of this SRX that R-BIND already admits with TLS (such as the address on `lo0.0`), with added proofs: the exact interface address and routing instance read from the device through the trusted management session, a valid certificate, and restricted ingress proved from the client network. This adds checks to INV-10 and R-BIND, loosens neither, and reopens no decided question | Every listener: a wildcard bind, plaintext on a routable address, or a rule R-BIND refuses today. The offered address also: an ambiguous address, an unverified certificate or ingress, or a required change to another service. Never move the listener automatically |
+| Operator NETCONF | Working NETCONF over SSH on IP loopback (ADR 0002; the daemon's default port 830; its settings accept any port from 1 to 1023) | **Narrows ADR 0002's loopback rule (ADR 0002 is still Proposed) and changes the sign-in trust boundary; the security reviewer (D1) has not reviewed it.** A committed address assigned to this same SRX, confirmed through the already trusted management session, plus a full independently verified device SSH host-key pin and approved host-signature algorithm. The client must check the complete key before transmitting the password | Remote or ambiguous target, bad password, changed or unknown key, weak signature, or unsupported transport. No alternate-address retry on authentication or identity failure |
+
+Read-only discovery reports candidates and what still needs proof. It must distinguish a
+successful bind from working ingress and a TCP handshake from operator sign-in. Operator
+approval names the exact address, routing instance, observed certificate and key policy,
+state path, and config diff. A separately authorized, timed deployment validates from the
+actual JET process and intended client: correct signed-off bundle, listener, credentials sent
+only after device identity is verified, session sign-in, permitted read, sign-out and session
+closure. It confirms only its own commit after the checks pass. On failure, let Junos roll
+back; check restoration and clean up only its own files. No fallback at daemon restart,
+no change to REST or SSH forwarding policy, and no setup changes to another service by
+surprise. Record the selected profile, the release and digest, each observed check and its
+result, without private keys, passwords, session tokens or raw configuration.
+
+Acceptance cases, numbered on acceptance (open question 32) and listed in 17.2. Each is **not
+met**: nothing they test is built.
+
+- **AC-006-45:** where the current defaults work (the TLS listener on the operator-named address,
+  NETCONF on loopback) they remain preferred.
+- **AC-006-46:** absent loopback NETCONF, the preflight can offer the explicitly approved
+  same-device pinned profile.
+- **AC-006-47:** a bad password, mismatched pin, weak algorithm, moved interface or inaccessible
+  client path refuses without trying a different target.
+- **AC-006-48:** failed verification restores prior state.
+- **AC-006-49:** the preferred path is tested on an SRX4100 and the alternative on vSRX, without
+  embedding a platform, address, key or private library workaround in the default.
+- **AC-006-50:** MNHA and chassis cluster refusals remain unchanged.
+
 ## 8. The safety contract
 
 ### 8.1 Rules
@@ -1749,7 +1815,8 @@ The installers are terminal programs; these are their "UI" requirements, all ope
 ## 17. Acceptance tests
 
 AC-006-01 to AC-006-41, AC-006-43 and AC-006-44 run in CI against fakes, synthetic replies and
-static checks; AC-006-42 needs a lab. Every criterion is **open** until its tests pass in CI on this change, and one met on fakes
+static checks; AC-006-42 needs a lab. AC-006-45 to AC-006-50 are section 7.12's cases (ADR 0015):
+none is met, because nothing they test is built, and AC-006-49 also needs a lab. Every criterion is **open** until its tests pass in CI on this change, and one met on fakes
 shows what the installer sends, not what a device does. AC-006-33 and AC-006-36 are withdrawn with
 the scope cuts; their numbers stay so the others are stable.
 
@@ -1817,6 +1884,12 @@ that disagrees with the history; a half-finished install; commit comments with `
 | AC-006-42 | Q-INST-06 on a lab vSRX (and attested lab hardware): each built method installs, passes its checks, re-runs unchanged, upgrades, reverts after an induced failure and uninstalls, leaving configuration and listings as before (**not met**) | Lab |
 | AC-006-43 | Every `tools/jwicket_install/*.py` and the generated op script parse with `ast.parse(..., feature_version=(3, 7))`; `build_op.py`'s `MIN_PYTHON` is `(3, 7)`; the unit tests pass on Python 3.7 | `test_install_op.py`; CI on 3.7 |
 | AC-006-44 | A non-vSRX model is R-MODEL without `--lab-hardware`; with it the run asks for `lab only` after the host name, the production signs shown first, stops on anything else (exit 3), records the attestation, and still applies R-MANAGED, R-CLUSTER, R-MNHA and R-DUAL-RE | `test_install_plan.py`: `HardwareTests`; `test_install_workstation.py`: `LabHardwareTests`; `test_install_op.py`: `LabHardwareTests`; `test_install_cli.py`: `LabHardwareCliTests` |
+| AC-006-45 | Adaptive preflight (7.12): where the current defaults work (the TLS listener on the operator-named address, NETCONF on loopback) they remain preferred (**not met**: not built) | None yet |
+| AC-006-46 | Absent loopback NETCONF, the preflight can offer the explicitly approved same-device pinned profile (**not met**: not built) | None yet |
+| AC-006-47 | A bad password, mismatched pin, weak algorithm, moved interface or inaccessible client path refuses without trying a different target (**not met**: not built) | None yet |
+| AC-006-48 | Failed verification restores prior state (**not met**: not built) | None yet |
+| AC-006-49 | The preferred path tested on an SRX4100 and the alternative on vSRX, with no platform, address, key or private library workaround in the default (**not met**: not built) | Lab |
+| AC-006-50 | MNHA and chassis cluster refusals remain unchanged with the preflight (**not met**: not built) | None yet |
 
 
 ## 18. Qualification needed
@@ -1881,7 +1954,7 @@ Not built (4.1): a setup mode (C1), a `serve` command (C2), a ZTP module or its 
 
 ## 21. Open questions (owner decisions)
 
-Every row is a proposal recorded in ADR 0012 unless it says otherwise; ADR 0011 holds only 2.2. Rows 20, 28 and 30 were decided by the owner on 2026-11-25 (ADR 0011, decision 4) and are no longer open; they keep their numbers.
+Every row is a proposal recorded in ADR 0012 unless it says otherwise; ADR 0011 holds only 2.2. Rows 20, 28 and 30 were decided by the owner on 2026-11-25 (ADR 0011, decision 4) and are no longer open; they keep their numbers. Row 32 was decided by the owner on 2026-11-26 (ADR 0015 accepted); its security review is still pending (D1).
 
 | # | Question (proposed answer) | Who decides | Settled by |
 | --- | --- | --- | --- |
@@ -1912,10 +1985,11 @@ Every row is a proposal recorded in ADR 0012 unless it says otherwise; ADR 0011 
 | 25 | Two records: ADR 0011 (owner decisions, Accepted), ADR 0012 (proposals, Proposed) | Owner | D11 |
 | 26 | Build the SSH-CLI driver (M17) once Q-INST-05 records the CLI's prompts? | Owner | Q-INST-05 |
 | 27 | Built-in defaults when `jwicket.ini` is absent? (Not recommended, section 10) | Owner, security reviewer | ADR |
-| 28 | **Decided** (owner, 2026-11-25, ADR 0011 decision 4): the path stays under `/var/db`; root's one-time step for `/var/db/jwicket` is printed and checked by the installers, never run by them (R-STATEDIR, 9.3). A super-user account cannot create the directory (verified on SRX4100) | Owner (decided) | — |
+| 28 | **Decided** (owner, 2026-11-25, ADR 0011 decision 4): the path stays under `/var/db`; root's one-time step for `/var/db/jwicket` is printed and checked by the installers, never run by them (R-STATEDIR, 9.3). A super-user account cannot create the directory (verified on SRX4100). [ADR 0015](../adr/0015-verified-installer-profiles.md) (accepted 2026-11-26) supersedes this decision for its offered account-owned alternative only (7.12); the default is unchanged | Owner (decided) | — |
 | 29 | Confirm the lead engineer's cuts C1 to C3 (4.1)? Each narrows "as many install methods as are available" and can be built later without changing the safety contract | Owner | — |
 | 30 | **Decided** (owner, 2026-11-25, ADR 0011 decision 4): `--access tls` by default on the management address, port 9443, with `[server] routing_instance mgmt_junos` when `system management-instance` is set; a self-signed certificate generated on the workstation, its key uploaded 0600 and never kept, its fingerprint printed; `tunnel` kept with its warning. Q-TLS-01 and Q-SEC-01 still test the listener | Owner (decided) | — |
 | 31 | M4 and M4U (no workstation): their access mode, and how an on-box certificate is made (the standard library makes no RSA key; 6.5) | Owner, security reviewer | Q-INST-05, Q-TLS-01 |
+| 32 | **Decided** (owner, 2026-11-26, in the owner's words: "Accept"): [ADR 0015](../adr/0015-verified-installer-profiles.md) and section 7.12 (adaptive preflight), written on 2026-11-26 from the [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md), are accepted as a design; nothing is built. The security review is pending (D1, unnamed), so the acceptance counts toward no gate. For the offered account-owned state directory alternative only, ADR 0015 supersedes ADR 0011 decision 4 item 2 and ADR 0012 decision 4 (open question 28's default unchanged); the Operator NETCONF row narrows ADR 0002's loopback rule (ADR 0002 still Proposed) and changes the sign-in trust boundary; the Web listener row prefers open question 30's decided default, so open question 30 is not reopened. 7.12's cases are AC-006-45 to AC-006-50, all not met | Owner (decided); security reviewer (pending) | Q-INST-06, Q-AUTH-01, Q-NET-01, Q-TLS-01, Q-SEC-01 |
 
 
 ## 22. Revision history
@@ -1927,6 +2001,8 @@ Every row is a proposal recorded in ADR 0012 unless it says otherwise; ADR 0011 
 | 2026-11-24 | Moved into `docs/specs/` as Draft, built in the same change; scope cuts C1 to C5 applied (4.1); duplicated method facts merged; ADR 0011 limited to the owner's decisions, every other choice a proposal in ADR 0012 |
 | 2026-11-25 | Revision 4, decided by the lead engineer from the lab SRX4100 run ([srx4100]): Python 3.7 for everything the op script embeds; `--access tls` by default on 9443 with an installer-made certificate, `tunnel` with a warning; C8 a pinned HTTPS read, C9 retired, no SSH channels; no directory creation, R-STATEDIR with root's step; `--lab-hardware` with a typed `lab only`; the run's facts marked verified; review findings applied |
 | 2026-11-25 | Owner decision ("go with those installer defaults", ADR 0011 decision 4): the TLS default, root's directory step and the lab-hardware attestation accepted, so open questions 20, 28 and 30 are decided; the on-box methods' access split out as open question 31. The merge of `main`'s SRX4100 qualification (#11) applied: 8.5's cross-user effect labelled inferred, and the illustrative `show \| compare` blocks ordered by the configuration schema (7.8) |
+| 2026-11-26 | Section 7.12 (adaptive preflight) and [ADR 0015](../adr/0015-verified-installer-profiles.md) proposed from the [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md); not accepted (open question 32). Corrected the same day in review: the Web listener row prefers the accepted TLS default (open question 30), not loopback; the State row says it reopens open question 28; the section lists the current rules it would change instead of saying it changes none; its acceptance cases stay unnumbered until accepted |
+| 2026-11-26 | Owner decision ("Accept", open question 32): ADR 0015 and section 7.12 accepted as a design, security review pending (D1); nothing built, so today's defaults and refusals still hold in the code. ADR 0015 supersedes ADR 0011 decision 4 item 2 and ADR 0012 decision 4 for the offered account-owned state directory only (open question 28's default unchanged; open question 30 not reopened). 7.12's acceptance cases numbered AC-006-45 to AC-006-50, all not met; 7.12's heading drops "(proposed)", with an anchor kept for the old link |
 
 ## Sources
 
