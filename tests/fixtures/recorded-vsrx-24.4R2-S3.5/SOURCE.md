@@ -32,9 +32,19 @@ are retained here.
 
 The filtered list has four ICMP rows and the filtered summary has four matches.
 The unfiltered summary has six active sessions, not four; the two requests serve
-different panels. Junos reported the session state as `sess-state` in these list rows.
+different panels. Junos reported the session state as `sess-state` in these list rows
+(`Valid` in all four). The merged SRX4100 recording uses the same element, `Valid` in all
+25 rows of [its list](../recorded-srx4100-25.2R1-S1.4/get-flow-session-information.xml).
+Neither list has a `session-state` element, which the parser reads, so today the value lands
+in the row's `extra` map; both are brief-style replies, and which element should fill the
+state field is open. Each wing carries `tunnel-id` and `tunnel-type`, and the four `Out`
+wings also `tunnel-info`; the parser's wing reads `tunnel-information`, which is absent, and
+drops every wing field it does not model.
 The allowed log uses `file-content`; the restricted reply uses an `rpc-error` whose
-message is classified as a permission denial. These five replies add second-platform
+message is classified as a permission denial. `filesize="66"` on `file-content` is the
+recorded value; it does not match the substituted content, whose line is 67 characters
+(69 with the newlines around it). Whether the `junos:seconds` attribute on `file-content`
+was substituted is not stated in the record. These five replies add second-platform
 evidence for Q-REL-01; they do not qualify the platform or complete Q-REL-01.
 
 Replay: `PYTHONPATH=src python3 -m unittest discover -s tests -p test_recorded_vsrx.py`.
