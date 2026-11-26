@@ -6,8 +6,7 @@
 gate G1 ([governance](governance.md#3-gates-g0-to-g5)) nor a security review (Q-SEC-01). Nothing
 here makes it installable on a production SRX. Use these installers only on a lab device you are
 allowed to change: a disposable lab vSRX, or, with `--lab-hardware` ([below](#lab-hardware)), lab
-hardware that carries only lab traffic and whose owner approves the run. No pre-release has been
-published yet: the first tag would be `v0.1.0.dev1`, pushed only after the project owner's go.
+hardware that carries only lab traffic and whose owner approves the run. Choose a published tag from [J-Wicket lab pre-releases](https://github.com/robertsonc/jwicket/releases).
 
 This is the operator's guide. The design, with the Juniper source of every claim, is
 [Spec 006](specs/006-installation.md); this guide repeats only what you need to run each method. It

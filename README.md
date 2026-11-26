@@ -25,7 +25,7 @@ In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids h
 
 - Everything here is read-only. **Tested on one lab SRX4100** (Junos 25.2R1-S1.4, Python 3.7.10, 24 November 2026): the bundle ran under Junos, served TLS on fxp0, signed in an operator over NETCONF and read that device's policies, live sessions and syslog ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)). Nothing has run on a customer platform and no other platform or release has been tried. Most automated tests use synthetic fixtures; nine replies recorded on that SRX4100 are parsed too (Q-REL-01, partial).
 - It is a web server on the routing engine, so it has to earn trust: its security review and external penetration test have not happened yet ([governance](docs/governance.md#3-gates-g0-to-g5)).
-- Lab-only installers exist, built against fakes; none has run on a device and no pre-release has been published ([Install (lab only)](#install-lab-only)). The project does not ask anyone to enable a listener, disable J-Web or change a firewall.
+- Lab-only installers exist, built against fakes; none has run on a device; builds are available as [lab pre-releases](https://github.com/robertsonc/jwicket/releases) ([Install (lab only)](#install-lab-only)). The project does not ask anyone to enable a listener, disable J-Web or change a firewall.
 - Watch or star the repository to follow the qualification gates; G1 is next.
 
 Try it on a workstation. You need Python 3.7 or later, `make` and `git`; no packages and no device. CI runs on Linux; other operating systems are not tested in CI.
@@ -107,7 +107,7 @@ make bundle                                # build dist/jwicket.py, then self-te
 
 > This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
 
-Every installer prints that sentence first. J-Wicket is **not installable on a production SRX**, and **no pre-release has been published yet**: the first, `v0.1.0.dev1`, waits for the owner's go. Every installer is lab-gated until G1 (owner decision, [ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)), and production installs stay out until G5:
+Every installer prints that sentence first. J-Wicket is **not installable on a production SRX**, and its [pre-releases](https://github.com/robertsonc/jwicket/releases) are for lab use only. Every installer is lab-gated until G1 (owner decision, [ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)), and production installs stay out until G5:
 
 - a dry run by default, which only reads the device;
 - the plan's configuration diff, the posture warning (`set system scripts language python3` lets unsigned Python run on the routing engine) and the production signs read from the device;
@@ -131,10 +131,10 @@ The lab-hardware attestation, root's directory step and the TLS default are the 
 Download by tag, then check one source independent of the release page: `SHA256SUMS` on the same page guards against a corrupted download, not a replaced release.
 
 ```sh
-tag=v0.1.0.dev1   # not published yet
+tag=v0.1.0.dev2   # example; choose an existing lab pre-release tag
 gh release download "$tag" --repo robertsonc/jwicket --dir . --pattern jwicket.py --pattern SHA256SUMS
 gh release verify-asset "$tag" jwicket.py --repo robertsonc/jwicket   # the immutable release's attestation
-curl -fsSL "https://raw.githubusercontent.com/robertsonc/jwicket/main/docs/releases/$tag.sha256sums" | cmp - SHA256SUMS   # or the release record on main
+gh release verify-asset "$tag" SHA256SUMS --repo robertsonc/jwicket
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
@@ -491,7 +491,7 @@ Components, trust boundaries and known gaps: [architecture](docs/architecture.md
 
 ## Status and roadmap
 
-Version 0.1.0.dev1, unreleased: no release or tag yet. The first lab pre-release, `v0.1.0.dev1`, waits for the owner's go ([ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)). Expanding the parity inventory and proving least-privilege, TLS-protected on-box reads come before any live write path ([governance](docs/governance.md#3-gates-g0-to-g5)).
+See [GitHub Releases](https://github.com/robertsonc/jwicket/releases) for published lab builds. These are not production releases ([ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)). Expanding the parity inventory and proving least-privilege, TLS-protected on-box reads come before any live write path ([governance](docs/governance.md#3-gates-g0-to-g5)).
 
 | Gate | Means | Status |
 | --- | --- | --- |
