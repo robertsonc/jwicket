@@ -19,7 +19,7 @@ as a confirmed commit that Junos undoes by itself unless the operator confirms i
 
 None of this exists. This document is the design that the first write path must implement and
 that Spec 003's preview must reuse. It is grounded in Juniper documentation and in J-Web 24.4's
-documented behaviour; no step has been run on a device, and several steps depend on behaviour
+documented behaviour; no J-Wicket step has been run on a device, and several steps depend on behaviour
 that Juniper does not document. Each such step names the Q-CHG test that settles it.
 
 Labels, as in [architecture.md](../architecture.md): **verified** (a cited Juniper page says it),
@@ -694,7 +694,9 @@ CI; AC-002-19 in a browser; AC-002-20 on qualified platforms.
 Defined here, referenced from [governance.md](../governance.md). Every test runs on lab equipment
 only, with the operator's own NETCONF session, and records raw replies and syslog lines as
 evidence for the lab owner to certify. "Each qualified release" means the release set governance
-names for Q-REL-01. No test has run.
+names for Q-REL-01. No J-Wicket test has run. One native Junos observation, outside J-Wicket,
+covers part of Q-CHG-03 ([lab record](../evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback);
+see that test's status).
 
 ### Q-CHG-01 Lock and candidate contention with CLI and J-Web users
 
@@ -735,7 +737,10 @@ names for Q-REL-01. No test has run.
 - **Platforms:** lab vSRX; each qualified release.
 - **Status:** partial native evidence on vSRX 24.4R2-S3.5. A description-only NETCONF
   commit expired and Junos restored the exact pre-change policy. Other undo modes and
-  the J-Wicket protocol were not exercised. [Lab record](../evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback).
+  the J-Wicket protocol were not exercised. The comparison covered that policy subtree only,
+  not the whole committed configuration the method asks for. The record does not report a check
+  of commit-history entries. No raw replies or syslog lines are filed as this section requires:
+  the evidence directory holds only its README, which omits raw syslog. [Lab record](../evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback).
 
 ### Q-CHG-04 Group-owned and protected edits refused
 
