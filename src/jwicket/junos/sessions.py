@@ -211,11 +211,11 @@ def _split_policy(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     return value, None
 
 
-# The session children ``_session`` names. ``sess-state`` is not here: it is left out of ``extra``
-# only when it filled ``state`` (see ``_session``), so nothing the device sent is dropped.
+# The session children ``_session`` names, so they are not repeated in ``extra``.
 _KNOWN_SESSION_TAGS = {
-    "session-identifier", "status", "session-state", "policy", "timeout", "configured-timeout",
-    "start-time", "duration", "application", "dynamic-application-name", "flow-information",
+    "session-identifier", "status", "session-state", "sess-state", "policy", "timeout",
+    "configured-timeout", "start-time", "duration", "application", "dynamic-application-name",
+    "flow-information",
 }
 
 
@@ -243,22 +243,18 @@ def _session(node: Element, location: Optional[str]) -> Json:
         nat["source"] = outbound["dst"] != inbound["src"] or outbound["dport"] != inbound["sport"]
         nat["destination"] = outbound["src"] != inbound["dst"] or outbound["sport"] != inbound["dport"]
     sid = text(node, "session-identifier")
-    # ``state`` reads ``session-state`` where a reply has it (the 24.4R2 YANG describes it as the HA
-    # state, Spec 005 DF-05). Neither recorded list has it: both brief-style lists carry ``sess-state``
-    # (``Valid`` in every row; SRX4100 25.2R1-S1.4, vSRX 24.4R2-S3.5), which then fills ``state``.
-    # When both are present, ``sess-state`` stays in ``extra``.
-    state = text(node, "session-state")
-    known = _KNOWN_SESSION_TAGS
-    if state is None:
-        state = text(node, "sess-state")
-        if state is not None:
-            known = known | {"sess-state"}
+    # Two elements, two fields (owner decision 2026-11-26, Spec 004 section 5.2). ``state`` is the HA
+    # state and reads ``session-state`` only: the 24.4R2 YANG describes it so (Spec 005 DF-05), and
+    # neither recorded list has it, so ``state`` is None there. ``validity`` reads ``sess-state``,
+    # ``Valid`` in every row of both brief-style lists (SRX4100 25.2R1-S1.4, vSRX 24.4R2-S3.5); that it
+    # is the CLI's "Session State" is inferred, and its other values are unknown (Q-REL-01).
     return {
         "id": f"{location}:{sid}" if location else sid,
         "session_id": sid,
         "location": location,
         "status": text(node, "status"),
-        "state": state,
+        "state": text(node, "session-state"),
+        "validity": text(node, "sess-state"),
         "policy": policy,
         "policy_index": policy_index,
         "timeout": _int(text(node, "timeout")),
@@ -269,7 +265,7 @@ def _session(node: Element, location: Optional[str]) -> Json:
         "in": inbound,
         "out": outbound,
         "nat": nat,
-        "extra": _extra(node, known),
+        "extra": _extra(node, _KNOWN_SESSION_TAGS),
     }
 
 

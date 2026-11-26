@@ -84,7 +84,7 @@ class SessionFilterTests(unittest.TestCase):
 SESSION_REPLY = """
 <flow-session-information>
   <flow-session>
-    <session-identifier>42</session-identifier><status>Normal</status><session-state>Valid</session-state>
+    <session-identifier>42</session-identifier><status>Normal</status><sess-state>Valid</sess-state>
     <policy>allow-web/5</policy><configured-timeout>1800</configured-timeout><timeout>1790</timeout>
     <start-time>1795500000</start-time><duration>10</duration>
     <flow-information><direction>In</direction><source-address>10.10.0.5</source-address><source-port>51234</source-port>
@@ -129,30 +129,38 @@ class SessionParseTests(unittest.TestCase):
         self.assertEqual(row["out"]["dst"], "203.0.113.2")
         self.assertEqual(row["nat"], {"source": True, "destination": False})
         self.assertEqual(row["in"]["bytes"], 520)
-        # session-state fills state; a wing with no tunnel element has no tunnel and no extras.
-        self.assertEqual(row["state"], "Valid")
-        self.assertNotIn("session-state", row["extra"])
+        # sess-state fills validity, and state (session-state, absent here) stays None; a wing with
+        # no tunnel element has no tunnel and no extras.
+        self.assertEqual((row["state"], row["validity"]), (None, "Valid"))
+        self.assertNotIn("sess-state", row["extra"])
         self.assertEqual((row["in"]["tunnel"], row["in"]["extra"]), (None, {}))
 
-    def test_session_state_takes_precedence_over_sess_state(self) -> None:
-        """Spec 004 section 5.2. Synthetic: no recorded reply has both elements. ``sess-state`` is
-        recorded (SRX4100 25.2R1-S1.4, vSRX 24.4R2-S3.5); ``session-state`` is the element the parser
-        already read (Spec 005 DF-05). The ``Active`` value is made up for the test."""
-        both = S.parse_sessions(xml(
-            "<flow-session-information><flow-session><session-identifier>7</session-identifier>"
-            "<session-state>Active</session-state><sess-state>Valid</sess-state></flow-session>"
-            "</flow-session-information>"
-        ), 10)["rows"][0]
-        self.assertEqual(both["state"], "Active")
-        self.assertEqual(both["extra"].get("sess-state"), "Valid")  # not used for state, so kept
-        self.assertNotIn("session-state", both["extra"])
+    def test_session_state_and_sess_state_fill_their_own_fields(self) -> None:
+        """Spec 004 section 5.2 (owner decision 2026-11-26: validity in its own column). Synthetic: no
+        recorded reply has both elements. ``sess-state`` is recorded (SRX4100 25.2R1-S1.4, vSRX
+        24.4R2-S3.5); ``session-state`` is described in the 24.4R2 YANG as the HA state (Spec 005
+        DF-05). The ``Backup`` and ``Invalidated`` values are made up for the test."""
+        def row(children: str) -> Dict[str, Any]:
+            reply = xml(
+                "<flow-session-information><flow-session><session-identifier>7</session-identifier>"
+                f"{children}</flow-session></flow-session-information>"
+            )
+            got: Dict[str, Any] = S.parse_sessions(reply, 10)["rows"][0]
+            return got
 
-        recorded_shape = S.parse_sessions(xml(
-            "<flow-session-information><flow-session><session-identifier>8</session-identifier>"
-            "<sess-state>Valid</sess-state></flow-session></flow-session-information>"
-        ), 10)["rows"][0]
-        self.assertEqual(recorded_shape["state"], "Valid")
-        self.assertNotIn("sess-state", recorded_shape["extra"])  # it filled state, so not repeated
+        both = row("<session-state>Backup</session-state><sess-state>Invalidated</sess-state>")
+        self.assertEqual((both["state"], both["validity"]), ("Backup", "Invalidated"))
+        self.assertEqual(both["extra"], {})  # both are modelled, so neither is repeated in extra
+
+        ha_only = row("<session-state>Backup</session-state>")
+        self.assertEqual((ha_only["state"], ha_only["validity"]), ("Backup", None))
+
+        recorded_shape = row("<sess-state>Valid</sess-state>")
+        self.assertEqual((recorded_shape["state"], recorded_shape["validity"]), (None, "Valid"))
+        self.assertEqual(recorded_shape["extra"], {})
+
+        neither = row("")
+        self.assertEqual((neither["state"], neither["validity"]), (None, None))
 
     def test_tunnel_information_takes_precedence_over_tunnel_id(self) -> None:
         """Spec 004 sections 5.2 and 7.3. Synthetic: ``tunnel-id``, ``tunnel-type``, ``tunnel-info`` and

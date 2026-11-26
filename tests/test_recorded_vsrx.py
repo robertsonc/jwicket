@@ -61,9 +61,11 @@ class RecordedVsrxTests(unittest.TestCase):
             with self.subTest(id=row["id"]):
                 self.assertEqual((row["policy"], row["policy_index"]), ("JW-QREL-ICMP", "8"))
                 self.assertEqual(row["status"], "Normal")
-                # The rows carry sess-state and no session-state, so sess-state fills state and is
-                # not repeated in extra (Spec 004 section 5.2, Spec 005 DF-05).
-                self.assertEqual(row["state"], "Valid")
+                # The rows carry sess-state and no session-state: sess-state fills validity and is not
+                # repeated in extra, and state (the HA state, session-state only) is None (Spec 004
+                # section 5.2, Spec 005 DF-05).
+                self.assertIsNone(row["state"])
+                self.assertEqual(row["validity"], "Valid")
                 self.assertNotIn("sess-state", row["extra"])
                 self.assertNotIn("session-state", row["extra"])
                 self.assertEqual(row["nat"], {"source": False, "destination": False})

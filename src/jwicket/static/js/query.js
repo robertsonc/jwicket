@@ -745,8 +745,9 @@ function sessionZones(row, ctx, side) {
 
 /**
  * The HA role a session row carries, if any: 'active', 'backup', 'standalone', 'warm' or null. The
- * reply tags vary by release, so `state` and `status` are read first (Active or Backup), then any extra
- * key that looks like a state, role, HA or status field.
+ * reply tags vary by release, so `state` (the HA state, from `session-state`) and `status` are read
+ * first (Active or Backup), then any extra key that looks like a state, role, HA or status field.
+ * `validity` (from `sess-state`, Valid where recorded) is not an HA role and is never read here.
  */
 export function sessionRole(row) {
   if (!row || typeof row !== 'object') return null;
@@ -1010,7 +1011,7 @@ const FIELD_FN = (obj, text) => {
 function sessionText(row) {
   const a = wing(row, 'in');
   const b = wing(row, 'out');
-  const parts = [row.session_id, row.id, row.policy, row.application, row.state, row.status, row.location,
+  const parts = [row.session_id, row.id, row.policy, row.application, row.state, row.validity, row.status, row.location,
     a.src, a.sport, a.dst, a.dport, a.proto, a.iface, b.src, b.sport, b.dst, b.dport, b.iface];
   if (row.extra) for (const v of Object.values(row.extra)) parts.push(v);
   return parts.filter((x) => x !== null && x !== undefined).join(' ');
@@ -1079,7 +1080,8 @@ export const FIELDS = {
     rate: { aliases: ['bps', 'throughput'], type: 'size', label: 'live rate in bytes/s (from poll deltas)', get: (r) => nz(r.rate) },
     dur: { aliases: ['duration', 'age'], type: 'duration', label: 'session age (s, m, h)', get: (r) => r.duration },
     timeout: { aliases: ['ttl', 'remaining'], type: 'duration', label: 'timeout remaining', get: (r) => r.timeout },
-    state: { aliases: ['status'], type: 'enum', label: 'session state or status', get: (r) => merge([r.state, r.status, r.extra && r.extra.state, r.extra && r.extra['session-flag']]), values: (rows) => topValues(rows, (r) => [r.state, r.status]) },
+    state: { aliases: ['status'], type: 'enum', label: 'HA state (Active, Backup) or status', get: (r) => merge([r.state, r.status, r.extra && r.extra.state, r.extra && r.extra['session-flag']]), values: (rows) => topValues(rows, (r) => [r.state, r.status]) },
+    validity: { aliases: ['sess-state'], type: 'enum', label: 'session validity (Valid where recorded)', get: (r) => r.validity, values: (rows) => topValues(rows, (r) => r.validity) },
     id: { aliases: ['session', 'sid', 'session-id'], type: 'int', label: 'session id', get: (r) => r.session_id ?? r.id },
     node: { aliases: ['location', 'spu'], type: 'text', label: 'cluster node or SPU', get: (r) => (r.location ? [r.location, ...String(r.location).split(/[\s/]+/)] : []), values: (rows) => topValues(rows, (r) => r.location) },
   }, sessionText),
