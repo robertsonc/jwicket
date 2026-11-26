@@ -24,6 +24,7 @@ In J-Web for SRX 24.4, no Monitor page lists live flow sessions; the log grids h
 **Stage: foundation, not installable on a production SRX.**
 
 - Everything here is read-only. **Tested on one lab SRX4100** (Junos 25.2R1-S1.4, Python 3.7.10, 24 November 2026): the bundle ran under Junos, served TLS on fxp0, signed in an operator over NETCONF and read that device's policies, live sessions and syslog ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)). Nothing has run on a customer platform and no other platform or release has been tried. Most automated tests use synthetic fixtures; nine replies recorded on that SRX4100 are parsed too (Q-REL-01, partial).
+- In the [dev3 follow-up on that SRX4100](docs/evidence/2026-11-26-srx4100-dev3/README.md), a restricted Junos user read policies and listed log sources; Junos still denied the contents of the listed log. That is one device observation, not a qualified login class.
 - It is a web server on the routing engine, so it has to earn trust: its security review and external penetration test have not happened yet ([governance](docs/governance.md#3-gates-g0-to-g5)).
 - Lab-only installers exist, built against fakes; none has run on a device; builds are available as [lab pre-releases](https://github.com/robertsonc/jwicket/releases) ([Install (lab only)](#install-lab-only)). The project does not ask anyone to enable a listener, disable J-Web or change a firewall.
 - Watch or star the repository to follow the qualification gates; G1 is next.
@@ -158,13 +159,13 @@ Every cell comes from the [parity ledger](docs/parity/jweb-24.4.csv), the [chart
 
 Central managers (Security Director, Security Director Cloud and Mist) run off the box and manage many devices; this project has not compared them row by row. J-Wicket treats them as co-owners of the configuration and shows a detected one as "managed from" ([ADR 0009](docs/adr/0009-central-management-coexistence.md)).
 
-**Use J-Web or the CLI on real devices today.** Use J-Wicket to evaluate the design on fixtures or to propose specs. The [lab procedure](docs/deploy-lab.md) describes a run on a disposable lab vSRX or on lab hardware whose owner approves it (it has run once, on the owner's lab SRX4100); running it is the lab owner's choice, not something this project asks for. That J-Wicket's tools for scope, explanation and recovery are better than J-Web's is the project's bet, not a measured result ([charter, section 1](docs/charter.md#1-the-problem-and-who-it-is-for)).
+**Use J-Web or the CLI on real devices today.** Use J-Wicket to evaluate the design on fixtures or to propose specs. The [lab procedure](docs/deploy-lab.md) describes a run on a disposable lab vSRX or on lab hardware whose owner approves it (it has been used on the owner's lab SRX4100); running it is the lab owner's choice, not something this project asks for. That J-Wicket's tools for scope, explanation and recovery are better than J-Web's is the project's bet, not a measured result ([charter, section 1](docs/charter.md#1-the-problem-and-who-it-is-for)).
 
 ## Features and functions
 
 | Status tag | Means |
 | --- | --- |
-| `built` | The code exists. The daemon, the query language and the log parser have automated tests that pass against synthetic fixtures. Browser-only views (for example the Overview, command palette, session drawer, histogram, themes and phone layout) have been exercised by hand on the development server, with no automated browser tests (Node tests cover some of their helpers). Formal browser acceptance (AC-001-21, AC-004-20) is not signed off. The daemon, the Policies, Sessions and Logs reads, and sign-in have run once on a lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); that is not qualification. |
+| `built` | The code exists. The daemon, the query language and the log parser have automated tests that pass against synthetic fixtures. Browser-only views (for example the Overview, command palette, session drawer, histogram, themes and phone layout) have been exercised by hand on the development server, with no automated browser tests (Node tests cover some of their helpers). Formal browser acceptance (AC-001-21, AC-004-20) is not signed off. The daemon, the Policies, Sessions and Logs reads, and sign-in have run on one lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); that is not qualification. |
 | `specified` | A spec covers it; nothing is built. |
 | `planned` | On the roadmap, with no spec. |
 
@@ -478,7 +479,7 @@ flowchart TB
   RE -.->|"Junos authentication order"| AAA
 ```
 
-The routing-engine half has run once, on a lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); it is not qualified anywhere.
+The routing-engine half has run on one lab SRX4100 ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)); it is not qualified anywhere.
 
 - **Who runs it:** one Python process on the routing engine, started and restarted by Junos as an extension-service application. J-Wicket's bundle ran that way on a lab SRX4100 (Q-RT-02, partial). Where fxp0 is in `mgmt_junos`, `[server] routing_instance` creates the listener there and keeps the NETCONF sessions in the default instance.
 - **Who it reads as:** each operator signs in with their Junos user name and password, and J-Wicket opens one NETCONF session per operator to the device's own loopback, as that operator, so Junos decides who they are and what they may see.
@@ -502,7 +503,7 @@ See [GitHub Releases](https://github.com/robertsonc/jwicket/releases) for publis
 | Gate | Means | Status |
 | --- | --- | --- |
 | G0 spike | Unsigned Python runs under Junos, listens and reads the device | **Passed** on vSRX 24.4R2-S3.5, 2026-11-23, by the spike daemon, not J-Wicket's code |
-| G1 foundation exit | Least-privilege, TLS-protected on-box reads proven (Q-RT-01 to Q-RT-03, Q-AUTH-01 to Q-AUTH-03, Q-TLS-01, Q-REL-01, Q-LOAD-01 to Q-LOAD-03, Q-SEC-01) | Not reached. On a lab SRX4100: Q-RT-01 passed; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01 and Q-REL-01 partial; Q-AUTH-03 early observations; nothing certified ([evidence](docs/evidence/2026-11-24-srx4100-lab/README.md)) |
+| G1 foundation exit | Least-privilege, TLS-protected on-box reads proven (Q-RT-01 to Q-RT-03, Q-AUTH-01 to Q-AUTH-03, Q-TLS-01, Q-REL-01, Q-LOAD-01 to Q-LOAD-03, Q-SEC-01) | Not reached. On a lab SRX4100: Q-RT-01 passed; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01 and Q-REL-01 partial; Q-AUTH-03 partial; nothing certified ([first lab run](docs/evidence/2026-11-24-srx4100-lab/README.md), [dev3 follow-up](docs/evidence/2026-11-26-srx4100-dev3/README.md)) |
 | G2 read parity | Every P0 and P1 ledger row implemented and qualified; hardware and HA tests pass; SEs choose J-Wicket over J-Web for look-ups on real labs | Not reached |
 | G3 preview-only builder | The Firewall Policy Builder ships; nothing that changes the device is sent | Not reached |
 | G4 live writes | Spec 002 built, external penetration test passed, product sponsor named | Not reached |
@@ -547,7 +548,7 @@ The documentation map: which document answers which question.
 | `tests/` | Python and Node tests; synthetic fixtures and a corpus of Juniper documentation log lines | CI on Python 3.7, 3.9, 3.11, 3.13 and Node 22 |
 | `docs/` | Charter, parity ledger, catalog, architecture, specs, ADRs, governance, lab procedure | Living documents |
 | `docs/brand/` | The logo as SVG files, with its usage rules, colours and provenance | Adopted 2026-11-25 |
-| `docs/evidence/` | The spike packet, unedited | Evidence, not product |
+| `docs/evidence/` | Dated spike and lab records, preserved after merge | Evidence, not product |
 
 ## Contributing
 

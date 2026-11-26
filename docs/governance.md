@@ -12,6 +12,9 @@ Q-RT-01 passed; Q-RT-02 and Q-AUTH-01 are met except one criterion each; Q-RT-03
 is met except a provisioning path; Q-AUTH-03 has early observations; the fxp0 part of Q-NET-01 is
 met; Q-NET-03 fails. Nine replies were recorded there as fixtures (Q-REL-01, partial: one platform,
 one release), and the parsers' tests read them; every other reply the tests parse is synthetic.
+On 2026-11-26, [dev3 on the same SRX4100](evidence/2026-11-26-srx4100-dev3/README.md) added partial
+Q-AUTH-03 evidence: a custom restricted class read policies and log sources, while Junos
+denied the contents of a listed log. G1 remains open.
 None of these results is certified, and nothing is qualified
 ([section 3.2](#32-what-qualified-platform-means)).
 The installers of [Spec 006](specs/006-installation.md) are built against fakes only, are
@@ -392,7 +395,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
 | [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Met except the SSH-key case** on SRX4100 25.2R1-S1.4 (read-only, operator and super-user accounts; RPCs attributed to the operator; sign-out, replacement and cap checked) |
 | [Q-AUTH-02](#q-auth-02-radius-and-tacacs-template-users) | RADIUS and TACACS+ template users | G1 | Not run |
-| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Early observations** on SRX4100 25.2R1-S1.4 for `read-only` and `operator` (configuration denied; sessions and health allowed) |
+| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Partial, not certified.** Predefined-class observations and a [dev3 restricted-class trial](evidence/2026-11-26-srx4100-dev3/README.md) on SRX4100 25.2R1-S1.4 |
 | [Q-AUTH-04](#q-auth-04-junos-lockout-and-j-wickets-throttle) | Junos lockout and J-Wicket's throttle | G2 (proposed) | Not run |
 | [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Met except a provisioning path** on SRX4100 25.2R1-S1.4 (1.2 and 1.3 served, 1.0 and 1.1 refused, `__Host-` Secure cookie, HSTS, bad key mode refused) |
 | [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **fxp0 part met** on SRX4100 25.2R1-S1.4 (TLS, through `mgmt_junos`); **vSRX part spike-equivalent partial** (clear text, one port checked); revenue zone on hardware not run |
@@ -623,9 +626,14 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   predefined `read-only` and `operator` classes: both read device facts, the session summary and
   list, and both health RPCs; both were denied the configuration (`error: permission denied`,
   `bad_element: security`), so policies, the central-management card and the log sources showed
-  `denied`, and `operator`'s `messages` read was shown `denied` too (the AC-004-06 gap). Not run in
-  full: the custom, regexp-limited and scope-bound classes, and the raw-reply capture per class.
-  Evidence: [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
+  `denied`. The sources read failed before `operator` could read `messages`
+  ([first SRX4100 run](evidence/2026-11-24-srx4100-lab/README.md)).
+  In the [dev3 follow-up](evidence/2026-11-26-srx4100-dev3/README.md) on 26 November, adding `interface`
+  to a custom class with `security system trace view` moved root policy inventory from
+  `denied` to `ok`. Both variants listed `messages` but its contents returned `denied`
+  (AC-004-06). These are **partial, uncertified observations**. The complete custom-class
+  and CLI comparison, raw replies, regexp-limited classes, and both scope-bound classes
+  remain open.
 
 #### Q-AUTH-04 Junos lockout and J-Wicket's throttle
 
@@ -1160,7 +1168,7 @@ platform and release, and is "qualified" only as [3.2](#32-what-qualified-platfo
 | vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5 only**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). Every other test, and J-Wicket's own bundle: not run. Not qualified |
 | SRX300 class | not run | not run | not run | not run |
 | SRX1500 | not run | not run | not run | not run |
-| SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01, Q-REL-01 partial; Q-AUTH-03 early; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). Not qualified |
+| SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01, Q-REL-01 partial; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). [Dev3 follow-up](evidence/2026-11-26-srx4100-dev3/README.md): Q-AUTH-03 partial (restricted-class inventory and log denial). Not qualified |
 | SRX4600 | not run | not run | not run | not run |
 | SRX5000 line | not run | not run | not run | not run |
 

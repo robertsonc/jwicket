@@ -1,9 +1,8 @@
 # Release records
 
-> **LAB ONLY.** J-Wicket pre-releases are lab-only and unsupported until gate G1 passes. No
-> pre-release has been published yet, so this directory holds no record: the first would be
-> `v0.1.0.dev1.sha256sums`, added only after the owner has pushed that tag and the release has been
-> published.
+> **LAB ONLY.** Published [J-Wicket pre-releases](https://github.com/robertsonc/jwicket/releases)
+> are for lab evaluation only and are unsupported. A published tag can precede its reviewed
+> checksum record on `main`; see the verification options in the [install guide](../install.md#get-a-pre-release-and-check-where-it-came-from).
 
 This directory holds one **release record** per published pre-release: `<tag>.sha256sums`, a copy of
 that release's `SHA256SUMS`, added to `main` by a reviewed pull request after publication. It is the
