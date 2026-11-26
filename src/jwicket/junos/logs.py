@@ -32,11 +32,14 @@ import hashlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from jwicket.junos.errors import RpcFailed
 from jwicket.junos.xmlutil import Element, active_kid, is_inactive, kid, kids, local, names, path, text, text_of
 
 Json = Dict[str, Any]
 
 MAX_WINDOW = 5000
+# Downstream only: ncclient/PyEZ have already received and parsed the XML before this check.
+MAX_FILE_REPLY_CHARS = 4 * 1024 * 1024
 DEFAULT_LINES = 500
 MAX_LINES = 2000
 MAX_TERMS = 4
@@ -315,6 +318,16 @@ def clean_lines(raw: str) -> List[str]:
         start += 1
     lines = lines[start:]
     return lines[-MAX_WINDOW:] if len(lines) > MAX_WINDOW else lines
+
+
+def clean_file_reply(reply: Element) -> List[str]:
+    """Refuse an oversized decoded file reply before splitting/copying its lines in J-Wicket."""
+    raw = reply_text(reply)
+    if len(raw) > MAX_FILE_REPLY_CHARS:
+        raise RpcFailed("decoded file log exceeds the local reply budget", (
+            "This log file is too large for J-Wicket to process. Use a smaller, rotated log file."
+        ))
+    return clean_lines(raw)
 
 
 def parse_expression(raw: Optional[str]) -> Optional[str]:

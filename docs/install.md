@@ -80,6 +80,13 @@ These rules are the owner's decision of 2026-11-24 and hold for every built meth
 
    > LAB ONLY. With --access tls the runtime commit opens a new HTTPS listener on this device's management address: the --listen-address, by default --host, which the installer does not check is the management address (an address of a revenue interface would put the listener there; in the mgmt_junos routing instance when 'system management-instance' is set). It is reachable by anything that reaches that address: J-Wicket's sign-in page becomes one more way into this device, beside SSH and NETCONF. Its certificate is self-signed; compare its SHA-256 fingerprint in the browser with the one the installer prints. J-Wicket has not passed gate G1 or a security review (Q-SEC-01). Continue only on a lab device whose management network you control.
 
+   Before any non-loopback qualification, require an ingress filter on the management path
+   (for example, an appropriate Junos lo0 or management-interface filter). Permit the J-Wicket
+   TCP port only from designated jump hosts or operator prefixes. Validate reachability from
+   an allowed and a denied source separately; do not treat the app's connection limits as the
+   filter. If this cannot be enforced and verified, do not enable a non-loopback listener.
+
+
    With `--access tunnel`, instead:
 
    > With --access tunnel, J-Wicket listens on 127.0.0.1 only and is reached through 'ssh -L', which needs SSH TCP forwarding on the device. On a lab SRX4100 running Junos 25.2R1-S1.4 the tunnel was refused ('administratively prohibited') and 'set system services ssh tcp-forwarding' is a syntax error there (verified, docs/evidence/2026-11-24-srx4100-lab). The SRX configuration schema at 23.2R1 marks tcp-forwarding deprecated and names 'set system services ssh allow-tcp-forwarding'; that statement was not tried (unverified, Q-NET-03). Health check C8 is not available with this mode. --access tls is the alternative.

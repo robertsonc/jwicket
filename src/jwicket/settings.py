@@ -216,6 +216,40 @@ def check_trusted_file(path: Path, *, label: str, secret: bool) -> None:
     _check_file_stat(st, path, label=label, secret=secret)
 
 
+def check_output_directory(path: Path, *, label: str) -> None:
+    """Apply the directory trust policy, and require exclusive writes to the final directory."""
+    check_directories(path, label=label)
+    try:
+        st = path.parent.stat()
+    except OSError as exc:
+        raise ConfigError(f"directory {path.parent} above {label} cannot be read: {exc}") from exc
+    _check_directory_stat(st, path.parent, label)
+    if not stat.S_ISDIR(st.st_mode) or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ConfigError(f"directory {path.parent} above {label} must not be writable by other accounts")
+
+
+def check_output_stat(st: os.stat_result, path: Path, *, label: str) -> None:
+    _check_file_stat(st, path, label=label, secret=True)
+    if st.st_nlink != 1:
+        raise ConfigError(f"{label} {path} must not have multiple hard links")
+
+
+def check_log_paths(settings: LogSettings) -> None:
+    """Validate the log destinations without creating or writing files."""
+    for name, path in (("file", settings.file), ("audit_file", settings.audit_file)):
+        if path is None:
+            continue
+        label = f"[log] {name}"
+        check_output_directory(path, label=label)
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ConfigError(f"{label} {path} cannot be read: {exc}") from exc
+        check_output_stat(st, path, label=label)
+
+
 def read_trusted_text(path: Path, *, label: str, secret: bool) -> str:
     """Open first, then check the opened file itself (``fstat``), so the checked file is the file
     that is read; then require the name to still lead to that same file (device and inode).
@@ -369,6 +403,8 @@ def validate(settings: Settings) -> None:
         raise ConfigError(
             "[auth] netconf_host must be a loopback address: J-Wicket manages only the device it runs on"
         )
+    if auth.backend == "netconf" and auth.netconf_port == 23:
+        raise ConfigError("[auth] netconf_port 23 selects PyEZ console mode, not NETCONF over SSH")
     if auth.backend == "lab-token":
         if not srv.loopback:
             raise ConfigError(

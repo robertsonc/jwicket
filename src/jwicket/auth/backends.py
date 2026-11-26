@@ -42,6 +42,8 @@ class AuthBackend(Protocol):
 
 
 def validate_username(username: str) -> str:
+    if username.casefold() == "root":
+        raise LoginRejected("the local root account is not accepted by the web sign-in")
     if not _USERNAME.match(username):
         raise LoginRejected(f"user name {username[:70]!r} rejected by format check")
     return username

@@ -166,7 +166,15 @@ class PyEzUserSession:
                 look_for_keys=False,
                 ssh_config=os.devnull,
             )
-            dev.open(gather_facts=False)
+            try:
+                dev.open(gather_facts=False)
+            finally:
+                # PyEZ 2.8.3's public setter releases the Device's stored reference. Open RPCs
+                # use the established transport; J-Wicket never reopens it with an old password.
+                # This does not zero Python strings or clear any copies made by dependencies.
+                prop = getattr(type(dev), "password", None)
+                if isinstance(prop, property) and prop.fset is not None:
+                    dev.password = None
             dev.timeout = timeout_s
         except Exception as exc:
             raise classify(exc) from exc

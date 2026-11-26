@@ -24,14 +24,15 @@ import hmac
 import json
 import logging
 import logging.handlers
+import os
 import secrets
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO, Tuple
 
-from jwicket.settings import LogSettings
+from jwicket.settings import ConfigError, LogSettings, check_output_directory, check_output_stat
 
 LOG = logging.getLogger("jwicket")
 
@@ -84,14 +85,55 @@ def escape_handlers(handlers: Iterable[logging.Handler]) -> None:
             handler.addFilter(EscapeControls())
 
 
+class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Append only to a trusted, private regular file, including after rotation."""
+
+    def __init__(self, path: Path, *, max_bytes: int, backups: int) -> None:
+        check_output_directory(path, label="log output")
+        try:
+            path = path.parent.resolve(strict=True) / path.name
+        except OSError as exc:
+            raise ConfigError(f"log output {path} has no usable parent directory: {exc}") from exc
+        super().__init__(path, maxBytes=max_bytes, backupCount=backups)
+
+    def _open(self) -> TextIO:
+        path = Path(self.baseFilename)
+        label = "log output"
+        check_output_directory(path, label=label)
+        # A non-regular file must not block before its descriptor can be checked. Never truncate
+        # or pass an unchecked descriptor to the logging handler.
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            try:
+                existing = path.lstat()
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                check_output_stat(existing, path, label=label)
+            fd = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise ConfigError(f"{label} {path} cannot be opened: {exc}") from exc
+        try:
+            opened = os.fstat(fd)
+            check_output_stat(opened, path, label=label)
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                raise ConfigError(f"{label} {path} changed while it was opened")
+            return os.fdopen(os.dup(fd), "a", encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(f"{label} {path} could not be checked: {exc}") from exc
+        finally:
+            os.close(fd)
+
+
 def setup_logging(settings: LogSettings) -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     fmt.converter = time.gmtime
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if settings.file is not None:
         handlers.append(
-            logging.handlers.RotatingFileHandler(
-                settings.file, maxBytes=settings.max_bytes, backupCount=settings.backups
+            PrivateRotatingFileHandler(
+                settings.file, max_bytes=settings.max_bytes, backups=settings.backups
             )
         )
     root = logging.getLogger()
@@ -138,7 +180,7 @@ class AuditTrail:
         # A Logger constructed directly is not registered with the logging manager, so each trail
         # owns its handler; two trails never write into each other's files.
         self._logger = logging.Logger("jwicket.audit.file", logging.INFO)
-        handler = logging.handlers.RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups)
+        handler = PrivateRotatingFileHandler(path, max_bytes=max_bytes, backups=backups)
         handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(handler)
 

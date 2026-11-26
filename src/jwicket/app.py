@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Iterator, List, Optional
@@ -29,6 +30,8 @@ from jwicket.settings import (
     DEFAULT_CONFIG_PATH,
     ConfigError,
     Settings,
+    check_log_paths,
+    check_output_directory,
     check_tls_files,
     load_lab_token,
     load_settings,
@@ -123,6 +126,7 @@ def routing_instance(name: Optional[str]) -> Iterator[None]:
 
 def serve(settings: Settings, app: App) -> int:
     srv = settings.server
+    app.max_account_reads = min(app.max_account_reads, srv.max_connections - 1)
     tls = None
     if srv.tls_enabled:
         check_tls_files(srv)
@@ -198,14 +202,23 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 def record_startup_refusal(config_path: Path, reason: str) -> None:
     """Best effort: put the refusal where an operator will look (``file show``), next to the settings."""
     target = config_path.parent / "startup-refused.txt"
-    if not config_path.parent.is_dir():
-        return
+    tmp = None
     try:
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        check_output_directory(target, label="startup refusal note")
+        # Do not open or truncate the existing destination. Publishing a fresh inode also avoids
+        # following a symbolic or hard link and preserves a previous note if the write fails.
+        fd, name = tempfile.mkstemp(prefix=".startup-refused-", dir=str(target.parent))
+        tmp = Path(name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(f"jwicket {__version__} refused to start: {reason}\n")
-    except OSError as exc:
+        os.replace(tmp, target)
+        tmp = None
+    except (ConfigError, OSError) as exc:
         LOG.debug("could not record startup refusal in %s: %s", target, exc)
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -215,6 +228,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return probe()
     try:
         settings = load_settings(args.config)
+        check_log_paths(settings.log)
     except ConfigError as exc:
         logging.basicConfig(level=logging.INFO)
         escape_handlers(logging.getLogger().handlers)
@@ -224,10 +238,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.check_config:
         print(f"{args.config}: ok")
         return 0
-    setup_logging(settings.log)
     try:
+        setup_logging(settings.log)
         return serve(settings, build_app(settings, build_backend(settings)))
     except ConfigError as exc:
+        logging.basicConfig(level=logging.INFO)
+        escape_handlers(logging.getLogger().handlers)
         LOG.error("startup refused: %s", exc)
         record_startup_refusal(args.config, str(exc))
         return 2
