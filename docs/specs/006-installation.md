@@ -8,7 +8,7 @@
 | Decides scope | Project owner. The installers change the lab procedure and the device's security posture, so **acceptance also needs the lab owner (D2) and the security reviewer (D1)** ([governance, who decides what](../governance.md#who-decides-what): "Changes to the lab procedure: Lab owner; Security reviewer, when a step changes the device's security posture"). Both roles are unnamed, so this spec cannot be accepted yet |
 | Code | [`tools/jwicket_install/`](../../tools/jwicket_install/) (never shipped to a device; the shared plan is [`plan.py`](../../tools/jwicket_install/plan.py), [`state.py`](../../tools/jwicket_install/state.py), [`render.py`](../../tools/jwicket_install/render.py)), `deploy/`, the release tooling of section 11 and bundle changes D2 and D3 (section 10); section 19 lists every file. `ALLOWED_RPCS` in [`junos/session.py`](../../src/jwicket/junos/session.py) is untouched and no installer code goes into `dist/jwicket.py`: the daemon keeps no write path |
 | Tests | Section 17 (for example [`test_install_plan.py`](../../tests/test_install_plan.py) and [`tests/fixtures/install/`](../../tests/fixtures/install/README.md)). They run under `PYTHONPATH=src python -m unittest discover -s tests`, on Python 3.7 too, without `junos-eznc`, `paramiko` or `scp` (imported lazily; tests that need them skip unless `JWICKET_REQUIRE_PYEZ=1`, which a dedicated CI job sets) |
-| Decisions it rests on | [ADR 0001](../adr/0001-on-box-pure-python-single-file.md), [0003](../adr/0003-tls-off-loopback.md), [0009](../adr/0009-central-management-coexistence.md), [0010](../adr/0010-usable-without-knowing-junos.md). New: [ADR 0011](../adr/0011-owner-decisions-lab-gated-install.md) records the owner's decisions of 2026-11-24 and 2026-11-25 (Accepted); [ADR 0012](../adr/0012-installer-design.md) records this spec's proposals (Proposed, governance D11), three of which the owner accepted on 2026-11-25 (2.2) |
+| Decisions it rests on | [ADR 0001](../adr/0001-on-box-pure-python-single-file.md), [0003](../adr/0003-tls-off-loopback.md), [0009](../adr/0009-central-management-coexistence.md), [0010](../adr/0010-usable-without-knowing-junos.md). New: [ADR 0011](../adr/0011-owner-decisions-lab-gated-install.md) records the owner's decisions of 2026-11-24 and 2026-11-25 (Accepted); [ADR 0012](../adr/0012-installer-design.md) records this spec's proposals (Proposed, governance D11), three of which the owner accepted on 2026-11-25 (2.2). Proposed, not accepted: [ADR 0015](../adr/0015-verified-installer-profiles.md) records section 7.12's adaptive preflight (open question 32) |
 
 ## 1. Status
 
@@ -961,16 +961,36 @@ version, **inferred**, so those are the controls). Parsed state keeps only stric
 ### 7.12 Adaptive preflight (proposed)
 
 The installer should select the strongest **verified** supported path on the attached SRX.
-It should not turn a vLab workaround into a default. This section is a proposal; it does not
-change the current refusals, production gate or trust boundary pending owner and security
-review ([ADR 0015](../adr/0015-verified-installer-profiles.md)). The [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md) shows why storage,
-web ingress and operator NETCONF must be evaluated independently.
+It should not turn a vLab workaround into a default. This section is a proposal
+([ADR 0015](../adr/0015-verified-installer-profiles.md), Proposed), for the owner and the
+security reviewer to accept or reject (open question 32). Nothing in it is built. Until it is
+accepted, today's defaults, refusals, production gate and trust boundary stay as 5.1, 7.2, 8.11
+and 9.3 state them. If accepted, it would change these current rules (each cited in
+[ADR 0015, Consequences](../adr/0015-verified-installer-profiles.md#consequences)):
+
+- **The state path** (State row): the daemon's fixed settings path under `/var/db/jwicket`
+  (`DEFAULT_CONFIG_PATH`, and `STATE_DIR` with it, 7.11), R-STATEDIR (8.11) and root's one-time
+  step (9.3). This reopens open question 28, which the owner decided (ADR 0011 decision 4;
+  [ADR 0012](../adr/0012-installer-design.md) decision 4), so it would need an ADR superseding
+  those decisions, not only the acceptance of ADR 0015.
+- **Operator NETCONF** (Operator NETCONF row): the daemon's rule that `netconf_host` is a loopback
+  address and [ADR 0002](../adr/0002-junos-delegated-sign-in.md)'s NETCONF session to the device's
+  own loopback. The daemon's NETCONF session checks no SSH host key today, so an off-loopback
+  target would also need a pinned host key checked before the password is sent. This changes the
+  sign-in trust boundary.
+- **The listener** (Web listener row): INV-10 and R-BIND would gain proofs and refusals for an
+  address other than the default. Nothing is loosened: R-BIND refuses only loopback, wildcard,
+  multicast, link-local, reserved and IPv6 addresses, so a routable address on `lo0.0` with TLS
+  already passes it today.
+
+The [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md) shows why storage, web
+ingress and operator NETCONF must be evaluated independently.
 
 | Choice | Prefer | Offer only when the preferred path is unavailable | Refuse |
 | --- | --- | --- | --- |
-| State | Already trusted `/var/db/jwicket` | Operator-selected private account-owned directory with a trusted parent chain; verify ownership, modes, persistence and space on the actual device | Unsafe path, symlinks not covered by the existing trust rules, permissive output files, or an unverified path. No silent temporary directory fallback |
-| Web listener | IP loopback with a working forwarding path from the intended client | Approved, exact interface address and routing instance (such as `lo0.0` or `fxp0.0`), valid TLS, and restricted ingress proved from the client network | Wildcard bind, ambiguous address, plaintext on a routable address, unverified certificate or ingress, or a required change to another service. Never move the listener automatically |
-| Operator NETCONF | Working NETCONF over SSH on IP loopback | A committed address assigned to this same SRX, confirmed through the already trusted management session, plus a full independently verified device SSH host-key pin and approved host-signature algorithm. The client must check the complete key before transmitting the password | Remote or ambiguous target, bad password, changed or unknown key, weak signature, or unsupported transport. No alternate-address retry on authentication or identity failure |
+| State | Already trusted `/var/db/jwicket`, made once by root (9.3; the current rule) | **Reopens open question 28 (decided); needs a superseding ADR.** Operator-selected private account-owned directory with a trusted parent chain; verify ownership, modes, persistence and space on the actual device | Unsafe path, symlinks not covered by the existing trust rules, permissive output files, or an unverified path. No silent temporary directory fallback |
+| Web listener | The current default (open question 30, decided; ADR 0011 decision 4): `--access tls`, TLS on one operator-named unicast IPv4 address of the device, meant to be the management address, which the installer does not check (`--listen-address`, by default `--host` when that is an IP literal), port 9443, with `[server] routing_instance mgmt_junos` when `system management-instance` is set (INV-10, R-BIND, 7.2). `--access tunnel` (`127.0.0.1` without TLS, reached by `ssh -L`) stays an option with its warning: SSH local forwarding was refused on the SRX4100 and on the vSRX (Q-NET-03), and the vSRX's bind-only diagnostic refused `127.0.0.1` | Another address of this SRX that R-BIND already admits with TLS (such as the address on `lo0.0`), with added proofs: the exact interface address and routing instance read from the device through the trusted management session, a valid certificate, and restricted ingress proved from the client network. This adds checks to INV-10 and R-BIND, loosens neither, and reopens no decided question | Every listener: a wildcard bind, plaintext on a routable address, or a rule R-BIND refuses today. The offered address also: an ambiguous address, an unverified certificate or ingress, or a required change to another service. Never move the listener automatically |
+| Operator NETCONF | Working NETCONF over SSH on IP loopback (ADR 0002; the daemon's default port 830; its settings accept any port from 1 to 1023) | **Changes ADR 0002's loopback rule and the sign-in trust boundary; needs the security reviewer.** A committed address assigned to this same SRX, confirmed through the already trusted management session, plus a full independently verified device SSH host-key pin and approved host-signature algorithm. The client must check the complete key before transmitting the password | Remote or ambiguous target, bad password, changed or unknown key, weak signature, or unsupported transport. No alternate-address retry on authentication or identity failure |
 
 Read-only discovery reports candidates and what still needs proof. It must distinguish a
 successful bind from working ingress and a TCP handshake from operator sign-in. Operator
@@ -984,12 +1004,14 @@ no change to REST or SSH forwarding policy, and no setup changes to another serv
 surprise. Record the selected profile, the release and digest, each observed check and its
 result, without private keys, passwords, session tokens or raw configuration.
 
-Proposed acceptance cases: a working loopback profile remains preferred; absent loopback can
-offer the explicitly approved same-device pinned profile; a bad password, mismatched pin,
-weak algorithm, moved interface or inaccessible client path refuses without trying a
-different target; failed verification restores prior state. Test the preferred path on an
-SRX4100 and the alternative on vSRX without embedding a platform, address, key or private
-library workaround in the default. MNHA and chassis cluster refusals remain unchanged.
+Proposed acceptance cases (unnumbered: they get AC-006 numbers only if this section is accepted,
+open question 32): where the current defaults work (the TLS listener on the operator-named
+address, NETCONF on loopback) they remain preferred; absent loopback NETCONF can offer the
+explicitly approved same-device pinned profile; a bad password, mismatched pin, weak algorithm,
+moved interface or inaccessible client path refuses without trying a different target; failed
+verification restores prior state. Test the preferred path on an SRX4100 and the alternative on
+vSRX without embedding a platform, address, key or private library workaround in the default.
+MNHA and chassis cluster refusals remain unchanged.
 
 ## 8. The safety contract
 
@@ -1949,6 +1971,7 @@ Every row is a proposal recorded in ADR 0012 unless it says otherwise; ADR 0011 
 | 29 | Confirm the lead engineer's cuts C1 to C3 (4.1)? Each narrows "as many install methods as are available" and can be built later without changing the safety contract | Owner | — |
 | 30 | **Decided** (owner, 2026-11-25, ADR 0011 decision 4): `--access tls` by default on the management address, port 9443, with `[server] routing_instance mgmt_junos` when `system management-instance` is set; a self-signed certificate generated on the workstation, its key uploaded 0600 and never kept, its fingerprint printed; `tunnel` kept with its warning. Q-TLS-01 and Q-SEC-01 still test the listener | Owner (decided) | — |
 | 31 | M4 and M4U (no workstation): their access mode, and how an on-box certificate is made (the standard library makes no RSA key; 6.5) | Owner, security reviewer | Q-INST-05, Q-TLS-01 |
+| 32 | Accept or reject [ADR 0015](../adr/0015-verified-installer-profiles.md) and section 7.12 (adaptive preflight), proposed on 2026-11-26 from the [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md)? No answer is proposed here. Accepting the State row reopens open question 28 and needs an ADR superseding ADR 0011 decision 4 and ADR 0012 decision 4; the Operator NETCONF row changes ADR 0002's loopback rule and the sign-in trust boundary. The Web listener row now prefers open question 30's decided default; its first wording preferred loopback with a forwarding path, and whether that was intended (it would reopen open question 30) is the owner's. So are the AC-006 numbers of 7.12's cases, which stay unnumbered until acceptance | Owner, security reviewer | Q-INST-06, Q-AUTH-01, Q-NET-01, Q-TLS-01, Q-SEC-01 |
 
 
 ## 22. Revision history
@@ -1960,6 +1983,7 @@ Every row is a proposal recorded in ADR 0012 unless it says otherwise; ADR 0011 
 | 2026-11-24 | Moved into `docs/specs/` as Draft, built in the same change; scope cuts C1 to C5 applied (4.1); duplicated method facts merged; ADR 0011 limited to the owner's decisions, every other choice a proposal in ADR 0012 |
 | 2026-11-25 | Revision 4, decided by the lead engineer from the lab SRX4100 run ([srx4100]): Python 3.7 for everything the op script embeds; `--access tls` by default on 9443 with an installer-made certificate, `tunnel` with a warning; C8 a pinned HTTPS read, C9 retired, no SSH channels; no directory creation, R-STATEDIR with root's step; `--lab-hardware` with a typed `lab only`; the run's facts marked verified; review findings applied |
 | 2026-11-25 | Owner decision ("go with those installer defaults", ADR 0011 decision 4): the TLS default, root's directory step and the lab-hardware attestation accepted, so open questions 20, 28 and 30 are decided; the on-box methods' access split out as open question 31. The merge of `main`'s SRX4100 qualification (#11) applied: 8.5's cross-user effect labelled inferred, and the illustrative `show \| compare` blocks ordered by the configuration schema (7.8) |
+| 2026-11-26 | Section 7.12 (adaptive preflight) and [ADR 0015](../adr/0015-verified-installer-profiles.md) proposed from the [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md); not accepted (open question 32). Corrected the same day in review: the Web listener row prefers the accepted TLS default (open question 30), not loopback; the State row says it reopens open question 28; the section lists the current rules it would change instead of saying it changes none; its acceptance cases stay unnumbered until accepted |
 
 ## Sources
 

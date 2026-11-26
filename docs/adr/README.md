@@ -15,7 +15,7 @@ starts as Accepted, and so does ADR 0011, which holds only the owner's installat
 same day and, as its decision 4, the installer defaults the owner accepted on 2026-11-25. ADR 0012
 holds the installer design that [Spec 006](../specs/006-installation.md) proposes to carry them out,
 and reads Proposed until the owner accepts it, with the security reviewer (D11), except its decisions
-4 and 11 and the R-MODEL part of its decision 8, which ADR 0011 decision 4 accepted. ADR 0013 records an owner decision made on 2026-11-25, so it also starts as Accepted.
+4 and 11 and the R-MODEL part of its decision 8, which ADR 0011 decision 4 accepted. ADR 0013 records an owner decision made on 2026-11-25, so it also starts as Accepted. ADR 0015, written on 2026-11-26 from the vSRX lab record, proposes capability-checked installer profiles (Spec 006 section 7.12) and reads Proposed until the owner and the security reviewer accept or reject it (Spec 006 open question 32); today's installer defaults and refusals stay until then.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ and reads Proposed until the owner accepts it, with the security reviewer (D11),
 | [0011](0011-owner-decisions-lab-gated-install.md) | Installation: every installer lab-gated until G1 (dry run, diff, posture warning, `commit confirmed` with a health check, the typed host name); CI pre-releases with SHA-256, the first tag the owner's; spec and installers built together, every device step unverified. Decision 4 (2026-11-25): the installer defaults from the SRX4100 run (TLS on the management address, the root step printed and checked but never run, lab hardware only with a typed `lab only`) | Accepted (2026-11-24, decision 4 on 2026-11-25; owner decisions; confirmed when the owner merges the pull request that adds them) |
 | [0012](0012-installer-design.md) | Installer design: one shared plan, twelve security invariants, the gated bootstrap and its R-PENDING exception, provenance independent of the release page, no installer code in the bundle, the release repository settings. Revised on 2026-11-25 from the lab SRX4100 run: the state directory made once by root, never by an installer; TLS on the management address by default, with `--access tunnel` kept; health checks without SSH channels; Python 3.7 for everything the op script embeds; lab hardware only with a typed `lab only` | Proposed; unproven until Q-INST-06. Decisions 4 and 11 and the R-MODEL part of decision 8 accepted by the owner on 2026-11-25 (ADR 0011, decision 4) |
 | [0013](0013-user-regexes-run-in-a-linear-time-matcher.md) | User regular expressions run in J-Wicket's own linear-time matcher (a Pike VM) with the browser's character semantics; lookaround and back-references are refused; the Logs time budget stays | Accepted (2026-11-25, owner decision; confirmed by the merge of its pull request) |
-| [0015](0015-verified-installer-profiles.md) | Verify installer profiles on the target SRX | Proposed |
+| [0015](0015-verified-installer-profiles.md) | Verify installer profiles on the target SRX: state, listener and operator NETCONF paths chosen by read-only discovery and proofs on the device; the accepted defaults stay preferred; an account-owned state directory would reopen Spec 006 open question 28 and needs a superseding ADR | Proposed (Spec 006 open question 32) |
 
 Corrections made in place on 2026-11-24, while the records are Proposed: ADR 0001 names the roadmap
 phase that would bring a signed package (phase 6, Production); ADR 0002 points its multi-factor
