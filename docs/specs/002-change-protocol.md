@@ -733,6 +733,9 @@ names for Q-REL-01. No test has run.
 - **Pass:** every comparison is empty; history shows the expected entries; the revision-bound
   rollback restores the chosen revision even after other commits shifted the indexes.
 - **Platforms:** lab vSRX; each qualified release.
+- **Status:** partial native evidence on vSRX 24.4R2-S3.5. A description-only NETCONF
+  commit expired and Junos restored the exact pre-change policy. Other undo modes and
+  the J-Wicket protocol were not exercised. [Lab record](../evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback).
 
 ### Q-CHG-04 Group-owned and protected edits refused
 

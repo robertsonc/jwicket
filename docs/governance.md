@@ -10,8 +10,8 @@ contributor proposal that waits for an owner decision; each one is listed in
 25.2R1-S1.4), following deploy-lab.md ([evidence](evidence/2026-11-24-srx4100-lab/README.md)):
 Q-RT-01 passed; Q-RT-02 and Q-AUTH-01 are met except one criterion each; Q-RT-03 works; Q-TLS-01
 is met except a provisioning path; Q-AUTH-03 has early observations; the fxp0 part of Q-NET-01 is
-met; Q-NET-03 fails. Nine replies were recorded there as fixtures (Q-REL-01, partial: one platform,
-one release), and the parsers' tests read them; every other reply the tests parse is synthetic.
+met; Q-NET-03 fails. Nine replies were recorded there as fixtures. A later vSRX run added
+five session and log replies, making Q-REL-01 partial across two platforms and releases.
 On 2026-11-26, [dev3 on the same SRX4100](evidence/2026-11-26-srx4100-dev3/README.md) added partial
 Q-AUTH-03 evidence: a custom restricted class read policies and log sources, while Junos
 denied the contents of a listed log. G1 remains open.
@@ -389,7 +389,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | ID | Test | Gate | Status (all cells "not run" unless stated) |
 | --- | --- | --- | --- |
 | [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Pass** on SRX4100 25.2R1-S1.4 (Python 3.7.10, every module `ok`); **partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
-| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **spike-equivalent partial** on vSRX 24.4R2-S3.5 |
+| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **partial** on vSRX 24.4R2-S3.5 (dev3-derived build: ten-minute idle sample, SIGTERM and SIGKILL recovery) |
 | [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | **Works** on SRX4100 25.2R1-S1.4 (`/var/db/scripts/jet` is first on `sys.path`) |
 | [Q-RT-04](#q-rt-04-survives-reboot) | Survives reboot | G2 (proposed) | Not run |
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
@@ -405,10 +405,10 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
 | [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
 | [Q-LOAD-03](#q-load-03-log-volume-from-polling) | Log volume from polling | G1 | Not run |
-| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies recorded on SRX4100 25.2R1-S1.4; three parser mismatches found and fixed; one second-platform reply difference observed in the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md), not fixture coverage |
+| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies on SRX4100 25.2R1-S1.4 and five session and log replies on [vSRX 24.4R2-S3.5](evidence/2026-11-26-vsrx-vlab/README.md#synthetic-policy-and-log-reply-capture); replay passes; coverage remains incomplete |
 | [Q-HA-01](#q-ha-01-chassis-cluster) | Chassis cluster | G2 | Not run |
 | [Q-HA-02](#q-ha-02-identify-the-local-node) | Identify the local node | G2 | Not run |
-| [Q-HA-03](#q-ha-03-multinode-high-availability) | Multinode High Availability | G2 | Not run |
+| [Q-HA-03](#q-ha-03-multinode-high-availability) | Multinode High Availability | G2 | **Partial**: native unencrypted SRG0 peer and cold sync verified on vSRX; dev3 classification failed |
 | [Q-MGMT-01](#q-mgmt-01-central-management-signatures) | Central-management signatures | G2 | Not run |
 | [Q-LOG-01](#q-log-01-log-source-matrix) | Log source matrix | G2 | Not run |
 | [Q-SEC-01](#q-sec-01-internal-security-review) | Internal security review | G1 (repeated for G3) | Not run |
@@ -481,6 +481,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   [report, what we tested](evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md#what-we-tested),
   [`junos/baseline.set`](evidence/2026-11-23-vsrx-spike/junos/baseline.set). The spike daemon read
   options from `/var/tmp/wicket.args`; J-Wicket reads `/var/db/jwicket/jwicket.ini`.
+- **Status, vSRX 24.4R2-S3.5, dev3-derived lab bundle:** partial. The same PID
+  held 30,624 KiB RSS at ten minutes with nobody signed in. JET restored
+  verified HTTPS after SIGTERM (1.62 s) and SIGKILL (6.28 s) without a manual
+  start. This did not exercise the released bundle or one-operator memory.
+  [Lab record](evidence/2026-11-26-vsrx-vlab/README.md#ten-minute-idle-and-jet-supervisor-recovery).
 - **Status, SRX4100 25.2R1-S1.4:** **met except idle memory**, J-Wicket's own bundle.
   - Met: it listened as a daemonized app with no arguments; the self-test's `payload_sha256`
     matched the build; a refused start (an address the default instance cannot bind) wrote its
@@ -864,7 +869,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Platforms:** proposed (D3): vSRX and SRX300 class on 22.4, 23.4 and 24.4, plus a chassis
   cluster and a multi-SPU platform for Spec 004. "Each qualified release" in Spec 002 section 19
   means this release set.
-- **Status:** **partial** on SRX4100 25.2R1-S1.4 (25 November 2026; one platform, one release).
+- **Status:** **partial** on SRX4100 25.2R1-S1.4 (25 November 2026) and vSRX 24.4R2-S3.5 (26 November 2026).
   Nine replies were recorded over NETCONF as a super-user-class account, with J-Wicket's exact
   requests (the RPC names, and `INVENTORY_FILTER`, `LOGS_FILTER` and `CONFIG_OPTIONS` for the
   configuration): `get-software-information`, `get-chassis-cluster-status` (an error reply: not a
@@ -873,14 +878,18 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   `get-security-log-information`, stored in
   [`tests/fixtures/recorded-srx4100-25.2R1-S1.4/`](../tests/fixtures/recorded-srx4100-25.2R1-S1.4/SOURCE.md)
   and parsed by `tests/test_recorded.py` and `tests/test_health.py`. Three mismatches with the
-  synthetic fixtures were found and fixed: a standalone device's cluster status is an `xnm:error`
+  synthetic fixtures on SRX4100 were found and fixed: a standalone device's cluster status is an `xnm:error`
   in the reply body; the outbound-SSH `services` is a text value; `active-sessions` counts
-  invalidated sessions too. Not recorded: `get-log` and the `get-sec-log-report-detail-*` reports,
+  invalidated sessions too. Not recorded on SRX4100: `get-log` or the `get-sec-log-report-detail-*` reports,
   `INVENTORY_FILTER_MINIMAL`, the error replies of denied reads (seen on the device for Q-AUTH-03,
   not stored), the `| display xml rpc` forms, the cluster and multi-SPU cases, the proposed
-  `match-policies` and `shadow-policies` records, and every other platform and release. The spike called `get-software-information` and the flow-session summary as
+  `match-policies` and `shadow-policies` records. The spike called `get-software-information` and the flow-session summary as
   the daemon's account and recorded neither reply. Evidence:
-  [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md).
+  [SRX4100 lab record](evidence/2026-11-24-srx4100-lab/README.md). The vSRX run added
+  a filtered session list, filtered and unfiltered summaries, and both successful and
+  denied `get-log` replies. Those five replies are sanitized and
+  [replayed by tests](../tests/fixtures/recorded-vsrx-24.4R2-S3.5/SOURCE.md).
+  This is not full RPC, topology or approved release-set coverage.
 
 ### 4.8 High availability
 
@@ -930,11 +939,11 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Pass:** MNHA detected on both nodes; the UI says it is one node of two independent devices; any
   RPC added goes through the allowlist rule with its recorded reply.
 - **Platforms:** a lab MNHA pair (record the platform).
-- **Status:** partial, not certified. Both lab vSRXs booted with the MNHA configuration
-  and reported local SRG0 online, but the peer link was down on both. J-Wicket dev3's
-  off-box inventory against live NETCONF replies misclassified both nodes as standalone;
-  a narrow committed chassis read saw MNHA. No operational pair, encrypted peer link,
-  failover or on-box MNHA UI was demonstrated ([lab record](evidence/2026-11-26-vsrx-vlab/README.md)).
+- **Status:** partial, not certified. A scoped direct-link rule change allowed both lab
+  vSRXs to report BFD and MNHA peer up, local SRG0 online and cold sync complete.
+  J-Wicket dev3's off-box inventory against live NETCONF still misclassified both
+  as standalone. The ICL was unencrypted; no SRG1, traffic failover or on-box HA
+  UI was exercised ([lab record](evidence/2026-11-26-vsrx-vlab/README.md#mnha-peer-and-cold-sync-retest)).
 
 ### 4.9 Coexistence and logs
 

@@ -32,14 +32,14 @@ passed its workstation self-test and matched its on-box SHA-256.
 | SSH forwarding (Q-NET-03) | SSH authenticated and the workstation opened its local socket, but vSRX1 rejected the forwarding channel as `administratively prohibited`. The remote target was an existing device service, not J-Wicket's failed listener. | Default settings of this device only; no change to SSH policy. |
 | Operator NETCONF (Q-AUTH-01) | TCP 830 did not answer on either IP loopback in the JET diagnostic. The same device's interface addresses answered. The compatible proof compared the full provisioned ECDSA host key before password authentication, signed in, performed bounded reads and signed out. A wrong password was rejected in an earlier pinned trial; a nonmatching key and a SHA-1 host signature stopped other trials before password authentication. | Does not qualify new production trust rules, NETCONF sign-in on other builds, or the wrong-password case with a usable daemon account key. |
 | Restricted reads (Q-AUTH-03, AC-004-06) | A temporary class with `interface security system trace view` signed in via the pinned path. The root configuration and log sources reported `ok`; the `messages` source was listed but its contents returned `denied` and zero lines. Sign-out was HTTP 200; the next inventory request was 401. Junos attributed the committed reads, `get-log`, and `close-session` to that user. | A custom class on one release; not a minimum privilege recipe, write denial, full class matrix or browser rendering check. |
-| Reply compatibility (Q-REL-01) | Baseline NETCONF reads on both devices showed that the full inventory filter was rejected at `tenants`; the minimal filter was accepted. The final application run used that fallback. | Same-release repeatability only. No recorded-reply fixtures are added by this record. |
-| MNHA baseline (Q-HA-03) | The direct data link was up on both nodes and carried the lab's established IKEv1/IPsec tunnel. Both reported HA mode not configured; the native CLI maps to `get-chassis-high-availability-information`. Both ran `kmd`; no mounted optional IKE package or running unified `iked` was observed. | No MNHA was configured during baseline capture. See the separate paired configuration trial below; no operational HA pair was formed. |
+| Reply compatibility (Q-REL-01) | Baseline NETCONF reads on both devices showed that the full inventory filter was rejected at `tenants`; the minimal filter was accepted. The final application run used that fallback. | The second round added five fixtures, below. The two vSRXs do not add two releases. |
+| MNHA baseline (Q-HA-03) | The direct data link was up on both nodes and carried the lab's established IKEv1/IPsec tunnel. Both reported HA mode not configured; the native CLI maps to `get-chassis-high-availability-information`. Both ran `kmd`; no mounted optional IKE package or running unified `iked` was observed. | No MNHA was configured during baseline capture. See the staged trial and the later successful SRG0 peer retest below. |
 
 No NETCONF credentials or traffic contents are included. Device and lab addresses,
 passwords and hashes, certificates and keys, raw syslog and VPN details are omitted. The
-restricted account and all active test configuration used timed confirmed commits without
-confirmation. The project did not run the released installer, measure ten-minute idle RAM,
-or test stable daemon respawn in this run.
+temporary operator accounts and non-HA configuration proofs used timed confirmed commits
+without confirmation. The published installer did not run. The paired HA trial required an
+explicitly restored regular commit to persist through reboot.
 
 See [Spec 006's proposed preflight](../../specs/006-installation.md#712-adaptive-preflight-proposed)
 and the [qualification matrix](../../governance.md#5-qualification-matrix).
@@ -108,3 +108,98 @@ on both nodes. Because native HA state persisted after restoring the
 configuration, each node was rebooted once more. After that, Junos reported HA
 mode not configured on both and each again showed one active original IPsec
 tunnel. Management access was verified after every reboot.
+
+
+## Native description-only rollback
+
+On vSRX1, a read of the lab-owned VPN policy established its original four statements.
+Under an exclusive candidate lock, the only addition was a synthetic description.
+NETCONF committed it on a 90-second timer, and the committed reread showed exactly
+the original policy plus that description. No confirm, extend, or manual rollback
+was sent. Junos logged `UI_COMMIT_NOT_CONFIRMED` and automatic rollback completion.
+An exact committed comparison of the policy found no difference, and the shared
+candidate was clean. This is the native timeout and scoped-restore portion of
+Q-CHG-03. It did not cut management access (Q-CHG-02), test the other undo modes,
+or use a J-Wicket write path.
+
+## Synthetic policy and log reply capture
+
+Two vMX lab hosts sent ICMP across the restored lab VPN. The trace used an exact
+host-to-host permit for ICMP before the existing lab VPN permit; no other source,
+destination or application matched the new rule. All 20 test packets received
+replies, and Junos showed nonzero hits on the temporary rule. The temporary log
+held one synthetic marker. The lab operator could read it and a restricted
+operator received Junos's file-open permission denial for the same file.
+
+J-Wicket's live flow and file-read code, called off-box under the same lab
+operator against live NETCONF, matched the native CLI on policy/protocol and on
+the synthetic log marker. In a separate capture, the filtered NETCONF list and
+summary returned four matching ICMP sessions, and the unfiltered gauge showed
+six active sessions. CLI and NETCONF were sampled sequentially, so table
+counts were not compared as simultaneous readings.
+
+[Five sanitized fixtures and their provenance](../../../tests/fixtures/recorded-vsrx-24.4R2-S3.5/SOURCE.md)
+cover the list, both summaries, allowed log content and actual denied log
+reply. The regression tests replay them directly. The vSRX reply uses `sess-state`;
+the current parser preserves it as an extra rather than returning it in the
+main state field. This adds partial Q-REL-01 evidence on a second platform
+and release, not cell qualification.
+
+## Ten-minute idle and JET supervisor recovery
+
+The same verified dev3-derived proof bundle started without arguments on vSRX1
+and answered the HelperVM over certificate-verified HTTPS. No browser or
+operator session was signed in during the measurement. Process samples taken
+through the management CLI showed one PID for the entire idle window.
+
+| Observation | Result |
+| --- | --- |
+| First pinned HTTPS response | HTTP 200; expected version and payload prefix |
+| First process sample | 30,924 KiB resident; 48,600 KiB virtual |
+| 60 seconds through 600.16 seconds | 30,624 KiB resident; 54,032 KiB virtual at each one-minute sample |
+| SIGTERM | New supervised PID and pinned HTTPS 200 in 1.62 s |
+| SIGKILL | New supervised PID and pinned HTTPS 200 in 6.28 s |
+
+Neither recovery used a manual start. Veriexec remained enabled. This is
+partial Q-RT-02 evidence for the lab-derived build, not the released bundle:
+the stock installer, one-operator memory and reboot persistence were not
+tested in this run. Timings include the verification poll.
+
+
+The temporary JET configuration rolled back. The scoped baseline, REST on
+TCP 3000, Veriexec state, and removal of the app files and HelperVM certificate
+were verified.
+
+## MNHA peer and cold-sync retest
+
+The direct link had connected routes and bidirectional ARP, but the baseline
+zone admitted only IKE; direct ICMP got no replies in either direction. The
+retest preserved IKE and the existing screen and allowed BFD, the HA service,
+and diagnostic ICMP only on the two direct-link interfaces. No filters, SSH
+services or packages were changed. Direct ICMP then passed 4/4 each way before
+the sequential reboots. See
+[Juniper's interchassis-link example](https://www.juniper.net/documentation/us/en/software/junos/high-availability/topics/concept/mnha-asymmetric-route-support.html).
+
+| Observation after both reboots | vSRX1 | vSRX2 |
+| --- | --- | --- |
+| BFD peer | Up | Up |
+| Junos peer connection | UP | UP |
+| Cold sync | COMPLETE | COMPLETE |
+| Local SRG0 | ONLINE | ONLINE |
+| Attribute messages sent / received | 1 / 1 | 2 / 1 |
+| Attribute acknowledgments sent / received | 1 / 1 | 1 / 1 |
+| Encryption | NO | NO |
+| J-Wicket dev3 inventory, off-box against live NETCONF | `standalone` with warning | `standalone` with warning |
+
+The scoped permissions resolved peering in this retest; their individual
+effects were not isolated. The captured counters had no send or receive
+errors and no SRG status messages or acknowledgments. These observations
+demonstrate native, unencrypted SRG0 peering and reported cold-sync
+completion, not traffic survival, SRG1, failover or encrypted ICL. The
+contemporaneous J-Wicket responses confirm the inventory detection gap
+even with an operational peer. No on-box HA UI was exercised.
+
+The original configuration, including the untrust zone and VPN, matched
+the saved scope on each vSRX after the restore. After sequential cleanup
+reboots, both had working management access, reported HA not configured
+and showed one active original IPsec tunnel each. Q-HA-03 remains partial.
