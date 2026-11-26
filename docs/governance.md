@@ -395,17 +395,17 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
 | [Q-AUTH-01](#q-auth-01-per-operator-netconf-to-loopback) | Per-operator NETCONF to loopback | G1 | **Met except the SSH-key case** on SRX4100 25.2R1-S1.4 (read-only, operator and super-user accounts; RPCs attributed to the operator; sign-out, replacement and cap checked) |
 | [Q-AUTH-02](#q-auth-02-radius-and-tacacs-template-users) | RADIUS and TACACS+ template users | G1 | Not run |
-| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Partial, not certified.** Predefined-class observations and a [dev3 restricted-class trial](evidence/2026-11-26-srx4100-dev3/README.md) on SRX4100 25.2R1-S1.4 |
+| [Q-AUTH-03](#q-auth-03-least-privilege) | Least privilege | G1 | **Partial, not certified.** Predefined-class observations and a [dev3 restricted-class trial](evidence/2026-11-26-srx4100-dev3/README.md) on SRX4100 25.2R1-S1.4; restricted-class denial and attribution also observed in the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) |
 | [Q-AUTH-04](#q-auth-04-junos-lockout-and-j-wickets-throttle) | Junos lockout and J-Wicket's throttle | G2 (proposed) | Not run |
-| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Met except a provisioning path** on SRX4100 25.2R1-S1.4 (1.2 and 1.3 served, 1.0 and 1.1 refused, `__Host-` Secure cookie, HSTS, bad key mode refused) |
+| [Q-TLS-01](#q-tls-01-on-box-tls) | On-box TLS | G1 | **Met except a provisioning path** on SRX4100 25.2R1-S1.4 (1.2 and 1.3 served, 1.0 and 1.1 refused, `__Host-` Secure cookie, HSTS, bad key mode refused); pinned internal HTTPS observed in the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) |
 | [Q-NET-01](#q-net-01-reachability-through-fxp0-and-a-revenue-zone) | Reachability through fxp0 and a revenue zone | G2 (proposed) | **fxp0 part met** on SRX4100 25.2R1-S1.4 (TLS, through `mgmt_junos`); **vSRX part spike-equivalent partial** (clear text, one port checked); revenue zone on hardware not run |
 | [Q-NET-02](#q-net-02-port-8443-collisions) | Port 8443 collisions | G2 (proposed) | Not run |
-| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | **Fails** on SRX4100 25.2R1-S1.4 (`administratively prohibited`; the documented statement is a syntax error) |
+| [Q-NET-03](#q-net-03-ssh-local-forwarding) | SSH local forwarding | G1 (proposed) | **Fails** on SRX4100 25.2R1-S1.4 (`administratively prohibited`; the documented statement is a syntax error); default forwarding also refused in the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) |
 | [Q-HW-01](#q-hw-01-srx300-class-runtime-and-resources) | SRX300-class runtime and resources | G2 | Not run |
 | [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
 | [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
 | [Q-LOAD-03](#q-load-03-log-volume-from-polling) | Log volume from polling | G1 | Not run |
-| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies recorded on SRX4100 25.2R1-S1.4; three parser mismatches found and fixed |
+| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies recorded on SRX4100 25.2R1-S1.4; three parser mismatches found and fixed; one second-platform reply difference observed in the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md), not fixture coverage |
 | [Q-HA-01](#q-ha-01-chassis-cluster) | Chassis cluster | G2 | Not run |
 | [Q-HA-02](#q-ha-02-identify-the-local-node) | Identify the local node | G2 | Not run |
 | [Q-HA-03](#q-ha-03-multinode-high-availability) | Multinode High Availability | G2 | Not run |
@@ -930,7 +930,8 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Pass:** MNHA detected on both nodes; the UI says it is one node of two independent devices; any
   RPC added goes through the allowlist rule with its recorded reply.
 - **Platforms:** a lab MNHA pair (record the platform).
-- **Status:** not run.
+- **Status:** live pair not run. The [2026-11-26 vLab baseline](evidence/2026-11-26-vsrx-vlab/README.md)
+  recorded both standalone nodes and the prerequisites that blocked encrypted peer testing.
 
 ### 4.9 Coexistence and logs
 
@@ -1165,7 +1166,7 @@ platform and release, and is "qualified" only as [3.2](#32-what-qualified-platfo
 
 | Platform | 22.4 | 23.4 | 24.4 | 25.2 |
 | --- | --- | --- | --- | --- |
-| vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5 only**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). Every other test, and J-Wicket's own bundle: not run. Not qualified |
+| vSRX | not run | not run | **Spike on 24.4R2-S3.5** using `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). [24.4R2-S3.5 follow-up](evidence/2026-11-26-vsrx-vlab/README.md): dev3-derived lab-only build, partial transport and operator-read evidence. Not qualified |
 | SRX300 class | not run | not run | not run | not run |
 | SRX1500 | not run | not run | not run | not run |
 | SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01, Q-REL-01 partial; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). [Dev3 follow-up](evidence/2026-11-26-srx4100-dev3/README.md): Q-AUTH-03 partial (restricted-class inventory and log denial). Not qualified |

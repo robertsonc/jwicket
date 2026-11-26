@@ -958,6 +958,39 @@ embeds the three with `health.py` and `transport.py` (the check judges and `INST
 with a DTD or entity declaration is refused before parsing (expat's expansion limits depend on its
 version, **inferred**, so those are the controls). Parsed state keeps only strict-pattern keys, names, users, ports and hashes (AC-006-22).
 
+### 7.12 Adaptive preflight (proposed)
+
+The installer should select the strongest **verified** supported path on the attached SRX.
+It should not turn a vLab workaround into a default. This section is a proposal; it does not
+change the current refusals, production gate or trust boundary pending owner and security
+review ([ADR 0015](../adr/0015-verified-installer-profiles.md)). The [vSRX lab record](../evidence/2026-11-26-vsrx-vlab/README.md) shows why storage,
+web ingress and operator NETCONF must be evaluated independently.
+
+| Choice | Prefer | Offer only when the preferred path is unavailable | Refuse |
+| --- | --- | --- | --- |
+| State | Already trusted `/var/db/jwicket` | Operator-selected private account-owned directory with a trusted parent chain; verify ownership, modes, persistence and space on the actual device | Unsafe path, symlinks not covered by the existing trust rules, permissive output files, or an unverified path. No silent temporary directory fallback |
+| Web listener | IP loopback with a working forwarding path from the intended client | Approved, exact interface address and routing instance (such as `lo0.0` or `fxp0.0`), valid TLS, and restricted ingress proved from the client network | Wildcard bind, ambiguous address, plaintext on a routable address, unverified certificate or ingress, or a required change to another service. Never move the listener automatically |
+| Operator NETCONF | Working NETCONF over SSH on IP loopback | A committed address assigned to this same SRX, confirmed through the already trusted management session, plus a full independently verified device SSH host-key pin and approved host-signature algorithm. The client must check the complete key before transmitting the password | Remote or ambiguous target, bad password, changed or unknown key, weak signature, or unsupported transport. No alternate-address retry on authentication or identity failure |
+
+Read-only discovery reports candidates and what still needs proof. It must distinguish a
+successful bind from working ingress and a TCP handshake from operator sign-in. Operator
+approval names the exact address, routing instance, observed certificate and key policy,
+state path, and config diff. A separately authorized, timed deployment validates from the
+actual JET process and intended client: correct signed-off bundle, listener, credentials sent
+only after device identity is verified, session sign-in, permitted read, sign-out and session
+closure. It confirms only its own commit after the checks pass. On failure, let Junos roll
+back; check restoration and clean up only its own files. No fallback at daemon restart,
+no change to REST or SSH forwarding policy, and no setup changes to another service by
+surprise. Record the selected profile, the release and digest, each observed check and its
+result, without private keys, passwords, session tokens or raw configuration.
+
+Proposed acceptance cases: a working loopback profile remains preferred; absent loopback can
+offer the explicitly approved same-device pinned profile; a bad password, mismatched pin,
+weak algorithm, moved interface or inaccessible client path refuses without trying a
+different target; failed verification restores prior state. Test the preferred path on an
+SRX4100 and the alternative on vSRX without embedding a platform, address, key or private
+library workaround in the default. MNHA and chassis cluster refusals remain unchanged.
+
 ## 8. The safety contract
 
 ### 8.1 Rules
