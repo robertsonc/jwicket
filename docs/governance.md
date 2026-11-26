@@ -389,7 +389,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | ID | Test | Gate | Status (all cells "not run" unless stated) |
 | --- | --- | --- | --- |
 | [Q-RT-01](#q-rt-01-runtime-probe) | Runtime probe | G1 | **Pass** on SRX4100 25.2R1-S1.4 (Python 3.7.10, every module `ok`); **partial** on vSRX 24.4R2-S3.5 (spike T0, T5) |
-| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **partial** on vSRX 24.4R2-S3.5 (dev3-derived build: ten-minute idle sample, SIGTERM and SIGKILL recovery) |
+| [Q-RT-02](#q-rt-02-daemonized-bundle-respawn-and-idle-footprint) | Daemonized bundle, respawn, idle footprint | G1 | **Met except idle memory** on SRX4100 25.2R1-S1.4 (daemonized, digest matched, refused start, restart after `kill -9` in 1.3 s and SIGTERM in 6.2 s, memory with one operator); **partial** on vSRX 24.4R2-S3.5 (dev3-derived build: idle and one-operator memory, SIGTERM and SIGKILL recovery) |
 | [Q-RT-03](#q-rt-03-sibling-module-imports) | Sibling-module imports | G1 | **Works** on SRX4100 25.2R1-S1.4 (`/var/db/scripts/jet` is first on `sys.path`) |
 | [Q-RT-04](#q-rt-04-survives-reboot) | Survives reboot | G2 (proposed) | Not run |
 | [Q-RT-05](#q-rt-05-survives-a-junos-upgrade) | Survives a Junos upgrade | G5 | Not run |
@@ -484,7 +484,8 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 - **Status, vSRX 24.4R2-S3.5, dev3-derived lab bundle:** partial. The same PID
   held 30,624 KiB RSS at ten minutes with nobody signed in. JET restored
   verified HTTPS after SIGTERM (1.62 s) and SIGKILL (6.28 s) without a manual
-  start. This did not exercise the released bundle or one-operator memory.
+  start. In a separate run of the same payload, one signed-in operator refreshing
+  Sessions and Logs used 48,984–52,168 KiB RSS. The released bundle was not exercised.
   [Lab record](evidence/2026-11-26-vsrx-vlab/README.md#ten-minute-idle-and-jet-supervisor-recovery).
 - **Status, SRX4100 25.2R1-S1.4:** **met except idle memory**, J-Wicket's own bundle.
   - Met: it listened as a daemonized app with no arguments; the self-test's `payload_sha256`

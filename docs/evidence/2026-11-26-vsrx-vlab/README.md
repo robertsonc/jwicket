@@ -162,13 +162,27 @@ through the management CLI showed one PID for the entire idle window.
 
 Neither recovery used a manual start. Veriexec remained enabled. This is
 partial Q-RT-02 evidence for the lab-derived build, not the released bundle:
-the stock installer, one-operator memory and reboot persistence were not
-tested in this run. Timings include the verification poll.
+the stock installer and reboot persistence were not tested. Timings include
+the verification poll.
 
 
 The temporary JET configuration rolled back. The scoped baseline, REST on
 TCP 3000, Veriexec state, and removal of the app files and HelperVM certificate
 were verified.
+
+
+### One signed-in operator
+
+The same payload was staged again with a fresh, pinned TLS certificate. A
+scripted HTTPS client on the HelperVM used one real Junos-backed operator
+session, read inventory, and refreshed Sessions and the system-log tail nine
+times over 81 seconds. All refreshes returned HTTP 200 and status `ok`;
+sign-out returned 200 and the next inventory request returned 401. The audit
+events confirmed inventory, session and log reads during the single sign-in.
+
+Five process samples taken during that signed-in window were 48,984–52,168 KiB
+resident and 79,484–81,688 KiB virtual. This is one operator with bounded
+read refreshes, not a sustained multi-operator or browser benchmark.
 
 ## MNHA peer and cold-sync retest
 
