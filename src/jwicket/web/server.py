@@ -3,8 +3,11 @@
 Differences from the spike, each closing a specific gap:
 
 * A hard cap on concurrent connections. ``ThreadingHTTPServer`` starts one thread per connection
-  without limit; on a small routing engine that is a denial-of-service lever. Over the cap, new
-  connections are closed immediately.
+  without limit; on a small routing engine that is a denial-of-service lever. A connection over the
+  cap waits briefly for a slot (``CONNECTION_QUEUE_S``), so a browser burst of static files is
+  served rather than cut (F1). On an external bind one peer (an IPv4 address or an IPv6 /64) may
+  hold at most three quarters of the slots and of the waiting places, so others keep some of both,
+  and the wait happens in its own thread: the accept thread never blocks on a slot.
 * TLS handshakes happen in the worker thread with a socket timeout. Wrapping the listening socket
   (as the spike did) runs every handshake inside ``accept()`` on the single accept thread, so one
   slow client stalls everyone.
@@ -12,7 +15,9 @@ Differences from the spike, each closing a specific gap:
 * One deadline for reading the whole request: the TLS handshake, request line, headers and body
   together must arrive within ``socket_timeout_s``, or the connection is shut down. A per-read
   socket timeout alone restarts with every byte, so a client trickling one byte at a time could
-  hold a connection slot for ever. The deadline ends once the request is read: answering it may
+  hold a connection slot for ever. External listeners allow a shorter initial deadline for the
+  handshake and entire request head, without shortening the total body budget. The deadline ends
+  once the request is read: answering it may
   take as long as the device read it asks for.
 * The request line and headers together are capped at ``MAX_HEAD_BYTES`` (the standard library
   allows 64 KiB per line and 100 headers).
@@ -24,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import ipaddress
 import logging
 import socket
 import ssl
@@ -31,6 +37,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
+from jwicket.peer import peer_key
 from jwicket.web.http import BASE_HEADERS, HSTS, Request, Response, parse_query
 
 LOG = logging.getLogger("jwicket.web")
@@ -42,9 +49,15 @@ MAX_HEAD_BYTES = 16 * 1024
 # A connection over the cap waits this long for a slot before it is closed. A browser loading the app
 # opens about six connections at once, so two browser profiles loading together go over a cap of 8;
 # their requests for static files take milliseconds, so a short wait serves them instead of failing
-# the page's module graph (F1). Meanwhile the accept loop waits too: further connections queue in the
-# listen backlog, holding no thread.
+# the page's module graph (F1). On loopback the accept loop itself waits (further connections queue
+# in the listen backlog, holding no thread); on an external bind the wait runs in a bounded number of
+# waiter threads instead, so a peer holding every slot cannot stall accept for everyone.
 CONNECTION_QUEUE_S = 1.5
+# Waiting places on an external bind, per connection slot. A waiter is a thread asleep on a condition
+# (no request read, no handler), so a few browser profiles behind one address (a jump host) loading
+# at once fit (4 x 8 = 32 places at the default cap, at most 24 for one peer).
+QUEUE_PLACES_PER_SLOT = 4
+HEAD_TIMEOUT_S = 3.0
 
 
 class HeadTooLarge(http.client.HTTPException):
@@ -161,6 +174,43 @@ class Router:
         return Response.error(404, "not found")
 
 
+class _PeerSlots:
+    """Admission for an external listener: a global count, at most three quarters of it per peer."""
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        # The default 8 slots allow one browser's usual burst of six, with two held for other peers.
+        # A one-slot deployment cannot reserve capacity but still refuses overload without waiting.
+        self._per_peer = max(1, (3 * capacity) // 4)
+        self._active = 0
+        self._peers: Dict[str, int] = {}
+        self._cond = threading.Condition(threading.Lock())
+
+    def _admissible(self, key: str) -> bool:
+        return self._active < self._capacity and self._peers.get(key, 0) < self._per_peer
+
+    def acquire(self, peer: str, timeout: float = 0.0) -> bool:
+        """Take a place for ``peer``, waiting up to ``timeout`` seconds (0: do not wait)."""
+        key = peer_key(peer)
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._admissible(key), timeout=timeout):
+                return False
+            self._active += 1
+            self._peers[key] = self._peers.get(key, 0) + 1
+            return True
+
+    def release(self, peer: str) -> None:
+        key = peer_key(peer)
+        with self._cond:
+            active = self._peers[key] - 1
+            if active:
+                self._peers[key] = active
+            else:
+                del self._peers[key]
+            self._active -= 1
+            self._cond.notify_all()
+
+
 class JWicketServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -184,6 +234,15 @@ class JWicketServer(ThreadingHTTPServer):
         self.max_body_bytes = max_body_bytes
         self.allowed_hosts = tuple(h.lower() for h in allowed_hosts)
         self._slots = threading.BoundedSemaphore(max_connections)
+        try:
+            external = not ipaddress.ip_address(address[0].split("%", 1)[0]).is_loopback
+        except ValueError:
+            # Settings normally require a numeric bind. If a direct caller uses a name, do not
+            # assume it is safely local merely because of its spelling.
+            external = True
+        self._peer_slots = _PeerSlots(max_connections) if external else None
+        # Places for connections waiting for a slot on an external bind, with the same per-peer share.
+        self._peer_waiters = _PeerSlots(QUEUE_PLACES_PER_SLOT * max_connections) if external else None
         self._local = threading.local()
         super().__init__(address, Handler)
 
@@ -193,39 +252,102 @@ class JWicketServer(ThreadingHTTPServer):
         deadline: Optional[_ReadDeadline] = getattr(self._local, "deadline", None)
         return True if deadline is None else deadline.cancel()
 
+    def head_read(self) -> bool:
+        """Release the shorter head deadline after parsing the complete request head."""
+        deadline: Optional[_ReadDeadline] = getattr(self._local, "head_deadline", None)
+        self._local.head_deadline = None
+        return True if deadline is None else deadline.cancel()
+
+    def _release_connection(self, peer: str) -> None:
+        if self._peer_slots is None:
+            self._slots.release()
+        else:
+            self._peer_slots.release(peer)
+
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._slots.acquire(timeout=CONNECTION_QUEUE_S):
-            LOG.warning("connection limit reached; closing connection from %s", client_address[0])
+        peer = str(client_address[0])
+        if self._peer_slots is not None:
+            if not self._peer_slots.acquire(peer):
+                self._queue_external(request, client_address, peer)
+                return
+        elif not self._slots.acquire(timeout=CONNECTION_QUEUE_S):
+            LOG.warning("connection limit reached; closing connection from %s", peer)
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._release_connection(peer)
             raise
+
+    def _queue_external(self, request: Any, client_address: Any, peer: str) -> None:
+        """Over the cap on an external bind: wait for a slot in a waiter thread, if a waiting place is
+        free for this peer; otherwise close now. Never waits on the accept thread."""
+        waiters = self._peer_waiters
+        if waiters is None:
+            raise RuntimeError("waiting places exist only on an external bind")
+        if not waiters.acquire(peer):
+            # No warning per refused network connection: keep the admission path cheap.
+            LOG.debug("connection limit reached; closing connection from %s", peer)
+            self.shutdown_request(request)
+            return
+        try:
+            threading.Thread(
+                target=self._wait_then_serve, args=(request, client_address, peer), daemon=True
+            ).start()
+        except Exception:
+            waiters.release(peer)
+            self.shutdown_request(request)
+            raise
+
+    def _wait_then_serve(self, request: Any, client_address: Any, peer: str) -> None:
+        slots, waiters = self._peer_slots, self._peer_waiters
+        if slots is None or waiters is None:
+            raise RuntimeError("waiting places exist only on an external bind")
+        try:
+            admitted = slots.acquire(peer, timeout=CONNECTION_QUEUE_S)
+        finally:
+            waiters.release(peer)
+        if not admitted:
+            LOG.debug("connection limit reached; closing connection from %s", peer)
+            self.shutdown_request(request)
+            return
+        self.process_request_thread(request, client_address)  # releases the slot when done
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         deadline = _ReadDeadline(self.socket_timeout_s)
+        head = (
+            _ReadDeadline(HEAD_TIMEOUT_S)
+            if self._peer_slots is not None and self.socket_timeout_s > HEAD_TIMEOUT_S
+            else None
+        )
         try:
             request.settimeout(self.socket_timeout_s)
             deadline.start(request)
+            if head is not None:
+                head.start(request)
             if self.tls is not None:
                 try:
-                    # Wrap first, then hand the deadline the wrapped socket (which now owns the file
-                    # descriptor), then shake hands: a client trickling its handshake is cut off too.
+                    # Both timers must follow the socket that owns the descriptor after wrapping.
                     request = self.tls.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
                     deadline.retarget(request)
+                    if head is not None:
+                        head.retarget(request)
                     request.do_handshake()
                 except (ssl.SSLError, OSError) as exc:
                     LOG.info("TLS handshake with %s failed: %s", client_address[0], exc)
                     self.shutdown_request(request)
                     return
+            self._local.head_deadline = head
             self._local.deadline = deadline
             super().process_request_thread(request, client_address)
         finally:
+            if head is not None:
+                head.cancel()
             deadline.cancel()
+            self._local.head_deadline = None
             self._local.deadline = None
-            self._slots.release()
+            self._release_connection(str(client_address[0]))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -253,6 +375,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def parse_request(self) -> bool:
         ok = super().parse_request()
+        if ok and not self.server.head_read():
+            self.close_connection = True
+            return False
         if ok and self.request_version == "HTTP/0.9":
             # Python before 3.12 answers a one-word request line HTTP/0.9-style, with no headers at
             # all (so no CSP). Refuse it with a normal, fully headed response instead.

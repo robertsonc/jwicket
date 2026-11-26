@@ -94,6 +94,8 @@ class WebSession:
     user_key: Optional[str] = None
     # What was last written to the audit trail per kind of read, so repeated polls are not recorded.
     audit_marks: Dict[str, str] = field(default_factory=dict, repr=False)
+    # Deduplication marks per validated log source: (last audited peer, status, monotonic time).
+    log_audit: Dict[str, Tuple[str, str, float]] = field(default_factory=dict, repr=False)
     # B-8: the last read per bucket, (key, monotonic time the read began, payload), so this session's
     # other tabs asking the same thing within the read floor get it instead of a 429. One value per
     # bucket, never shared across sessions, dropped with the session.

@@ -28,6 +28,7 @@ read's payload (``meta.reused``) instead of a 429; see ``api.reuse_or_wait``.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from jwicket.api import (
@@ -37,6 +38,7 @@ from jwicket.api import (
     _panel_error,
     _session,
     _utc,
+    add_read_route,
     busy,
     device_turn,
     in_flight,
@@ -60,6 +62,10 @@ from jwicket.web.server import Router
 
 SESSIONS_INTERVAL_S = 1.5
 LOGS_INTERVAL_S = 1.5
+# Keep a periodic record of continued use without letting frequent polling consume the audit file.
+LOG_AUDIT_INTERVAL_S = 60.0
+MAX_LOG_AUDIT_MARKS = 128  # keep memory bounded even as configured sources come and go
+_LOG_AUDIT_LOCK = threading.Lock()
 HEALTH_INTERVAL_S = 5.0
 HEALTH_SUGGESTED_S = 10
 SUGGESTED_INTERVAL_S = 5
@@ -435,6 +441,8 @@ def _parse_log_request(req: Request) -> Tuple[str, Json]:
     if source.startswith("file:"):
         if not logmod.valid_file_name(source[len("file:"):]):
             raise logmod.LogQueryError("unknown log file")
+        if any(key in req.query for key in ("start", "stop", "since")):
+            raise logmod.LogQueryError("file logs use a cursor, not start, stop or since")
         return source, {
             "cursor": logmod.parse_cursor(req.query.get("cursor")),
             "want": logmod.parse_lines(req.query.get("lines")),
@@ -462,7 +470,7 @@ def _read_file(sess: WebSession, name: str) -> List[str]:
     its own cursor, line count and terms)."""
     with device_turn(sess):
         reply = sess.device.rpc("get-log", filename=name)
-    return logmod.clean_lines(logmod.reply_text(reply))
+    return logmod.clean_file_reply(reply)
 
 
 def _tail(lines: List[str], params: Json) -> Json:
@@ -523,6 +531,28 @@ def _log_key(source: str, info: Optional[Json], params: Json) -> Any:
     if source == "report":
         return (params["type"], params["count"], params["start"], params["stop"], params["expression"])
     return params["since"]
+
+
+def _record_log_read(
+    app: App, sess: WebSession, req: Request, source: str, status: str, report_type: Optional[str]
+) -> None:
+    """Audit the first fresh read, outcome changes, and continued use of a validated source.
+
+    A requested cursor or time window is never evidence that a previous read was audited. Keep a
+    bounded number of marks (one for each validated source), not one for every request parameter.
+    """
+    now = app.mono_clock()
+    key = f"report:{report_type}" if report_type is not None else source
+    with _LOG_AUDIT_LOCK:
+        previous = sess.log_audit.get(key)
+        if previous is not None and previous[:2] == (req.client, status) and now - previous[2] < LOG_AUDIT_INTERVAL_S:
+            return
+        if previous is None and len(sess.log_audit) >= MAX_LOG_AUDIT_MARKS:
+            oldest = min(sess.log_audit, key=lambda src: sess.log_audit[src][2])
+            del sess.log_audit[oldest]
+        sess.log_audit[key] = (req.client, status, now)
+    extra = {} if report_type is None else {"report_type": report_type}
+    app.audit.record("read_log", user=sess.user, source=req.client, log=source, status=status, **extra)
 
 
 def log_lines(app: App, req: Request) -> Response:
@@ -595,6 +625,7 @@ def log_lines(app: App, req: Request) -> Response:
                 lines = None
                 body = {**_panel_error(err, f"log read {source}"), "lines": []}
             read_at = _utc(app.wall_clock())
+            _record_log_read(app, sess, req, source, body["status"], params.get("type"))
             # A panel error is kept like any answer, so the same failure is not asked again at once.
             remember(app, sess, bucket, key, started,
                      {"read_at": read_at, "lines": lines} if lines is not None else {"read_at": read_at, "body": body})
@@ -603,8 +634,6 @@ def log_lines(app: App, req: Request) -> Response:
     except SessionBusy:
         return busy()
 
-    if not (req.query.get("cursor") or req.query.get("start") or req.query.get("since")):
-        app.audit.record("read_log", user=sess.user, source=req.client, log=source, status=body["status"])
     return Response.json(200, {"meta": _meta(app, sess, **meta_extra, read_at=read_at), "log": body})
 
 
@@ -651,7 +680,7 @@ def health(app: App, req: Request) -> Response:
 
 
 def register(router: Router, app: App) -> None:
-    router.add("GET", "/api/sessions", lambda r: sessions(app, r))
-    router.add("GET", "/api/logs/sources", lambda r: log_sources(app, r))
-    router.add("GET", "/api/logs", lambda r: log_lines(app, r))
-    router.add("GET", "/api/health", lambda r: health(app, r))
+    add_read_route(router, "/api/sessions", app, sessions)
+    add_read_route(router, "/api/logs/sources", app, log_sources)
+    add_read_route(router, "/api/logs", app, log_lines)
+    add_read_route(router, "/api/health", app, health)

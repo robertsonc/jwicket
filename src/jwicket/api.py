@@ -59,6 +59,8 @@ MIN_READ_INTERVAL_S = 2.0
 # waiting request holds a connection slot, so it waits briefly and is then answered 429.
 SESSION_WAIT_S = 5.0
 BUSY_RETRY_S = 2
+# Keep the two-tab reuse path while bounding all concurrent read routes for one account.
+MAX_ACCOUNT_READS = 2
 # Device error text written to the diagnostic log is cut to this length (an ncclient RpcError string
 # can carry the whole rpc-error XML).
 MAX_ERROR_TEXT = 500
@@ -80,6 +82,9 @@ class App:
     wall_clock: Callable[[], float] = time.time
     mono_clock: Callable[[], float] = time.monotonic
     extra_warnings: List[str] = field(default_factory=list)
+    max_account_reads: int = MAX_ACCOUNT_READS
+    _active_account_reads: Dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _account_reads_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
 
 # --- helpers --------------------------------------------------------------------------------------
@@ -176,6 +181,35 @@ def busy() -> Response:
          "retry_after_s": BUSY_RETRY_S},
         [("Retry-After", str(BUSY_RETRY_S))],
     )
+
+
+def add_read_route(router: Router, path: str, app: App, handler: Callable[[App, Request], Response]) -> None:
+    """Bound live read handlers across buckets and browser sessions for one authenticated account.
+
+    Count processing and any device-turn/reuse wait together. Do not touch the idle timer at
+    admission; the handler retains normal authentication, background and validation semantics.
+    """
+    def admitted(req: Request) -> Response:
+        sess = app.sessions.get(req.cookie(), touch=False)
+        if sess is None:
+            return handler(app, req)
+        account = name_key(sess.user)
+        with app._account_reads_lock:
+            active = app._active_account_reads.get(account, 0)
+            if active >= app.max_account_reads:
+                return busy()
+            app._active_account_reads[account] = active + 1
+        try:
+            return handler(app, req)
+        finally:
+            with app._account_reads_lock:
+                left = app._active_account_reads[account] - 1
+                if left:
+                    app._active_account_reads[account] = left
+                else:
+                    del app._active_account_reads[account]
+
+    router.add("GET", path, admitted)
 
 
 def throttle_read(app: App, sess: WebSession, bucket: str, interval_s: float) -> Optional[Response]:
@@ -424,11 +458,11 @@ def login(app: App, req: Request) -> Response:
         app.audit.record_refusal("login_failed", source=req.client, kind=err.kind, reason="format")
         return Response.error(401, err.public)
     throttle_name = username if per_person else ""
-    wait = app.throttle.check(req.client, throttle_name)
+    wait, admitted = app.throttle.begin_for(req.client, throttle_name)
     if wait is not None:
         app.audit.record_refusal("login_throttled", source=req.client, reason="failures")
         return _throttled(wait, "Too many failed sign-in attempts. Wait and try again.", "login-failures")
-    if not app.throttle.begin():
+    if not admitted:
         app.audit.record_refusal("login_throttled", source=req.client, reason="busy")
         return _throttled(BUSY_RETRY_S, "Other sign-ins are being checked. Try again in a moment.", "login-busy")
     try:
@@ -446,9 +480,9 @@ def login(app: App, req: Request) -> Response:
             if isinstance(err, LoginUnavailable):
                 return Response.error(status, err.public, reason="unavailable")
             return Response.error(status, err.public)
+        app.throttle.succeeded(req.client, throttle_name)
     finally:
-        app.throttle.end()
-    app.throttle.succeeded(req.client, throttle_name)
+        app.throttle.end_for(throttle_name)
     # Only now, with Junos having accepted the credentials, is this browser's current session ended (a
     # failed sign-in leaves it alive). A fresh sign-in always gets a fresh token: no fixation.
     old = app.sessions.remove(req.cookie(), reason="new-sign-in")
@@ -774,8 +808,8 @@ def build_router(app: App) -> Router:
     router.add("GET", "/api/session", lambda r: get_session(app, r))
     router.add("POST", "/api/login", lambda r: login(app, r))
     router.add("POST", "/api/logout", lambda r: logout(app, r))
-    router.add("GET", "/api/inventory", lambda r: inventory(app, r))
-    router.add("GET", "/api/export", lambda r: export(app, r))
+    add_read_route(router, "/api/inventory", app, inventory)
+    add_read_route(router, "/api/export", app, export)
     from jwicket import live  # live imports helpers from this module, so import it late
 
     live.register(router, app)

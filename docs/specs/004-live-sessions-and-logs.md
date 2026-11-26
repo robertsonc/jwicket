@@ -400,9 +400,12 @@ not be read."), not an HTTP 500.
 | `lines` | Default 500, clamped to 1..2000 |
 | `contains`, `exclude` | Newline-separated, at most 4 terms of at most 120 characters each; case-insensitive substring |
 
-One `get-log` returns the whole file. J-Wicket strips control characters (keeping tab), drops
-leading and trailing blank lines, keeps the newest 5000 lines (`MAX_WINDOW`), then applies the
-cursor and the substring filters in the daemon before anything is sent to the browser. A regular
+One `get-log` returns the whole file. After NETCONF decoding, J-Wicket refuses text with more than
+4 Mi characters before splitting it; the panel reports that the file is too large. This limits
+J-Wicket's line processing and caching, not Junos retrieval or PyEZ's NETCONF decoding. Keep on-box
+log files small using the Junos logging rotation policy. For accepted replies, J-Wicket strips
+control characters (keeping tab), drops leading and trailing blank lines, keeps the newest 5000
+lines (`MAX_WINDOW`), then applies the cursor and substring filters in the daemon. A regular
 expression from the browser never runs on the device.
 
 ```json
@@ -486,8 +489,10 @@ owner decision OD-10's default (the owner may veto it; a faster gauge costs one 
 System health tile's reads (5.7) come on top of that. Each RPC
 can add a `UI_NETCONF_CMD` line on the device (7.12). Each
 operator's reads are serialised on their session lock; a request that cannot have it within 5 s
-gets 429 instead of queuing. The session cap (`max_sessions`, default 4) bounds concurrency. The
-floors are per web session, so every tab and window holding the same cookie shares them.
+gets 429 instead of queuing. No more than two authenticated device-read handlers per account may
+run or wait at once, across endpoints and web sessions. The limit is below the listener capacity,
+so admitted read handlers from one account cannot occupy every slot. The read floors are per web
+session, so every tab and window holding the same cookie shares them.
 
 **A read just made, for the same web session's other tabs** ([`api.reuse_or_wait`](../../src/jwicket/api.py)).
 A request that asks for exactly what this web session read moments ago gets that read instead of a
@@ -527,8 +532,10 @@ to audit a reply no device read produced).
   `filters: "summary-only"` and `rows: 0`, once per change of the summary's state, under its own
   mark.
 - A reply reused from a read just made (5.5) writes no audit line: no device read happened.
-- `read_log` on the first read of a source only (no `cursor`, `start` or `since`): user, source,
-  log source, status.
+- `read_log` on a session's first fresh read of a log source or report type, on peer or outcome
+  changes, and again after 60 seconds of continued reading: user, source address, log source, report
+  type when applicable, and status. Client-provided cursors and time windows do not suppress it.
+  File logs take a cursor, not report or buffer time bounds.
 - `read_health` when the outcome of either health part changes, not on every poll: user, source
   address, `route_engine` and `spu` status.
 - `session_lost` when the device session ends during a read.
