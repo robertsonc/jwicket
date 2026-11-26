@@ -69,6 +69,13 @@ class RecordedReplyTests(unittest.TestCase):
                 self.assertIsInstance(row["in"]["bytes"], int)
                 self.assertTrue(row["policy"])
                 self.assertTrue(row["in"]["iface"])
+                # Spec 004 section 5.2: sess-state (no session-state here) fills state, and each wing's
+                # tunnel-id fills tunnel, with tunnel-type kept in the wing's extra.
+                self.assertEqual((row["status"], row["state"]), ("Normal", "Valid"))
+                self.assertNotIn("sess-state", row["extra"])
+                for wing in (row["in"], row["out"]):
+                    self.assertEqual((wing["tunnel"], wing["extra"]["tunnel-type"]), ("0", "None"))
+                    self.assertNotIn("tunnel-id", wing["extra"])
         self.assertEqual(len({r["id"] for r in rows}), len(rows))
 
     def test_log_sources_stream_mode(self) -> None:

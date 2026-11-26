@@ -129,6 +129,48 @@ class SessionParseTests(unittest.TestCase):
         self.assertEqual(row["out"]["dst"], "203.0.113.2")
         self.assertEqual(row["nat"], {"source": True, "destination": False})
         self.assertEqual(row["in"]["bytes"], 520)
+        # session-state fills state; a wing with no tunnel element has no tunnel and no extras.
+        self.assertEqual(row["state"], "Valid")
+        self.assertNotIn("session-state", row["extra"])
+        self.assertEqual((row["in"]["tunnel"], row["in"]["extra"]), (None, {}))
+
+    def test_session_state_takes_precedence_over_sess_state(self) -> None:
+        """Spec 004 section 5.2. Synthetic: no recorded reply has both elements. ``sess-state`` is
+        recorded (SRX4100 25.2R1-S1.4, vSRX 24.4R2-S3.5); ``session-state`` is the element the parser
+        already read (Spec 005 DF-05). The ``Active`` value is made up for the test."""
+        both = S.parse_sessions(xml(
+            "<flow-session-information><flow-session><session-identifier>7</session-identifier>"
+            "<session-state>Active</session-state><sess-state>Valid</sess-state></flow-session>"
+            "</flow-session-information>"
+        ), 10)["rows"][0]
+        self.assertEqual(both["state"], "Active")
+        self.assertEqual(both["extra"].get("sess-state"), "Valid")  # not used for state, so kept
+        self.assertNotIn("session-state", both["extra"])
+
+        recorded_shape = S.parse_sessions(xml(
+            "<flow-session-information><flow-session><session-identifier>8</session-identifier>"
+            "<sess-state>Valid</sess-state></flow-session></flow-session-information>"
+        ), 10)["rows"][0]
+        self.assertEqual(recorded_shape["state"], "Valid")
+        self.assertNotIn("sess-state", recorded_shape["extra"])  # it filled state, so not repeated
+
+    def test_tunnel_information_takes_precedence_over_tunnel_id(self) -> None:
+        """Spec 004 sections 5.2 and 7.3. Synthetic: ``tunnel-id``, ``tunnel-type``, ``tunnel-info`` and
+        ``conn-tag`` are recorded wing elements (vSRX 24.4R2-S3.5); ``tunnel-information`` is the
+        element the parser already read, seen in no recording (7.3, unknown). Values are made up."""
+        rows = S.parse_sessions(xml(
+            "<flow-session-information><flow-session><session-identifier>9</session-identifier>"
+            "<flow-information><direction>In</direction><tunnel-information>t-1</tunnel-information>"
+            "<tunnel-id>5</tunnel-id><tunnel-type>IPsec</tunnel-type></flow-information>"
+            "<flow-information><direction>Out</direction><tunnel-id>6</tunnel-id>"
+            "<tunnel-type>IPsec</tunnel-type><tunnel-info>7</tunnel-info><conn-tag>0x0</conn-tag>"
+            "</flow-information></flow-session></flow-session-information>"
+        ), 10)["rows"]
+        incoming, outgoing = rows[0]["in"], rows[0]["out"]
+        self.assertEqual(incoming["tunnel"], "t-1")
+        self.assertEqual(incoming["extra"], {"tunnel-id": "5", "tunnel-type": "IPsec"})  # not used, so kept
+        self.assertEqual(outgoing["tunnel"], "6")
+        self.assertEqual(outgoing["extra"], {"tunnel-type": "IPsec", "tunnel-info": "7", "conn-tag": "0x0"})
 
     def test_cluster_and_spu_locations_keep_ids_distinct(self) -> None:
         got = S.parse_sessions(xml(CLUSTER_REPLY), 10)

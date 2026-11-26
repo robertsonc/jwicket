@@ -61,11 +61,11 @@ class RecordedVsrxTests(unittest.TestCase):
             with self.subTest(id=row["id"]):
                 self.assertEqual((row["policy"], row["policy_index"]), ("JW-QREL-ICMP", "8"))
                 self.assertEqual(row["status"], "Normal")
-                # Pins the recorded mismatch: the parser reads session-state, while both recorded
-                # platforms send sess-state, so state is None and the value lands in extra (Spec 004
-                # section 5.2, Spec 005 DF-05). Fixing the mapping must change this assertion.
-                self.assertIsNone(row["state"])
-                self.assertEqual(row["extra"]["sess-state"], "Valid")
+                # The rows carry sess-state and no session-state, so sess-state fills state and is
+                # not repeated in extra (Spec 004 section 5.2, Spec 005 DF-05).
+                self.assertEqual(row["state"], "Valid")
+                self.assertNotIn("sess-state", row["extra"])
+                self.assertNotIn("session-state", row["extra"])
                 self.assertEqual(row["nat"], {"source": False, "destination": False})
                 incoming, outgoing = row["in"], row["out"]
                 self.assertEqual((incoming["src"], incoming["dst"]), ("192.0.2.10", "198.51.100.20"))
@@ -77,9 +77,18 @@ class RecordedVsrxTests(unittest.TestCase):
                 ports_in, ports_out = RECORDED_PORTS[row["session_id"]]
                 self.assertEqual((incoming["sport"], incoming["dport"]), ports_in)
                 self.assertEqual((outgoing["sport"], outgoing["dport"]), ports_out)
-                # Pins current behaviour: _wing reads tunnel-information, while the recorded outgoing
-                # wing carries tunnel-id, tunnel-type and tunnel-info, so tunnel stays None.
-                self.assertIsNone(outgoing["tunnel"])
+                # No wing carries tunnel-information, so tunnel falls back to tunnel-id, verbatim, and
+                # tunnel-type and tunnel-info stay in the wing's extra (Spec 004 sections 5.2 and 7.3).
+                # The ids are the redaction's pseudonyms (SOURCE.md).
+                self.assertEqual((incoming["tunnel"], outgoing["tunnel"]), ("0", "800002"))
+                self.assertEqual(incoming["extra"]["tunnel-type"], "None")
+                self.assertNotIn("tunnel-info", incoming["extra"])
+                out_extra = outgoing["extra"]
+                self.assertEqual((out_extra["tunnel-type"], out_extra["tunnel-info"]), ("IPsec", "800003"))
+                for wing in (incoming, outgoing):
+                    self.assertNotIn("tunnel-id", wing["extra"])
+                    # Other unmodelled wing scalars are kept too, not dropped.
+                    self.assertEqual(wing["extra"]["conn-tag"], "0x0")
 
     def test_filtered_matches_are_not_the_table_wide_gauge(self) -> None:
         matching = sessions.parse_summary(inner("get-flow-session-information-matching"))
