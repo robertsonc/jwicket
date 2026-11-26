@@ -381,6 +381,10 @@ ADR first.
 - **Test only** against the development server, your own disposable lab equipment, or devices you
   are authorized to test. Never a production firewall.
 
+For an exploratory run that is not claiming qualification, see the proposed
+[lab/dev and read-only alpha lanes](docs/governance.md#34-labdev-read-only-alpha-and-production).
+The qualification process below is unchanged.
+
 ## Add a qualification result
 
 Qualification tests are defined in [governance, section 4](docs/governance.md#4-qualification-test-catalogue)

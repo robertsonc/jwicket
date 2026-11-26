@@ -336,6 +336,59 @@ The ledger's `qualified` status needs "a qualified platform". **Proposed** defin
   the charter and the risk register say what each failure would mean.
 - A gate's exit criteria change only by owner decision, recorded on this page with the date.
 
+### 3.4 Lab/dev, read-only alpha, and production
+
+**Proposed, 2026-11-26.** A lab experiment collects evidence. A read-only alpha lets named
+testers use a specific release on a specific lab setup. A production qualification says what
+customers can rely on. Do not require production evidence to start a lab experiment, or use lab
+evidence to imply production support. G0 to G5 and their current pass criteria remain unchanged.
+
+| Lane | Who and where | What it takes to proceed |
+| --- | --- | --- |
+| **Lab/dev experiment** | Lab owner or authorized operator, on an isolated, disposable lab target | Record the test plan, exact local build, expected change, and restore procedure. A locally built artifact and documented manual steps are allowed. No published release, release signature, certified matrix, or automated installer is required to run the experiment. |
+| **Read-only alpha** | Named testers approved by the project owner, on one explicitly named standalone SRX platform, Junos release, and access profile, on lab equipment only | Meet **Alpha Exit** below on the exact distributed artifact. Label it unsupported and document what is excluded. No HA install and no J-Wicket writes. |
+| **Production** | Customers on qualified platform and release combinations | The existing G0 to G5 path applies, including G5 before production installation. Alpha does not waive security review, qualification, or support requirements. |
+
+#### Run a lab/dev experiment
+
+1. Agree the device, isolation, purpose, and cleanup window with the lab owner. For a change,
+   record the scope, exact intended diff, rollback or rebuild path, and how to verify restoration.
+   Prefer confirmed commits for reversible configuration. A separate, owner-approved reboot test
+   can use an explicit restoration plan when a timed commit will not survive reboot.
+2. Record the source revision, local changes, bundle SHA-256 and payload SHA-256 where available.
+   Record each workaround and why it was necessary. Do not call a modified bundle the released one.
+3. Keep Veriexec enforcing, verify management endpoint identities, and keep access private
+   through the approved tunnel or scoped, verified TLS. No public listener, silent fallback to
+   weaker settings, broadening of operator privileges, or J-Wicket configuration writes. A
+   separately scoped native Junos write test may collect evidence without adding app writes.
+4. Verify cleanup and file the result, including any failure and what the experiment did not
+   prove. Record a qualification result separately under [the evidence rules](#6-evidence-rules).
+   Running an experiment is not certification and does not turn its earlier prototype evidence
+   into evidence for different release bytes.
+
+#### Alpha Exit
+
+This is a proposed, separate release decision, not G1 sign-off. The project owner authorizes
+the candidate and named testers. The lab owner verifies the evidence. Any change to device
+security posture still needs the review specified in [Who decides what](#who-decides-what).
+
+- Name the candidate tag and digest, one standalone SRX platform and exact Junos release, and
+  the tested state, access and authentication setup. Verify the exact distributed artifact's
+  signature or release attestation and digest before installation.
+- On that setup, install the candidate by its documented procedure, verify startup and recovery
+  after a daemon restart, and verify the documented removal or rollback restores the baseline.
+- Use a restricted Junos operator to verify sign-in, an allowed read, a denied read, and
+  sign-out over private, verified access. Keep the release read-only. Keep existing installer
+  refusals for HA and other unsupported devices. A different release, topology, or trust profile
+  is outside the alpha claim unless it gets its own evidence and explicit approval.
+- Link the device record and known limitations in the release notes. Record the owner's Alpha
+  Exit decision separately; do not mark a gate or matrix cell passed based on this decision.
+
+The three-release reply matrix, broad performance testing, and HA qualification stay in the
+existing gates. They are not prerequisites for a standalone alpha. This proposal changes no
+installer code, refusal, workflow, tag rule, or gate criterion. Existing published pre-releases
+remain lab-only and are not automatically promoted to alpha.
+
 ## 4. Qualification test catalogue
 
 Each test has a purpose, a method, a pass criterion, the platforms it runs on, the gate that needs
