@@ -695,7 +695,9 @@ Defined here, referenced from [governance.md](../governance.md). Every test runs
 only, with the operator's own NETCONF session, and records raw replies and syslog lines as
 evidence for the lab owner to certify. "Each qualified release" means the release set governance
 names for Q-REL-01. No J-Wicket test has run. One native Junos observation, outside J-Wicket,
-covers part of Q-CHG-03 ([lab record](../evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback);
+covers part of Q-CHG-03 and, by owner decision D21 (2026-11-26,
+[governance section 2.5](../governance.md#25-decisions-pending)), counts as partial Q-CHG-03
+evidence ([lab record](../evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback);
 see that test's status).
 
 ### Q-CHG-01 Lock and candidate contention with CLI and J-Web users
@@ -735,7 +737,8 @@ see that test's status).
 - **Pass:** every comparison is empty; history shows the expected entries; the revision-bound
   rollback restores the chosen revision even after other commits shifted the indexes.
 - **Platforms:** lab vSRX; each qualified release.
-- **Status:** partial native evidence on vSRX 24.4R2-S3.5. A description-only NETCONF
+- **Status:** **partial** on vSRX 24.4R2-S3.5, from native evidence that counts toward this test
+  by owner decision D21 (2026-11-26); not certified (lab owner, D2). A description-only NETCONF
   commit expired and Junos restored the exact pre-change policy. Other undo modes and
   the J-Wicket protocol were not exercised. The comparison covered that policy subtree only,
   not the whole committed configuration the method asks for. The record does not report a check

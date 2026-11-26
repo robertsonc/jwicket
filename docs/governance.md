@@ -258,7 +258,7 @@ These block a gate or a qualification run. Each is the owner's unless the row sa
 | D18 | Confirm the lead engineer's scope cuts C1 to C3 (setup mode D1 deferred, no `serve` mirror, ZTP documented only; open question 29), and accept the bundle changes D2 and D3 (open question 3; with the security reviewer, as new surface for Q-SEC-01) | Spec 006 acceptance | [Spec 006, section 4.1](specs/006-installation.md#41-scope-cuts-in-this-change) |
 | D19 | The other open questions of Spec 006 (2, 7, 11, 12, 15 to 19, 21 to 27 and 31), each with a proposed answer recorded in ADR 0012. Open questions 20, 28 and 30 (R-MODEL with `--lab-hardware` and a typed `lab only`; root's one-time directory step; `--access tls` by default) were decided by the owner on 2026-11-25 ([ADR 0011](adr/0011-owner-decisions-lab-gated-install.md), decision 4). **Proposed** [ADR 0015](adr/0015-verified-installer-profiles.md) and [Spec 006 section 7.12](specs/006-installation.md#712-adaptive-preflight-proposed) reopen open questions 28 and 30: they keep the decided defaults but offer an account-owned state directory, an exact-interface listener and a same-device pinned operator NETCONF address as alternatives, from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md). Tracked as Spec 006 open question 32 | Spec 006 acceptance; ADR 0015 | [Spec 006, section 21](specs/006-installation.md#21-open-questions-owner-decisions); [ADR 0015](adr/0015-verified-installer-profiles.md) |
 | D20 | **Decided** (owner, 2026-11-26, in the owner's words: "Yes, with notes/documentation"). Results from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) of 2026-11-26 may change a status cell. Its runs used an uncommitted, lab-only build derived from dev3 (account-owned settings path, HelperVM-only HTTPS listener, provisioned ECDSA pin, on-box SSH and NETCONF compatibility code), not J-Wicket's own released bundle, so its results apply to that build only ([evidence rule 2](#6-evidence-rules)). The rule: a cell that counts it, and its status bullet, say it is the proof build (uncommitted, lab-only, dev3-derived, not J-Wicket's own released bundle), cite its SHA-256 as the lab record gives it, and link the record ([4.1](#41-how-to-read-an-entry)). Applied on 2026-11-26 to Q-RT-02, Q-TLS-01, Q-AUTH-01, Q-AUTH-03, Q-NET-01 and Q-NET-03, each now **partial** on vSRX 24.4R2-S3.5; the Q-REL-01 entry is not changed here. Certification is still the lab owner's (D2, [evidence rule 6](#6-evidence-rules)) | Nothing now (decided) | [Section 4](#4-qualification-test-catalogue); [section 6](#6-evidence-rules) |
-| D21 | Does a native Junos confirmed-commit timeout, observed with no J-Wicket write path, count toward Q-CHG-03? The vSRX lab follow-up recorded one ([4.11](#411-change-protocol-q-chg-01-to-q-chg-16)). Until decided it changes no status. Owner, with the lab owner | Q-CHG-03 | [Section 4.11](#411-change-protocol-q-chg-01-to-q-chg-16) |
+| D21 | **Decided** (owner, 2026-11-26, in the owner's words: "yes"): a native Junos confirmed-commit timeout, observed with no J-Wicket write path, counts toward Q-CHG-03. Applied to the one the vSRX lab follow-up recorded, which makes Q-CHG-03 **partial** on vSRX 24.4R2-S3.5 ([4.11](#411-change-protocol-q-chg-01-to-q-chg-16); [Spec 002, Q-CHG-03](specs/002-change-protocol.md#q-chg-03-rollback-correctness)). It does not stand in for the J-Wicket protocol, the other undo modes or certification (lab owner, D2) | Nothing now (decided) | [Section 4.11](#411-change-protocol-q-chg-01-to-q-chg-16) |
 
 ## 3. Gates G0 to G5
 
@@ -437,7 +437,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | [Q-LOG-01](#q-log-01-log-source-matrix) | Log source matrix | G2 | Not run |
 | [Q-SEC-01](#q-sec-01-internal-security-review) | Internal security review | G1 (repeated for G3) | Not run |
 | [Q-SEC-02](#q-sec-02-external-penetration-test) | External penetration test | G4 | Not run |
-| [Q-CHG-01 to Q-CHG-16](#411-change-protocol-q-chg-01-to-q-chg-16) | Change protocol | G4 (Q-CHG-08, Q-CHG-09 also G3) | Not run |
+| [Q-CHG-01 to Q-CHG-16](#411-change-protocol-q-chg-01-to-q-chg-16) | Change protocol | G4 (Q-CHG-08, Q-CHG-09 also G3) | Not run, except Q-CHG-03: **partial** on vSRX 24.4R2-S3.5 from one native Junos confirmed-commit timeout, no J-Wicket protocol (counted by owner decision D21, 2026-11-26) |
 
 ### 4.3 Runtime
 
@@ -1143,13 +1143,16 @@ Defined, with purpose, method, pass criterion and platforms, in
 [Spec 002 section 19](specs/002-change-protocol.md#19-qualification-tests-q-chg-01-to-q-chg-16).
 All are G4 tests; Q-CHG-08 and Q-CHG-09 also decide G3 if the owner allows a device preview (D5).
 No J-Wicket Q-CHG test has run, and none can until Spec 002 is built. One native Junos
-observation is recorded, which changes no status: on vSRX 24.4R2-S3.5, a description-only change
+observation is recorded, and by owner decision D21 (2026-11-26) it counts toward Q-CHG-03, which is
+**partial** on vSRX 24.4R2-S3.5 and not certified: on vSRX 24.4R2-S3.5, a description-only change
 to a lab policy, committed over NETCONF on a 90-second timer under an exclusive lock, was left
 unconfirmed; Junos logged `UI_COMMIT_NOT_CONFIRMED` and completed the automatic rollback, and an
-exact committed comparison found no difference. It used no J-Wicket write path, did not cut
-management access (Q-CHG-02) and tested no other undo mode
-([lab record](evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback)).
-Owner decision pending (D21): whether such a native observation counts toward Q-CHG-03.
+exact committed comparison found no difference. It was native Junos: no J-Wicket protocol ran and
+no J-Wicket write path was used. It did not cut management access (Q-CHG-02) and tested no other
+undo mode. Its limits stand: the comparison covered that policy subtree only, not the whole
+committed configuration; commit-history entries are not reported; no raw replies or syslog lines
+are filed ([lab record](evidence/2026-11-26-vsrx-vlab/README.md#native-description-only-rollback);
+[Spec 002, Q-CHG-03](specs/002-change-protocol.md#q-chg-03-rollback-correctness)).
 
 | ID | Test |
 | --- | --- |
@@ -1309,7 +1312,7 @@ platform and release, and is "qualified" only as [3.2](#32-what-qualified-platfo
 
 | Platform | 22.4 | 23.4 | 24.4 | 25.2 |
 | --- | --- | --- | --- | --- |
-| vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). [24.4R2-S3.5 lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md), two standalone vSRXs, with an uncommitted, lab-only **proof build** derived from dev3, not J-Wicket's own released bundle (final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): Q-RT-02, Q-TLS-01, Q-AUTH-01, Q-AUTH-03, Q-NET-03 and the vSRX part of Q-NET-01 partial, for that build only (counted by owner decision D20, 2026-11-26); five recorded replies for Q-REL-01 (partial); Q-HA-03 partial (dev3 inventory logic run off-box did not detect MNHA); one native Junos rollback observation for Q-CHG-03 (whether it counts is D21). J-Wicket's own bundle: not run. Every other test: not run. Not qualified |
+| vSRX | not run | not run | **Spike-equivalent on 24.4R2-S3.5**, all by `wicket_spike.py`: Q-RT-01, Q-RT-02 and the vSRX part of Q-NET-01 partial ([4.3](#43-runtime), [4.5](#45-transport-and-network) list the criteria met and not met). [24.4R2-S3.5 lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md), two standalone vSRXs, with an uncommitted, lab-only **proof build** derived from dev3, not J-Wicket's own released bundle (final bundle SHA-256 `b5ff7500f248662313c041c021614b120b7feb744eec516c3b541e653df0d5eb`): Q-RT-02, Q-TLS-01, Q-AUTH-01, Q-AUTH-03, Q-NET-03 and the vSRX part of Q-NET-01 partial, for that build only (counted by owner decision D20, 2026-11-26); five recorded replies for Q-REL-01 (partial); Q-HA-03 partial (dev3 inventory logic run off-box did not detect MNHA); Q-CHG-03 partial from one native Junos rollback observation, no J-Wicket protocol (counted by owner decision D21, 2026-11-26). J-Wicket's own bundle: not run. Every other test: not run. Not qualified |
 | SRX300 class | not run | not run | not run | not run |
 | SRX1500 | not run | not run | not run | not run |
 | SRX4100 | not run | not run | not run | **J-Wicket's own bundle on 25.2R1-S1.4**: Q-RT-01 pass; Q-RT-02 and Q-AUTH-01 met except one criterion each; Q-RT-03 works; Q-TLS-01, Q-REL-01 partial; Q-NET-01 fxp0 part met; Q-NET-03 fails ([evidence](evidence/2026-11-24-srx4100-lab/README.md)). [Dev3 follow-up](evidence/2026-11-26-srx4100-dev3/README.md): Q-AUTH-03 partial (restricted-class inventory and log denial). Not qualified |
