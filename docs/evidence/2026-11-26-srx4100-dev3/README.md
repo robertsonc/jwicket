@@ -46,9 +46,10 @@ world-readable override. The denial despite `trace` is consistent with Junos's d
 No log permissions or logging configuration were changed. The tested permission sets
 are observations for this device and build, not a recommended class or a minimum.
 
-Both rollbacks removed the user and class. The device recorded the second rollback at
-14:47:04 UTC (08:47:04 CST on its clock). Pinned HTTPS still reported dev3 and the same
-payload build afterward.
+After each rollback, the operator verified that the user and class were absent from the
+committed configuration. The device commit history confirmed the second rollback; the
+appliance clock was not verified against UTC. Pinned HTTPS still reported dev3 and the
+same payload build afterward.
 
 ## What remains open
 
