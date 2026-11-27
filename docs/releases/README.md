@@ -13,6 +13,10 @@ without a reviewed pull request. The release workflow cannot write the record it
 tagged commit cannot contain the hashes of the files built from it
 ([section 11.5](../specs/006-installation.md#115-release-record-on-main-and-the-private-repository-path)).
 
+The proposed [release lanes](../governance.md#34-labdev-read-only-alpha-and-production)
+distinguish a local lab/dev artifact from a read-only alpha candidate. Nothing in that
+proposal promotes an existing tag or changes the verification rules below.
+
 ## Format
 
 - **Name:** the tag followed by `.sha256sums`, for example `v0.1.0.dev1.sha256sums`. A tag is
