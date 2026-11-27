@@ -84,7 +84,7 @@ class SessionFilterTests(unittest.TestCase):
 SESSION_REPLY = """
 <flow-session-information>
   <flow-session>
-    <session-identifier>42</session-identifier><status>Normal</status><session-state>Valid</session-state>
+    <session-identifier>42</session-identifier><status>Normal</status><sess-state>Valid</sess-state>
     <policy>allow-web/5</policy><configured-timeout>1800</configured-timeout><timeout>1790</timeout>
     <start-time>1795500000</start-time><duration>10</duration>
     <flow-information><direction>In</direction><source-address>10.10.0.5</source-address><source-port>51234</source-port>
@@ -129,6 +129,56 @@ class SessionParseTests(unittest.TestCase):
         self.assertEqual(row["out"]["dst"], "203.0.113.2")
         self.assertEqual(row["nat"], {"source": True, "destination": False})
         self.assertEqual(row["in"]["bytes"], 520)
+        # sess-state fills validity, and state (session-state, absent here) stays None; a wing with
+        # no tunnel element has no tunnel and no extras.
+        self.assertEqual((row["state"], row["validity"]), (None, "Valid"))
+        self.assertNotIn("sess-state", row["extra"])
+        self.assertEqual((row["in"]["tunnel"], row["in"]["extra"]), (None, {}))
+
+    def test_session_state_and_sess_state_fill_their_own_fields(self) -> None:
+        """Spec 004 section 5.2 (owner decision 2026-11-26: validity in its own column). Synthetic: no
+        recorded reply has both elements. ``sess-state`` is recorded (SRX4100 25.2R1-S1.4, vSRX
+        24.4R2-S3.5); ``session-state`` is described in the 24.4R2 YANG as the HA state (Spec 005
+        DF-05). The ``Backup`` and ``Invalidated`` values are made up for the test."""
+        def row(children: str) -> Dict[str, Any]:
+            reply = xml(
+                "<flow-session-information><flow-session><session-identifier>7</session-identifier>"
+                f"{children}</flow-session></flow-session-information>"
+            )
+            got: Dict[str, Any] = S.parse_sessions(reply, 10)["rows"][0]
+            return got
+
+        both = row("<session-state>Backup</session-state><sess-state>Invalidated</sess-state>")
+        self.assertEqual((both["state"], both["validity"]), ("Backup", "Invalidated"))
+        self.assertEqual(both["extra"], {})  # both are modelled, so neither is repeated in extra
+
+        ha_only = row("<session-state>Backup</session-state>")
+        self.assertEqual((ha_only["state"], ha_only["validity"]), ("Backup", None))
+
+        recorded_shape = row("<sess-state>Valid</sess-state>")
+        self.assertEqual((recorded_shape["state"], recorded_shape["validity"]), (None, "Valid"))
+        self.assertEqual(recorded_shape["extra"], {})
+
+        neither = row("")
+        self.assertEqual((neither["state"], neither["validity"]), (None, None))
+
+    def test_tunnel_information_takes_precedence_over_tunnel_id(self) -> None:
+        """Spec 004 sections 5.2 and 7.3. Synthetic: ``tunnel-id``, ``tunnel-type``, ``tunnel-info`` and
+        ``conn-tag`` are recorded wing elements (vSRX 24.4R2-S3.5); ``tunnel-information`` is the
+        element the parser already read, seen in no recording (7.3, unknown). Values are made up."""
+        rows = S.parse_sessions(xml(
+            "<flow-session-information><flow-session><session-identifier>9</session-identifier>"
+            "<flow-information><direction>In</direction><tunnel-information>t-1</tunnel-information>"
+            "<tunnel-id>5</tunnel-id><tunnel-type>IPsec</tunnel-type></flow-information>"
+            "<flow-information><direction>Out</direction><tunnel-id>6</tunnel-id>"
+            "<tunnel-type>IPsec</tunnel-type><tunnel-info>7</tunnel-info><conn-tag>0x0</conn-tag>"
+            "</flow-information></flow-session></flow-session-information>"
+        ), 10)["rows"]
+        incoming, outgoing = rows[0]["in"], rows[0]["out"]
+        self.assertEqual(incoming["tunnel"], "t-1")
+        self.assertEqual(incoming["extra"], {"tunnel-id": "5", "tunnel-type": "IPsec"})  # not used, so kept
+        self.assertEqual(outgoing["tunnel"], "6")
+        self.assertEqual(outgoing["extra"], {"tunnel-type": "IPsec", "tunnel-info": "7", "conn-tag": "0x0"})
 
     def test_cluster_and_spu_locations_keep_ids_distinct(self) -> None:
         got = S.parse_sessions(xml(CLUSTER_REPLY), 10)

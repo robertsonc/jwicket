@@ -251,10 +251,12 @@ class LiveModel:
             prof = f["prof"]
             age = now - f["start"]
             item = ElementTree.SubElement(root, "flow-session")
+            # Validity goes in sess-state, the element both recorded lists carry (SRX4100 25.2R1-S1.4,
+            # vSRX 24.4R2-S3.5); no session-state, since neither recording has one (Spec 004 7.3).
             for tag, value in (
                 ("session-identifier", f["sid"]),
                 ("status", "Normal"),
-                ("session-state", "Valid"),
+                ("sess-state", "Valid"),
                 ("policy", f"{prof['policy']}/{prof.get('policy_index', 4)}"),
                 ("configured-timeout", prof.get("timeout", 1800)),
                 ("timeout", max(1, int(prof.get("timeout", 1800) - (age % 10)))),

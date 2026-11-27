@@ -486,7 +486,7 @@ its entry before the test runs (D9). A test run without one records numbers; it 
 | [Q-LOAD-01](#q-load-01-sustained-ui-load) | Sustained UI load | G1 | Not run |
 | [Q-LOAD-02](#q-load-02-session-list-pull-cost) | Session-list pull cost | G1 | Not run |
 | [Q-LOAD-03](#q-load-03-log-volume-from-polling) | Log volume from polling | G1 | Not run |
-| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies on SRX4100 25.2R1-S1.4 and five session and log replies on [vSRX 24.4R2-S3.5](evidence/2026-11-26-vsrx-vlab/README.md#synthetic-policy-and-log-reply-capture); the replay tests pass with three vSRX mismatches recorded, not fixed (`sess-state` where the parser reads `session-state`; wing fields such as `tunnel-id`, `tunnel-type` and `tunnel-info` not modelled; the full inventory filter rejected at `tenants`); coverage incomplete (vSRX part counted by owner decision D20, 2026-11-26) |
+| [Q-REL-01](#q-rel-01-recorded-replies) | Recorded replies | G1 | **Partial**: nine replies on SRX4100 25.2R1-S1.4 and five session and log replies on [vSRX 24.4R2-S3.5](evidence/2026-11-26-vsrx-vlab/README.md#synthetic-policy-and-log-reply-capture); the replay tests pass; of three vSRX mismatches, two are fixed in the parser (`sess-state` now fills its own `validity` field and column, and `state` stays the HA state from `session-state`, by owner decision 2026-11-26; wing `tunnel` falls back to `tunnel-id` and other wing fields are kept as extras, [Spec 004 section 5.2](specs/004-live-sessions-and-logs.md)) and one is open (the full inventory filter rejected at `tenants`); coverage incomplete (vSRX part counted by owner decision D20, 2026-11-26) |
 | [Q-HA-01](#q-ha-01-chassis-cluster) | Chassis cluster | G2 | Not run |
 | [Q-HA-02](#q-ha-02-identify-the-local-node) | Identify the local node | G2 | Not run |
 | [Q-HA-03](#q-ha-03-multinode-high-availability) | Multinode High Availability | G2 | **Partial** on vSRX 24.4R2-S3.5: MNHA not detected by J-Wicket (dev3 inventory logic, run off-box against live NETCONF, returned `standalone` on both nodes); J-Wicket was not run on each node as the method says. Native unencrypted SRG0 peering and cold sync observed as preconditions only ([lab record](evidence/2026-11-26-vsrx-vlab/README.md#mnha-peer-and-cold-sync-retest)) |
@@ -1044,18 +1044,23 @@ its entry before the test runs (D9). A test run without one records numbers; it 
   a filtered session list, filtered and unfiltered summaries, and both successful and
   denied `get-log` replies. Those five replies are sanitized and
   [replayed by tests](../tests/fixtures/recorded-vsrx-24.4R2-S3.5/SOURCE.md)
-  (`tests/test_recorded_vsrx.py`), which pass. Three mismatches on vSRX are recorded, not fixed:
-  - the list rows carry the state as `sess-state`, while the parser reads `session-state`
-    ([`junos/sessions.py`](../src/jwicket/junos/sessions.py)); `state` comes back empty and the
-    value is kept only among the row's extras, which the replay test accepts;
+  (`tests/test_recorded_vsrx.py`), which pass. Three mismatches were found on vSRX; the first two
+  are fixed in the parser ([`junos/sessions.py`](../src/jwicket/junos/sessions.py)):
+  - the list rows carry `sess-state`, not `session-state` (both recorded platforms). By the
+    owner's decision of 2026-11-26 ("Yes, separate column") the two are separate fields:
+    `state` stays the HA state and reads only `session-state` (so it is empty on these replies),
+    and `sess-state` fills `validity`, shown in its own Sessions column. That `sess-state` is the
+    CLI's "Session State" is inferred, and its values beyond the recorded `Valid` are unknown
+    (Spec 004 section 5.2);
   - each `flow-information` wing carries fields the model does not name, among them `tunnel-id`,
-    `tunnel-type` and, on the outbound wing, `tunnel-info`; `_wing` reads `tunnel-information`,
-    which the reply does not have, so its `tunnel` is empty and the others are dropped, not kept as
-    extras;
+    `tunnel-type` and, on the outbound wing, `tunnel-info`; `tunnel` now reads
+    `tunnel-information` when present, else `tunnel-id`, and the other scalar wing fields are kept
+    in the wing's `extra` instead of being dropped. That `tunnel-id` names the wing's tunnel is
+    inferred;
   - in the baseline reads on both vSRXs, Junos rejected the full `INVENTORY_FILTER` at `tenants`
     and accepted `INVENTORY_FILTER_MINIMAL` ([`junos/session.py`](../src/jwicket/junos/session.py)),
     so J-Wicket falls back to a filter that reads no system or chassis settings (the Q-HA-03
-    detection gap). Neither inventory reply was stored as a fixture.
+    detection gap). This one is not fixed. Neither inventory reply was stored as a fixture.
 
   This is not full RPC, topology or approved release-set coverage. The captures sit beside runs
   of the uncommitted proof build; they count toward this status by owner decision D20

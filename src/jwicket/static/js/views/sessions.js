@@ -482,6 +482,10 @@ class RowWindow {
 
 // ---- columns -------------------------------------------------------------------------------------
 
+// Validity (sess-state) reads as normal when it is Valid or not reported; any other value is amber.
+// Only Valid is recorded (Spec 004 section 7.3); what other values mean is unknown (Q-REL-01).
+const validOrUnknown = (v) => /^valid$/i.test(v || 'valid');
+
 // w: minimum width in px; fr: share of spare width; prio: lower survives longer when the table is
 // narrower than every column (automatic column fit). Each row is its own CSS grid, so widths are
 // fixed or fr (never content-sized, which would misalign the rows). Source and destination fit any
@@ -503,6 +507,7 @@ const COLUMNS = [
   { id: 'rate', label: 'Rate', title: 'Rate in bytes per second between the last two polls (dim = average since the session started, until the second poll)', w: 66, prio: 2, sort: 'rate', num: true },
   { id: 'dur', label: 'Age', title: 'Duration: how long the session has existed', w: 58, prio: 5, sort: 'dur', num: true },
   { id: 'timeout', label: 'Timeout', title: 'Idle timeout remaining (bar: of the configured timeout; amber under 20 %)', w: 70, prio: 7, sort: 'timeout', num: true },
+  { id: 'validity', label: 'Validity', title: 'Session validity as the device reports it (normally Valid; amber for any other value). Not the HA state: the detail panel shows that as State', w: 64, prio: 8, sort: 'validity' },
   { id: 'node', label: 'Node', title: 'Cluster node or SPU', w: 110, prio: 6.5, sort: 'node', onlyWith: 'location' },
 ];
 const COL_BY_ID = new Map(COLUMNS.map((c) => [c.id, c]));
@@ -522,6 +527,7 @@ const SORTS = {
   rate: (r) => r.rate,
   dur: (r) => r.duration,
   timeout: (r) => r.timeout,
+  validity: (r) => r.validity,
   node: (r) => r.location,
 };
 
@@ -2530,7 +2536,7 @@ class SessionsView {
     const a = r.in || {};
     const b = r.out || {};
     switch (c.id) {
-      case 'status': return `${this.statusOf(r).cls}|${r.state}|${r.status}|${r._backupWhy || ''}`;
+      case 'status': return `${this.statusOf(r).cls}|${r.validity}|${r.state}|${r.status}|${r._backupWhy || ''}`;
       case 'id': return r.session_id || r.id;
       case 'policy': return r.policy || '';
       case 'zones': {
@@ -2554,14 +2560,19 @@ class SessionsView {
       }
       case 'dur': return String(r.duration);
       case 'timeout': return `${r.timeout}|${r.configured_timeout}`;
+      case 'validity': return r.validity || '';
       case 'node': return `${r.location}|${r._backup}`;
       default: return '';
     }
   }
 
+  /**
+   * The status dot: amber when the validity (sess-state) is reported and is not Valid. The HA state
+   * (state, from session-state) never colours it; it is named in the label when the row has one.
+   */
   statusOf(r) {
-    const cls = r._ended ? 'ended' : r._backup ? 'backup' : r._newAt && Date.now() - r._newAt < FLASH_MS * 2 ? 'new' : /^valid$/i.test(r.state || 'valid') ? 'ok' : 'warn';
-    const label = r._ended ? 'ended since the last poll' : r._backup ? `backup copy (${r._backupWhy})` : `${r.state || 'state unknown'}${r.status ? `, ${r.status}` : ''}`;
+    const cls = r._ended ? 'ended' : r._backup ? 'backup' : r._newAt && Date.now() - r._newAt < FLASH_MS * 2 ? 'new' : validOrUnknown(r.validity) ? 'ok' : 'warn';
+    const label = r._ended ? 'ended since the last poll' : r._backup ? `backup copy (${r._backupWhy})` : [r.validity || 'validity unknown', r.state && `HA state ${r.state}`, r.status].filter(Boolean).join(', ');
     return { cls, label };
   }
 
@@ -2639,6 +2650,8 @@ class SessionsView {
           frac !== null ? h('span', { class: 'sx-tbar', 'aria-hidden': 'true' }, bar) : null,
         );
       }
+      case 'validity':
+        return this.fx('validity', r.validity, r.validity || DASH, validOrUnknown(r.validity) ? 'muted' : 'pill amber');
       case 'node':
         return h('span', { class: 'sx-node' }, this.fx('node', r.location, r.location || DASH, 'mono'), r._backup ? h('span', { class: 'pill muted' }, 'backup') : null);
       default:
@@ -3311,6 +3324,7 @@ class SessionsView {
       session_id: r.session_id,
       location: r.location,
       state: r.state,
+      validity: r.validity,
       status: r.status,
       policy: r.policy,
       policy_index: r.policy_index,
@@ -3580,14 +3594,16 @@ class SessionDetail {
   renderHead(r, state) {
     const { h } = this;
     const fmt = this.fmt;
-    const sig = JSON.stringify([state, this.v.paused, r.state, r.status, r._role, r._backup, r._backupWhy, r.location]);
+    const sig = JSON.stringify([state, this.v.paused, r.validity, r.state, r.status, r._role, r._backup, r._backupWhy, r.location]);
     this.section('pills', this.pillsEl, sig, () => {
       const pills = [];
       if (state === 'live') pills.push(h('span', { class: 'live-badge' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), this.v.paused ? 'PAUSED' : 'LIVE'));
       // Ended is closed, not denied: muted grey, never the deny red.
       else if (state === 'ended') pills.push(h('span', { class: 'pill muted' }, 'ENDED'));
       else pills.push(h('span', { class: 'pill muted' }, 'NOT LISTED'));
-      if (r.state) pills.push(h('span', { class: ['pill', /^valid$/i.test(r.state) ? 'permit' : 'amber'] }, this.v.V(r.state)));
+      if (r.validity) pills.push(h('span', { class: ['pill', validOrUnknown(r.validity) ? 'permit' : 'amber'], title: 'Session validity as the device reports it (normally Valid)' }, this.v.V(r.validity)));
+      // The HA state shows as its role pill below when it is Active or Backup; any other value as sent.
+      if (r.state && !r._role) pills.push(h('span', { class: 'pill muted', title: 'HA state' }, this.v.V(r.state)));
       if (r.status) pills.push(h('span', { class: ['pill', /^normal$/i.test(r.status) ? 'muted' : 'amber'], title: 'Session status: Normal, or a NAT flag (Auth, Transparent, Expired)' }, this.v.V(r.status)));
       if (r._role) pills.push(h('span', { class: ['pill', r._role === 'backup' ? 'muted' : 'sky'] }, `HA ${r._role}`));
       else if (r._backup) pills.push(h('span', { class: 'pill muted', title: r._backupWhy }, 'backup copy'));
@@ -3689,7 +3705,7 @@ class SessionDetail {
     const fmt = this.fmt;
     const z = r._zones;
     const pos = this.v.policyPosition(r.policy);
-    const sig = JSON.stringify([r.session_id || r.id, r.policy, r.policy_index, z && [z.from, z.to, z.fromText, z.toText], (r.in || {}).proto, r.application, r.state, r.status, r.location, pos]);
+    const sig = JSON.stringify([r.session_id || r.id, r.policy, r.policy_index, z && [z.from, z.to, z.fromText, z.toText], (r.in || {}).proto, r.application, r.state, r.validity, r.status, r.location, pos]);
     const rebuilt = this.section('kv', this.kvEl, sig, () => {
       const pol = r.policy
         ? h(
@@ -3720,7 +3736,8 @@ class SessionDetail {
         ['Zones', zones],
         ['Protocol', this.filterBtn('proto', (r.in || {}).proto, (r.in || {}).proto, 'mono')],
         ['Application', this.filterBtn('app', r.application, r.application, 'mono')],
-        ['State', h('span', null, r.state ? V(r.state) : DASH)],
+        ['State', h('span', { title: 'HA state of this session copy' }, r.state ? V(r.state) : DASH)],
+        ['Validity', h('span', null, r.validity ? V(r.validity) : DASH)],
         ['Status', h('span', null, r.status ? V(r.status) : DASH)],
         ['Location', r.location ? this.filterBtn('node', r.location, r.location, 'mono') : h('span', { class: 'faint' }, 'not reported (single node)')],
         ['Started', this.startEl],

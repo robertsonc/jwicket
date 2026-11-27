@@ -9,7 +9,7 @@ import { ENGINE_QUIRKS } from '../../src/jwicket/static/js/regexvm.js';
 const wingIn = (src, sport, dst, dport, proto, iface, bytes, packets) => ({ direction: 'In', src, sport, dst, dport, proto, iface, bytes, packets, tunnel: null });
 function session(id, policy, a, b, extra = {}) {
   const nat = { source: b.dst !== a.src || b.dport !== a.sport, destination: b.src !== a.dst || b.sport !== a.dport };
-  return { id: String(id), session_id: String(id), location: null, status: 'Normal', state: 'Valid', policy, policy_index: '5', timeout: 1700, configured_timeout: 1800, start_time: '0', duration: 60, application: null, in: a, out: b, nat, extra: {}, ...extra };
+  return { id: String(id), session_id: String(id), location: null, status: 'Normal', state: null, validity: 'Valid', policy, policy_index: '5', timeout: 1700, configured_timeout: 1800, start_time: '0', duration: 60, application: null, in: a, out: b, nat, extra: {}, ...extra };
 }
 
 const ROWS = [
@@ -346,7 +346,10 @@ test('text, enum, wildcard, regex and protocol matching', () => {
   assert.deepEqual(ids('nat:src'), ['1', '2']);
   assert.deepEqual(ids('nat:none'), ['4', '5']);
   assert.deepEqual(ids('id:4'), ['4']);
-  assert.deepEqual(ids('state:valid'), ['1', '2', '3', '4', '5']);
+  assert.deepEqual(ids('validity:valid'), ['1', '2', '3', '4', '5']);
+  assert.deepEqual(ids('sess-state:Valid'), ['1', '2', '3', '4', '5'], 'alias named after the element');
+  assert.deepEqual(ids('state:valid'), [], 'state is the HA state (and status), not the validity');
+  assert.deepEqual(ids('state:normal'), ['1', '2', '3', '4', '5'], 'status alias');
   assert.deepEqual(ids('-policy:allow-web -dport:22'), ['2', '3']);
   assert.deepEqual(ids('NOT (policy:allow-web OR dport:22)'), ['2', '3']);
   assert.deepEqual(ids('dport:443 OR dport:22'), ['1', '3', '4']);
@@ -687,7 +690,7 @@ test('FIELDS cover each view with typed keys and getters', () => {
       assert.ok(Array.isArray(d.aliases), `${view}.${k}`);
     }
   }
-  for (const k of ['src', 'dst', 'sport', 'dport', 'proto', 'app', 'iface', 'policy', 'zone', 'from', 'to', 'nat', 'bytes', 'pkts', 'rate', 'dur', 'timeout', 'state', 'id', 'node']) assert.ok(q.FIELDS.sessions[k], `sessions.${k}`);
+  for (const k of ['src', 'dst', 'sport', 'dport', 'proto', 'app', 'iface', 'policy', 'zone', 'from', 'to', 'nat', 'bytes', 'pkts', 'rate', 'dur', 'timeout', 'state', 'validity', 'id', 'node']) assert.ok(q.FIELDS.sessions[k], `sessions.${k}`);
   for (const k of ['tag', 'daemon', 'host', 'sev', 'src', 'dst', 'sport', 'dport', 'proto', 'policy', 'zone', 'from', 'to', 'app', 'reason', 'user', 'iface', 'session']) assert.ok(q.FIELDS.logs[k], `logs.${k}`);
   for (const k of ['name', 'from', 'to', 'zone', 'src', 'dst', 'app', 'action', 'group', 'inactive', 'addr', 'log', 'count']) assert.ok(q.FIELDS.policies[k], `policies.${k}`);
   assert.ok(q.parse('event:X', { view: 'logs' }).ast, 'tag alias "event"');
@@ -773,6 +776,26 @@ test('sessionRole: state, status, then role-like extra keys', () => {
   assert.equal(q.sessionRole({ state: 'Valid', status: 'Normal', extra: { 'session-flag': '0x40' } }), null);
   assert.equal(q.sessionRole({ extra: { colour: 'backup' } }), null, 'only state, role, ha or status keys');
   assert.equal(q.sessionRole(null), null);
+});
+
+test('validity (sess-state) is its own field: never an HA role, never the state key', () => {
+  // Spec 004 section 5.2 (owner decision 2026-11-26). Synthetic rows: Valid is the recorded value;
+  // Backup and Invalidated are made up to show the two fields apart.
+  assert.equal(q.sessionRole({ state: null, validity: 'Valid', status: 'Normal' }), null);
+  assert.equal(q.sessionRole({ validity: 'Backup' }), null, 'validity is never read for the role');
+  assert.equal(q.sessionRole({ state: 'Backup', validity: 'Valid' }), 'backup');
+  const rows = [
+    session(1, 'p', wingIn('10.0.0.1', 1, '10.0.0.2', 2, 'tcp', 'ge-0/0/1.0', 1, 1), wingIn('10.0.0.2', 2, '10.0.0.1', 1, 'tcp', 'ge-0/0/0.0', 1, 1), { state: 'Backup', validity: 'Valid' }),
+    session(2, 'p', wingIn('10.0.0.3', 1, '10.0.0.2', 2, 'tcp', 'ge-0/0/1.0', 1, 1), wingIn('10.0.0.2', 2, '10.0.0.3', 1, 'tcp', 'ge-0/0/0.0', 1, 1), { validity: 'Invalidated' }),
+  ];
+  assert.deepEqual(ids('validity:valid', 'sessions', rows), ['1']);
+  assert.deepEqual(ids('-validity:valid', 'sessions', rows), ['2']);
+  assert.deepEqual(ids('state:backup', 'sessions', rows), ['1']);
+  assert.deepEqual(ids('state:invalidated', 'sessions', rows), [], 'the state key does not read validity');
+  assert.deepEqual(ids('invalidated', 'sessions', rows), ['2'], 'free text includes validity');
+  assert.deepEqual([...q.FIELDS.sessions.validity.values(rows)].sort(), ['Invalidated', 'Valid'], 'suggested values');
+  assert.equal(q.FIELDS.sessions.validity.device, undefined, 'filtered in the browser only');
+  assert.deepEqual([...q.sessionCopies(rows).backups], ['1'], 'backup detection still reads state');
 });
 
 test('sessionCopies: the device marks Backup, or zero counters beside traffic (inferred)', () => {

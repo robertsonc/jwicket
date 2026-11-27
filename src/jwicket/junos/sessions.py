@@ -161,7 +161,27 @@ def _int(value: Optional[str]) -> Optional[int]:
         return None
 
 
+# The wing children ``_wing`` names. ``tunnel-id`` is not here: it is left out of a wing's ``extra``
+# only when it filled ``tunnel`` (see ``_wing``), so nothing the device sent is dropped.
+_KNOWN_WING_TAGS = {
+    "direction", "source-address", "source-port", "destination-address", "destination-port", "protocol",
+    "interface-name", "pkt-cnt", "byte-cnt", "tunnel-information",
+}
+
+
 def _wing(node: Element) -> Json:
+    # ``tunnel`` reads ``tunnel-information`` where a reply has it; neither recorded list does
+    # (SRX4100 25.2R1-S1.4 and vSRX 24.4R2-S3.5, both brief-style). Both carry ``tunnel-id`` and
+    # ``tunnel-type`` in every wing, and the vSRX list also ``tunnel-info`` in its Out wings, so
+    # ``tunnel`` falls back to ``tunnel-id``, verbatim ("0" on the recorded wings without a tunnel).
+    # Treating that id as the wing's tunnel is inferred (Spec 004 sections 5.2 and 7.3). The other
+    # unmodelled scalars, ``tunnel-type`` and ``tunnel-info`` among them, go to the wing's ``extra``.
+    tunnel = text(node, "tunnel-information")
+    known = _KNOWN_WING_TAGS
+    if tunnel is None:
+        tunnel = text(node, "tunnel-id")
+        if tunnel is not None:
+            known = known | {"tunnel-id"}
     return {
         "direction": text(node, "direction"),
         "src": text(node, "source-address"),
@@ -172,7 +192,8 @@ def _wing(node: Element) -> Json:
         "iface": text(node, "interface-name"),
         "packets": _int(text(node, "pkt-cnt")),
         "bytes": _int(text(node, "byte-cnt")),
-        "tunnel": text(node, "tunnel-information"),
+        "tunnel": tunnel,
+        "extra": _extra(node, known),
     }
 
 
@@ -190,18 +211,20 @@ def _split_policy(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     return value, None
 
 
+# The session children ``_session`` names, so they are not repeated in ``extra``.
 _KNOWN_SESSION_TAGS = {
-    "session-identifier", "status", "session-state", "policy", "timeout", "configured-timeout",
-    "start-time", "duration", "application", "dynamic-application-name", "flow-information",
+    "session-identifier", "status", "session-state", "sess-state", "policy", "timeout",
+    "configured-timeout", "start-time", "duration", "application", "dynamic-application-name",
+    "flow-information",
 }
 
 
-def _extra(node: Element) -> Dict[str, str]:
+def _extra(node: Element, known: Set[str]) -> Dict[str, str]:
     """Scalar fields the model does not name (reply tags vary by release); shown, never dropped."""
     out: Dict[str, str] = {}
     for child in kids(node):
         tag = local(child.tag)
-        if tag in _KNOWN_SESSION_TAGS or len(child):
+        if tag in known or len(child):
             continue
         value = text_of(child)
         if value is not None and len(out) < 24:
@@ -220,12 +243,18 @@ def _session(node: Element, location: Optional[str]) -> Json:
         nat["source"] = outbound["dst"] != inbound["src"] or outbound["dport"] != inbound["sport"]
         nat["destination"] = outbound["src"] != inbound["dst"] or outbound["sport"] != inbound["dport"]
     sid = text(node, "session-identifier")
+    # Two elements, two fields (owner decision 2026-11-26, Spec 004 section 5.2). ``state`` is the HA
+    # state and reads ``session-state`` only: the 24.4R2 YANG describes it so (Spec 005 DF-05), and
+    # neither recorded list has it, so ``state`` is None there. ``validity`` reads ``sess-state``,
+    # ``Valid`` in every row of both brief-style lists (SRX4100 25.2R1-S1.4, vSRX 24.4R2-S3.5); that it
+    # is the CLI's "Session State" is inferred, and its other values are unknown (Q-REL-01).
     return {
         "id": f"{location}:{sid}" if location else sid,
         "session_id": sid,
         "location": location,
         "status": text(node, "status"),
         "state": text(node, "session-state"),
+        "validity": text(node, "sess-state"),
         "policy": policy,
         "policy_index": policy_index,
         "timeout": _int(text(node, "timeout")),
@@ -236,7 +265,7 @@ def _session(node: Element, location: Optional[str]) -> Json:
         "in": inbound,
         "out": outbound,
         "nat": nat,
-        "extra": _extra(node),
+        "extra": _extra(node, _KNOWN_SESSION_TAGS),
     }
 
 
