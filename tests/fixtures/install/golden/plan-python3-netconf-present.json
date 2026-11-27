@@ -123,7 +123,7 @@
       "stage": null
     }
   ],
-  "installer": "jwicket-install 0.1.0.dev3",
+  "installer": "jwicket-install 0.1.0.dev4",
   "lab_hardware": false,
   "layout": "direct",
   "listen_address": "192.0.2.10",
