@@ -106,6 +106,8 @@ make bundle                                # build dist/jwicket.py, then self-te
 
 ## Install (lab only)
 
+**Fresh standalone lab vSRX?** Start with the [dev4 quickstart](docs/quickstart-dev4-vsrx.md).
+
 > This installer has not yet run on any device. Every device step is unverified until lab test Q-INST-06 is certified.
 
 Every installer prints that sentence first. J-Wicket is **not installable on a production SRX**, and its [pre-releases](https://github.com/robertsonc/jwicket/releases) are for lab use only. Every installer is lab-gated until G1 (owner decision, [ADR 0011](docs/adr/0011-owner-decisions-lab-gated-install.md)), and production installs stay out until G5:
