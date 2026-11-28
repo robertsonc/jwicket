@@ -263,6 +263,7 @@ These block a gate or a qualification run. Each is the owner's unless the row sa
 | D19 | The other open questions of Spec 006 (2, 7, 11, 12, 15 to 19, 21 to 27 and 31), each with a proposed answer recorded in ADR 0012. Open questions 20, 28 and 30 (R-MODEL with `--lab-hardware` and a typed `lab only`; root's one-time directory step; `--access tls` by default) were decided by the owner on 2026-11-25 ([ADR 0011](adr/0011-owner-decisions-lab-gated-install.md), decision 4). [ADR 0015](adr/0015-verified-installer-profiles.md) and [Spec 006 section 7.12](specs/006-installation.md#712-adaptive-preflight), accepted by the owner on 2026-11-26 (Spec 006 open question 32, decided; security review pending, D1; not built), keep the decided defaults and offer an account-owned state directory, an exact-interface listener and a same-device pinned operator NETCONF address as alternatives, from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md). Open question 28 is superseded for the offered alternative only: ADR 0015 supersedes ADR 0011 decision 4 item 2 and ADR 0012 decision 4 for it, and the default `/var/db/jwicket` stays preferred. Open question 30 is not reopened: the default listener is unchanged, as ADR 0015 states | Spec 006 acceptance | [Spec 006, section 21](specs/006-installation.md#21-open-questions-owner-decisions); [ADR 0015](adr/0015-verified-installer-profiles.md) |
 | D20 | **Decided** (owner, 2026-11-26, in the owner's words: "Yes, with notes/documentation"). Results from the [vSRX lab follow-up](evidence/2026-11-26-vsrx-vlab/README.md) of 2026-11-26 may change a status cell. Its runs used an uncommitted, lab-only build derived from dev3 (account-owned settings path, HelperVM-only HTTPS listener, provisioned ECDSA pin, on-box SSH and NETCONF compatibility code), not J-Wicket's own released bundle, so its results apply to that build only ([evidence rule 2](#6-evidence-rules)). The rule: a cell that counts it, and its status bullet, say it is the proof build (uncommitted, lab-only, dev3-derived, not J-Wicket's own released bundle), cite its SHA-256 as the lab record gives it, and link the record ([4.1](#41-how-to-read-an-entry)). Applied on 2026-11-26 to Q-RT-02, Q-TLS-01, Q-AUTH-01, Q-AUTH-03, Q-NET-01 and Q-NET-03, each now **partial** on vSRX 24.4R2-S3.5, and to the vSRX part of Q-REL-01 (partial). Certification is still the lab owner's (D2, [evidence rule 6](#6-evidence-rules)) | Nothing now (decided) | [Section 4](#4-qualification-test-catalogue); [section 6](#6-evidence-rules) |
 | D21 | **Decided** (owner, 2026-11-26, in the owner's words: "yes"): a native Junos confirmed-commit timeout, observed with no J-Wicket write path, counts toward Q-CHG-03. Applied to the one the vSRX lab follow-up recorded, which makes Q-CHG-03 **partial** on vSRX 24.4R2-S3.5 ([4.11](#411-change-protocol-q-chg-01-to-q-chg-16); [Spec 002, Q-CHG-03](specs/002-change-protocol.md#q-chg-03-rollback-correctness)). It does not stand in for the J-Wicket protocol, the other undo modes or certification (lab owner, D2) | Nothing now (decided) | [Section 4.11](#411-change-protocol-q-chg-01-to-q-chg-16) |
+| D22 | Accept, change or reject the read-pressure back-off: [Spec 004 section 5.8](specs/004-live-sessions-and-logs.md#58-read-pressure-backing-off-when-the-routing-engine-is-busy) and [ADR 0016](adr/0016-reads-back-off-under-routing-engine-load.md), drafted 2026-11-27 by a contributor and **not accepted**; Spec 004 open questions 15 to 20 within it (15 with the security reviewer); adopt Q-LOAD-04 as a test ([4.12](#412-proposed-additions)); and write its budgets with D9 before it runs. Its thresholds P1 to P12 are provisional and set nothing until Q-LOAD-04 measures them | Building section 5.8; Q-LOAD-04 | [Spec 004, section 5.8](specs/004-live-sessions-and-logs.md#58-read-pressure-backing-off-when-the-routing-engine-is-busy) |
 
 ## 3. Gates G0 to G5
 
@@ -1245,6 +1246,27 @@ Q-REL-01).
 | --- | --- | --- |
 | **J-Web 24.4 reference observation** on the lab device: what the Commit Configuration menu's options do (the autorollback timer, the confirm step, the diff format, "preferred way", shared or private candidate, behaviour under a CLI exclusive lock); whether the PPPoE and NAT wizards exist and their steps; the Setup Wizard's Tap-mode statements; whether Software Management > Install Package still appears | The 24.4 guide documents these by name only, and parity is measured against what J-Web does | [Catalog, unknowns](catalog.md#unknowns-and-what-settles-them); [Spec 002, open question 16](specs/002-change-protocol.md#20-open-questions) |
 | **Junos-FIPS mode**: whether unsigned JET applications may run at all | No test covers it; the charter proposes a non-goal instead (D6) | [Charter, section 7](charter.md#junos-fips-mode) |
+
+#### Q-LOAD-04 Read pressure back-off (proposed)
+
+- **Proposed** 2026-11-27 with [Spec 004 section 5.8](specs/004-live-sessions-and-logs.md#58-read-pressure-backing-off-when-the-routing-engine-is-busy)
+  and [ADR 0016](adr/0016-reads-back-off-under-routing-engine-load.md). The owner decides whether
+  it becomes a test (D10, D22). It shares its lab setup and session-table sweep with Q-LOAD-02, so
+  the two run together.
+- **Purpose:** settle what section 5.8 rests on: what the `cpu-idle` windows of
+  `get-route-engine-information` measure; what one sample costs; how much routing-engine CPU and
+  mgd time each J-Wicket read takes at each session-table size; the values of P1 to P12; and
+  whether the levels hold at a steady load without flapping.
+- **Method:** the [SRX4100 routing-engine load test plan](test-plans/srx4100-re-load.md), phases
+  0 to 5. Routing-engine load comes only from the read paths under test (session-list and
+  configuration reads from a separate lab NETCONF client), never from a shell, and level
+  behaviour above 90 % busy is tested by lowering the thresholds in the build's settings, not by
+  driving the device there.
+- **Pass:** AC-004-37 within the budgets written here before the run (D9); AC-004-38 recorded.
+- **Platforms:** the lab SRX4100 (standalone, 25.2R1-S1.4) first; then a lab vSRX and the SRX300
+  class with Q-HW-01.
+- **Status:** not run. Phase 0 to 3 need no section 5.8 code and can run on a published lab
+  pre-release; phase 4 needs section 5.8 built.
 
 **Proposed installer tests (Spec 006).** [Spec 006](specs/006-installation.md#18-qualification-needed)
 marks every device step of its installers unverified and names the test that settles each, so these

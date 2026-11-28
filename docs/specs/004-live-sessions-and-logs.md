@@ -8,7 +8,7 @@
 | Decides scope | Project owner. G1 sign-off: the named security reviewer |
 | Code | [`live.py`](../../src/jwicket/live.py), [`junos/sessions.py`](../../src/jwicket/junos/sessions.py), [`junos/logs.py`](../../src/jwicket/junos/logs.py), [`junos/session.py`](../../src/jwicket/junos/session.py) (allowlist, `LOGS_FILTER`), [`api.py`](../../src/jwicket/api.py) (401 and 429 bodies, reuse of a read just made), [`auth/sessions.py`](../../src/jwicket/auth/sessions.py) (idle clock, why a session ended), browser engines [`static/js/query.js`](../../src/jwicket/static/js/query.js) and [`static/js/logparse.js`](../../src/jwicket/static/js/logparse.js) |
 | Tests | [`test_live.py`](../../tests/test_live.py), [`test_http_server.py`](../../tests/test_http_server.py) and [`test_auth.py`](../../tests/test_auth.py) (web sessions, reuse), [`tests/js/query.test.mjs`](../../tests/js/query.test.mjs), [`tests/js/logparse.test.mjs`](../../tests/js/logparse.test.mjs), corpus [`tests/fixtures/log-samples/`](../../tests/fixtures/log-samples/README.md) |
-| Decisions it rests on | [ADR 0002](../adr/0002-junos-delegated-sign-in.md), [0004](../adr/0004-no-sample-data.md), [0007](../adr/0007-offline-capable-meaning.md); Spec 001 for policy and zone context |
+| Decisions it rests on | [ADR 0002](../adr/0002-junos-delegated-sign-in.md), [0004](../adr/0004-no-sample-data.md), [0007](../adr/0007-offline-capable-meaning.md); Spec 001 for policy and zone context. Proposed for section 5.8: [ADR 0016](../adr/0016-reads-back-off-under-routing-engine-load.md) (not accepted, not built) |
 
 ## 1. Status
 
@@ -31,6 +31,7 @@ the element names both show as **verified**. The parser reads `state` (the HA st
 | Query language and pushdown planner (`query.js`) | Implemented | `tests/js/query.test.mjs`: pass (2026-11-24) |
 | Log tokeniser, parser, decoder, self-read detection (`logparse.js`) | Implemented | `tests/js/logparse.test.mjs`: pass (2026-11-24) on 46 verbatim documentation lines and the development-server corpus |
 | Sessions view, Logs view, flow diagram, histogram, query bar widget | **Built and committed; exercised by hand on the development server** (AC-004-20 not signed off). The UI follow-up of 2026-11-25 built the states of section 8 marked "Built (fixtures)" | None yet: no browser acceptance check has been signed off |
+| Read pressure back-off (5.8): reads slow down, and the session list pauses, when the routing engine is busy | **Draft amendment (2026-11-27), not accepted (D22), not built.** Every threshold provisional until Q-LOAD-04 | None: AC-004-29 to AC-004-38 not met |
 | On a device | **Read once, not checked.** On a lab SRX4100 (Junos 25.2R1-S1.4) a super-user account read the session table and the `messages` file through J-Wicket; no reply was recorded and no criterion was checked. That build predates the 2026-11-25 changes in this spec, which have run on fixtures only. Before that, the spike called `get-flow-session-information` with `summary` on one vSRX as the daemon's account. Replies from a standalone vSRX, Junos 24.4R2-S3.5, are now recorded (filtered list, both summaries, `get-log` allowed and denied) and replayed through the parsers by [`test_recorded_vsrx.py`](../../tests/test_recorded_vsrx.py); no criterion was checked in a browser | [SRX4100 lab evidence](../evidence/2026-11-24-srx4100-lab/README.md), [vSRX lab evidence](../evidence/2026-11-26-vsrx-vlab/README.md#synthetic-policy-and-log-reply-capture), [spike report](../evidence/2026-11-23-vsrx-spike/docs/J-Wicket-spike-report-and-product-plan.md) |
 
 In parity-ledger terms the 26 rows this backend covers stay `specified` until AC-004-20 passes:
@@ -486,7 +487,9 @@ the reply carries `security-logs-disabled`.
 | Health (5.7) | 5 s per operator | 2 (`get-route-engine-information`, `get-performance-summary-information`); the Overview polls every 10 s (`suggested_interval_s` 10) |
 
 The browser polls at `suggested_interval_s` (5 s) by default, offers 2, 5, 10 and 30 s, and never
-goes below `meta.min_interval_s`. The Overview reads its session gauge with `rows=none` every 30 s
+goes below `meta.min_interval_s`. These floors and costs are the same at any routing-engine load;
+the draft section 5.8 (not built) would raise them, and pause the list, when the routing engine is
+busy. The Overview reads its session gauge with `rows=none` every 30 s
 and the list (for top policies) every 120 s while it is shown: 3 session RPCs a minute, which is
 owner decision OD-10's default (the owner may veto it; a faster gauge costs one RPC per read). The
 System health tile's reads (5.7) come on top of that. Each RPC
@@ -571,6 +574,145 @@ device did not report, except busy CPU and the mean over SPUs.
   over red, beside the number.
 - On a cluster, or with two routing engines, the tile shows the master of the first node and says
   how many there are; each node's figures are in the payload. Per-node charts are not built.
+
+### 5.8 Read pressure: backing off when the routing engine is busy
+
+**Draft amendment, 2026-11-27. Not built, not accepted (governance D22).** Proposed with
+[ADR 0016](../adr/0016-reads-back-off-under-routing-engine-load.md). Every number in this section
+marked P*n* is a provisional default, chosen without device data, and stays provisional until
+Q-LOAD-04 measures it on a qualified platform and the owner writes the result here. Until this
+section is built, J-Wicket behaves as sections 5.2 to 5.5 say, which is the same at any
+routing-engine load.
+
+**What J-Wicket does today** (from the code, 2026-11-27). Routing-engine CPU is read only by
+`GET /api/health`, for the Overview's chart (5.7; [`live.health`](../../src/jwicket/live.py)). No
+read is admitted, capped or slowed by it: the floors are fixed ([`api.throttle_read`](../../src/jwicket/api.py)),
+the list refusal compares only the matching count with `MAX_UNFILTERED`
+([`live._guard`](../../src/jwicket/live.py)), and the floors are per web session, so four
+operators cost four times one. The only feedback is latency: the browser keeps one poll in flight
+([`views/sessions.js`](../../src/jwicket/static/js/views/sessions.js), `poll`) and a read that waits
+5 s for its device turn gets the busy 429, so a slower device is polled less, but only once its
+replies are already slow.
+
+#### 5.8.1 Levels
+
+| Level | Means | Entered when (any one) | Left when |
+| --- | --- | --- | --- |
+| `normal` | No sign of pressure | Start; or a step down from `elevated` | n/a |
+| `elevated` | The routing engine is working hard; expensive reads slow down | From `normal`: sustained busy at or above P1 (70 %) on one sample; short-window busy at or above P2 (85 %) on two consecutive samples; or summary latency at or above P3 (3 times its normal baseline and at least 1.0 s) on two consecutive gated reads. From `high`: the step down below | Sustained busy at or below P1 minus P7 (15 points, so 55 %) on P8 (3) consecutive samples, latency back under P3, and at least P9 (60 s) at the level: one step down, to `normal` |
+| `high` | Expensive reads would compete with the device's own work | From `elevated` or `normal`: sustained busy at or above P4 (85 %); short-window busy at or above P5 (95 %) on two consecutive samples; or a sample that times out or takes longer than P6 (5 s) | Sustained busy at or below P4 minus P7 (70 %) on P8 consecutive samples and at least P9 at the level: one step down, to `elevated`, never straight to `normal` |
+| `unknown` | No fresh sample could be read (denied or unsupported), and no other operator's sample is fresh | The sample read is denied or unsupported and the last good sample is older than P11 (60 s) | A good sample: the level it gives |
+
+- **Busy** is 100 minus the reply's idle figure, the same arithmetic as the health tile (5.7).
+  **Short window** is the unsuffixed `cpu-idle`; **sustained window** is `cpu-idle1`. That the
+  unsuffixed set is the shortest window and `*1` a one-minute window is **inferred** from the
+  order of the four sets in the recorded reply (idle 78, 76, 69, 69 on SRX4100 25.2R1-S1.4,
+  [recorded reply](../../tests/fixtures/recorded-srx4100-25.2R1-S1.4/get-route-engine-information.xml));
+  no Juniper page found says what they count (5.7). Q-LOAD-04 step 1 pairs them with the CLI text.
+  If `*1` turns out not to be a minute-scale window, the sustained signal uses whichever set is.
+- **Two consecutive samples** are at least one sampling interval apart (P10, below), so J-Wicket's
+  own list pull, which raises the short window it is measured by, cannot trip a level alone.
+- **Latency baseline** is the median duration of the last 20 counted-summary device turns taken at
+  `normal` (P3's baseline). It is kept daemon-wide, since the summary is the same RPC for every
+  operator, and kept apart for filtered and unfiltered summaries, which cost differently. Until 20
+  exist the latency signal is off.
+- **More than one routing engine** (dual RE, chassis cluster): the busiest master in the reply.
+  Which node serves the page is open (Q-HA-02); the busiest master is the conservative choice.
+- On the way up a level may jump (`normal` to `high`). On the way down a change is one step, so a
+  recovery from `high` passes through `elevated` for at least P9.
+
+#### 5.8.2 Sampling
+
+- **The sample is one `get-route-engine-information`**, already in `ALLOWED_RPCS` and recorded
+  (section 6). No new RPC, no shell, nothing off-box.
+- **At most one sample per P10 (10 s) for the whole daemon.** It is taken only when a gated read
+  (5.8.3) is about to run and the newest sample is older than P10, before that read's first RPC,
+  inside the same device turn. A `/api/health` read refreshes the sample for free; with the
+  Overview open, sampling adds no RPC at all.
+- **On the requesting operator's own NETCONF session** ([ADR 0002](../adr/0002-junos-delegated-sign-in.md)).
+  The daemon's account reads nothing. If that operator's class is denied the RPC, the next
+  operator's gated read tries on their session; the level is `unknown` only when no session has a
+  sample younger than P11.
+- **Shared level, private figures.** The level, the time it was entered and its reason codes are
+  daemon-wide and reach every web session. Busy figures reach a web session only when its own
+  health read or sample returned them within P11. Open question 15.
+- **Cost bound.** At most 6 samples a minute daemon-wide (P10 = 10 s), 0 while nobody runs a gated
+  read, 0 extra while any operator has the Overview open. Q-LOAD-04 measures whether 6 a minute is
+  itself visible on the routing engine and in the log (`UI_NETCONF_CMD`, Q-LOAD-03).
+- **A sample that times out or takes longer than P6 counts as `high`**: a cheap read that slow is
+  the strongest sign available. Its device turn is released as usual; the gated read it preceded
+  is then answered as at `high`.
+
+#### 5.8.3 What changes at each level
+
+Ranked by what each read costs the routing engine against what it gives the operator. Exports are
+not in the table: they are browser-side downloads of what the tab already holds
+([ADR 0007](../adr/0007-offline-capable-meaning.md)) and cost the device nothing.
+
+| Read | `normal` (today) | `elevated` | `high` |
+| --- | --- | --- | --- |
+| Session list (`rows=list`) | Cap `MAX_UNFILTERED` (5,000), floor 1.5 s, suggested 5 s | Cap P12 (1,000); floor 3 s; suggested 10 s; at most one list RPC in flight for the whole daemon (another waits up to 5 s, then gets the busy 429) | No list RPC. `sessions.status = deferred`, `reason: "re-busy"`; the counted summary still runs, so `matching` and the gauge are answered |
+| Counted summary and gauge (`rows=none`) | As 5.2 | As 5.2 | Floor 5 s; the gauge's cache 30 s for summary-only reads too |
+| Overview background list (top policies, every 120 s) | As 5.5 | Paused, and the tile says so | Paused |
+| Log file (`get-log`, whole file) | Floor 1.5 s, suggested 5 s | Floor 10 s, suggested 15 s | Floor 30 s, suggested 30 s |
+| Report and buffer (bounded by `count` or `since`) | Floor 1.5 s | Floor 5 s | Floor 15 s |
+| Log sources (configuration read) | Cache 60 s | Cache 300 s | No read while a cached answer exists; it is served with its age |
+| Health (`/api/health`) | Floor 5 s, suggested 10 s | Unchanged | Unchanged: it is the sensor |
+
+- Floors stay per web session as today; what bounds the total at `elevated` and `high` is the
+  daemon-wide single list slot and the paused list. P12 sits below the 5,000 cap so that a list at
+  `elevated` costs at most a fifth of the worst normal list; Q-LOAD-02 and Q-LOAD-04 replace it.
+- The `deferred` state is not `refused`: narrowing the filter does not help, and the message says
+  so. It carries `pressure` (below) and no rows. Its audit is the usual `read_sessions` on a change
+  of status.
+- A request inside a raised floor gets the usual rate 429 with `interval_s` set to the floor in
+  force and `reason: "rate"`, plus `pressure_level`.
+- Spec 001's reads are not changed by this section. Its configuration read is the other read whose
+  cost grows with the device (a large configuration); open question 19.
+
+#### 5.8.4 What the API and the operator see
+
+Every Spec 004 response's `meta` gains:
+
+```json
+"pressure": {"level": "high", "since": "2026-11-27T19:40:10Z", "reasons": ["sustained-cpu"],
+             "sampled_at": "2026-11-27T19:41:02Z", "re_busy": 88, "re_busy_sustained": 91}
+```
+
+- `reasons` are any of `sustained-cpu`, `short-cpu`, `summary-latency`, `sample-slow`,
+  `sample-unavailable`. `re_busy` and `re_busy_sustained` are present only under the rule in 5.8.2.
+- `min_interval_s` and `suggested_interval_s` are the values in force, so the browser's existing
+  rule (never faster than `min_interval_s`) applies the back-off with no new client logic.
+
+In the browser, on Sessions, Logs and the Overview's health tile, per
+[ADR 0004](../adr/0004-no-sample-data.md) and [ADR 0010](../adr/0010-usable-without-knowing-junos.md):
+
+- `elevated`: an amber line, "The routing engine is busy (91 % over the last minute). J-Wicket is
+  reading less often to leave it room: sessions every 10 s, at most 1,000 listed." The figure only
+  when the payload carries it.
+- `high`: a red line, "The routing engine is very busy, so J-Wicket has paused the session list.
+  The count and the gauge still update. To see sessions anyway, the CLI command is
+  `show security flow session summary`, then a narrow `show security flow session` filter." The
+  last rows stay on screen, dimmed, with their age ("as of 19:40:58"), held in the tab's memory only.
+- `unknown`: a grey line, "J-Wicket cannot read the routing engine's load with your account, so it
+  is reading at its normal rate."
+- The line never says J-Wicket caused the load, and the state is announced once to assistive
+  technology, not on every poll.
+
+#### 5.8.5 Failure modes
+
+| Failure | Effect | Handling |
+| --- | --- | --- |
+| The sample adds the load it measures | Back-off at a load J-Wicket made | One sample per P10 daemon-wide; free with the Overview open; Q-LOAD-04 measures it |
+| J-Wicket's own list pull trips the short window | The level flips every poll | Two consecutive samples at least P10 apart; the sustained window; P7 margin; P9 dwell; one step at a time. AC-004-37 counts level changes at a steady load |
+| `cpu-idle` windows are not what 5.8.1 infers | Thresholds act on the wrong timescale | Q-LOAD-04 step 1, before any threshold is set |
+| One saturated core under a low all-core average (mgd, **inferred**) | CPU says `normal` while mgd is slow | The latency signal |
+| The sample times out | No figure | Counts as `high` (5.8.2) |
+| Denied or unsupported sample | No figure | `unknown`, read at the normal rate, said so (open question 16) |
+| Samples stop because nobody runs a gated read | The level goes stale | The next gated read samples first when the newest sample is older than P10 |
+| Load from elsewhere (another administrator, a routing event) | J-Wicket backs off for load it did not cause | Intended; the banner names the load, not a cause |
+| `high` during an incident | The operator loses the list when they need it most | Count, gauge, health and bounded log reads stay; the CLI command is shown; open question 17 |
+| Daemon restart | Level and baseline lost | Starts `normal`; the first gated read samples first |
 
 ## 6. Data sources
 
@@ -952,7 +1094,10 @@ per poll under about 8 ms for 2,000 rows on a laptop.
   operator, also while the log sources cannot be read; a failed sources read cached; every
   parameter checked before any device read; one RPC at a time per operator, waiting at most 5 s;
   session cap; a second tab asking for the same read moments later gets that read, not another RPC
-  (section 5.5). The refusal fails closed when the count is unknown (section 5.2). Known weakness:
+  (section 5.5). The refusal fails closed when the count is unknown (section 5.2). None of these
+  looks at routing-engine load; the draft section 5.8 (not built, ADR 0016 Proposed) would add a
+  device-wide pressure level that slows expensive reads and pauses lists, and shares that level,
+  but no figure, across login classes (open question 15). Known weakness:
   `get-log` moves the whole file every poll with no size cap in J-Wicket (open question 7).
 - **Audit volume.** Sessions polling writes one audit record per change of filters or outcome, not
   per poll (section 5.6).
@@ -1045,6 +1190,16 @@ in [`test_live.py`](../../tests/test_live.py) unless another file is named.
 | AC-004-26 | Health parsers read the replies recorded on SRX4100 25.2R1-S1.4 exactly (CPU split and busy, memory, load, temperatures, uptime; SPU CPU, memory and sessions); a cluster wrapper, two routing engines and several SPUs keep node, slot and FPC/PIC; missing or non-numeric figures are `null`; an empty reply is `failed` | [`test_health.py`](../../tests/test_health.py) `RecordedReplyTests.*`, `LayoutTests.*` | Met (recorded replies, one platform and release) |
 | AC-004-27 | `/api/health` needs sign-in, allows one read per 5 s per operator with `Retry-After`, and reports each part's state on its own: one part denied leaves the other, a fixture without the replies gives `unsupported` for both, and the device's error text does not reach the browser | `HealthHttpTests.*`, `UnsupportedFixtureTests.*` in [`test_health.py`](../../tests/test_health.py) | Met (fixtures). Denied wording on a device: Q-AUTH-03 |
 | AC-004-28 | The System health tile shows the figures and the two charts with a legend, a crosshair readout on hover and from the keyboard, and a table view, in every colour scheme, night and day | Browser check against the development server | Exercised by hand (HPE day, Obsidian and Nordic night); not signed off. Part of AC-004-20 |
+| AC-004-29 | Pressure levels (5.8.1): each entry condition enters its level; leaving needs the margin P7 on P8 consecutive samples and the dwell P9; down is one step at a time; two short-window samples less than P10 apart do not count as consecutive; the latency signal is off until 20 baseline turns exist | Planned: `PressureLevelTests` on a fake clock and scripted samples | **Not met** (not built) |
+| AC-004-30 | Sampling (5.8.2): at most one `get-route-engine-information` per P10 for the whole daemon, only before a gated read whose newest sample is older than P10; a `/api/health` read refreshes it; summary-only and health reads never sample; the sample runs on the requesting operator's session | Planned: `PressureSamplingTests` counting RPCs on the fixture backend | **Not met** (not built) |
+| AC-004-31 | At `high` no list RPC is sent: `sessions.status` is `deferred` with `reason: "re-busy"`, no rows, and the counted summary and gauge are still answered | Planned: `PressureGuardTests.test_high_defers_the_list` | **Not met** (not built) |
+| AC-004-32 | At `elevated` the list cap is P12, the floors and suggested intervals are those of 5.8.3, and a second list request daemon-wide while one is in flight waits at most 5 s, then gets the busy 429 | Planned: `PressureGuardTests` | **Not met** (not built) |
+| AC-004-33 | A sample that times out or takes longer than P6 makes the level `high`; a denied or unsupported sample with no fresh sample elsewhere makes it `unknown`, reads continue as `normal`, and the device's error text does not reach the browser | Planned: `PressureFailureTests` | **Not met** (not built) |
+| AC-004-34 | Every web session gets `meta.pressure.level`, `since` and `reasons`; `re_busy` figures only reach a web session whose own read returned them within P11 | Planned: `PressureSharingTests` with two classes, one denied the health RPC | **Not met** (not built) |
+| AC-004-35 | One `read_pressure` audit record per level change (from, to, reasons), not per sample | Planned: `PressureAuditTests` | **Not met** (not built) |
+| AC-004-36 | The `elevated`, `high` and `unknown` lines of 5.8.4 show on Sessions, Logs and the health tile; at `high` the last rows stay dimmed with their age; the state is announced once | Browser check against the development server with a fixture that scripts the level; part of AC-004-20 | **Not met** (not built) |
+| AC-004-37 | On a qualified platform under generated routing-engine load (Q-LOAD-04): J-Wicket reaches each level within two sampling intervals of the device crossing its threshold; its read RPCs per minute fall as 5.8.3 says; at a steady load it changes level at most twice in 10 minutes; and the sampling's own cost is within the budget written before the run (D9) | Q-LOAD-04 | **Not met** |
+| AC-004-38 | Every P*n* in 5.8 is replaced by a value measured in Q-LOAD-04 (or confirmed by it) and recorded here, with the platform class it holds for | Q-LOAD-04, Q-LOAD-02 | **Not met**: all provisional |
 
 ## 11. Qualification needed
 
@@ -1056,6 +1211,7 @@ Definitions, methods and pass criteria are in [governance.md](../governance.md).
 | Q-LOAD-02 | List cost at 1k, 5k and 20k sessions; whether `MAX_UNFILTERED = 5000` stands, per platform class |
 | Q-LOAD-01 | Sustained polling of sessions and of `get-log` on a 1 MB and a larger file: RE CPU, memory, mgd |
 | Q-LOAD-03 | `UI_NETCONF_CMD` lines per minute per open view at 2, 5, 10, 30 s |
+| Q-LOAD-04 (proposed) | Section 5.8: what the `cpu-idle` windows measure; the sampling's own cost; J-Wicket's share of routing-engine CPU per read; the values of P1 to P12; whether the levels hold without flapping. Plan: [SRX4100 routing-engine load test plan](../test-plans/srx4100-re-load.md) |
 | Q-LOG-01 | Log source matrix per security log mode and platform: effective default mode, what lands in the buffer, report availability (including SRX5000 and event mode), which report types accept `expression`, `count` ordering with and without `descending`, time zone |
 | Q-AUTH-03 | `read-only` class on `get-log` (denied, and how) while it can read the log configuration; `view`-only class on the report RPCs and on `get-security-log-information` |
 | Q-AUTH-01 | Reads run as the signed-in operator, so the permission results above are the operator's |
@@ -1081,3 +1237,10 @@ Definitions, methods and pass criteria are in [governance.md](../governance.md).
 | 12 | vSRX default mode: event per the mode page, stream per the general statement. Show which on the lab vSRX | Lab owner | Q-LOG-01 |
 | 13 | Single-session drill-down through `get-flow-session-by-identifier` (named in the XML API Explorer 25.4 catalog) instead of the full list | Owner | Q-REL-01 |
 | 14 | Saved queries (UI-004-05) keep query text in `localStorage`, and that text can name addresses, policies and users. Acceptable on shared workstations, with Spec 001 open question 13 (query state in the URL hash)? Architecture section 11 and ADR 0007 allow it only as operator-saved query text, never device replies | Security reviewer | Q-SEC-01 |
+| 15 | Share the pressure level daemon-wide (5.8.2, proposed), so back-off bounds total load and one sample serves every operator, or keep it per web session, which follows ADR 0002 strictly but multiplies samples by operators and lets one operator keep pulling lists while another backs off? The shared level is the first device-derived value shared across login classes | Owner, security reviewer | Q-SEC-01, Q-LOAD-04 |
+| 16 | `unknown` (no sample can be read): read at the normal rate and say so (proposed), or behave as `elevated`? The first keeps J-Wicket useful to a class denied the health RPC; the second is safer for the device. The SRX4100 run of 2026-11-25 saw `read-only` and `operator` classes read both health RPCs, so `unknown` should be rare | Owner | Q-AUTH-03 |
+| 17 | An override at `high`: none (proposed), or one audited list read for some classes, once per few minutes? During an incident the list is what the operator came for | Owner, security reviewer | Q-LOAD-04 |
+| 18 | One session list in flight for the whole daemon only at `elevated` and above (proposed), or always? Always would bound the worst case of four operators listing at once at `normal` too | Owner | Q-LOAD-02, Q-LOAD-04 |
+| 19 | Spec 001's configuration read under pressure: serve its cached inventory with its age at `high`, or leave Spec 001 out? A large configuration makes that read mgd-heavy (**inferred**) | Owner | Q-LOAD-01, Q-LOAD-04 |
+| 20 | The provisional values P1 to P12, and whether they differ by platform class (an SRX300 routing engine against an SRX4100 one) | Owner, after Q-LOAD-04 (D9, D22) | Q-LOAD-04, Q-HW-01 |
+| 21 | What `cpu-idle` and `cpu-idle1` to `cpu-idle3` measure in `get-route-engine-information`, on which releases | Contributors | Q-LOAD-04 step 1, Q-REL-01 |
