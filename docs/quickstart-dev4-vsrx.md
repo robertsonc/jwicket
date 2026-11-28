@@ -2,7 +2,7 @@
 
 Install the read-only lab prerelease on a **fresh, standalone vSRX** over private management. This is not an upgrade or a production procedure. For a physical SRX, an existing deployment, a managed target, or a different access profile, use the [full dev4 guide](https://github.com/robertsonc/jwicket/blob/v0.1.0.dev4/docs/install.md).
 
-Before starting, have a verified management SSH host key, root shell access, a named non-root Junos `super-user` account for the installer, and a restricted Junos account for browser verification. The workstation needs GitHub CLI (`gh`) and Python 3.9.2–3.13, the range covered by the dev4 dependency lock. Replace `LAB_USER` and `MGMT_IP` below; use the device's private management IPv4 address, not a public forwarding address.
+Before starting, have a verified management SSH host key, root shell access, a named non-root Junos `super-user` account for the installer, and a restricted Junos account for browser verification. The workstation needs an up-to-date GitHub CLI (`gh` 2.93.0 or newer) and Python 3.9.2–3.13, the range covered by the dev4 dependency lock. Replace `LAB_USER` and `MGMT_IP` below; use the device's private management IPv4 address, not a public forwarding address.
 
 ## 1. SSH to the vSRX and prepare its state directory
 
@@ -21,6 +21,8 @@ mkdir -m 700 /var/db/jwicket && chown LAB_USER /var/db/jwicket
 If the directory already exists, stop and check the target. For an otherwise fresh target, continue only if it is a real directory, not a symlink, with mode `0700` and the installer account as owner. Do not change ownership under an existing deployment. Exit the shell and return to the workstation.
 
 ## 2. Download and verify the workstation installer
+
+Run `gh --version` before continuing. If it is older than 2.93.0, update it before verifying assets. See [GitHub's token-handling advisory](https://github.com/cli/cli/security/advisories/GHSA-8xvp-7hj6-mcj9).
 
 In a new empty **workstation** directory:
 
