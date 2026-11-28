@@ -435,6 +435,33 @@ jwicket-install fetch --release <tag> --out ./jwicket-<tag>
 
 ## M1: workstation installer (`jwicket-install`)
 
+### Interactive M1 guide
+
+If `jwicket-install --help` lists `guide`, use it from a terminal on the workstation:
+
+```sh
+jwicket-install guide
+```
+
+The guide defaults to the wheel's release tag. Use `--release` to select another published lab tag.
+The guide asks for the SRX management IPv4 address and a named, non-root Junos `super-user`
+account. If you do not have that account yet, press Enter at the account prompt. The guide walks
+an authorized administrator through creating and verifying the dedicated `jwicket` account in a
+separate, trusted Junos session. It does not log in as root or make that account change itself.
+The account is dedicated by use and file ownership, not limited by a custom login class: Junos
+`super-user` has full device permissions. Do not overwrite an existing account.
+
+The guide walks through SSH host-key verification and root's one-time state-directory step.
+A personal SSH key is optional: choose password (the default), a key file, or an SSH agent.
+The SRX's SSH host key must be verified either way. Review the read-only plan and the TCP 9443
+source filter, then type `apply` and the device hostname to proceed. Declining, canceling, or
+encountering a refusal does not apply anything. For NETCONF bootstrap, follow the exact printed
+steps and nonce; verify the filter before applying. The guide does not select management,
+adoption, or trust overrides on your behalf.
+
+The `guide` command is not in the published dev4 installer wheel. For that wheel use the
+[dev4 quickstart](quickstart-dev4-vsrx.md) or the explicit M1 command below.
+
 **Unverified on a device.** Every device step below has run only against fake device sessions. By
 hand, the spike verified `scp -O`, the four daemon statements and the start at commit, and the
 SRX4100 run verified the diagnostic and daemon statements, `commit confirmed 5` with a check before

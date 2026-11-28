@@ -2,7 +2,8 @@
 6.8, 8, 9 and 12). LAB ONLY: J-Wicket has not passed gate G1, and every device step is unverified until
 lab test Q-INST-06.
 
-Commands: ``install`` (a dry run unless ``--apply``; an upgrade is ``install --release <newer tag>``),
+Commands: ``guide`` (interactive lab setup and install), ``install`` (a dry run unless ``--apply``;
+an upgrade is ``install --release <newer tag>``),
 ``uninstall`` (a dry run unless ``--apply``), ``status`` (read-only), ``render`` (``--method cli`` paste
 units, ``--set-files``, ``--upgrade``; ``--method cli-uninstall``), ``bootstrap`` (the one-time NETCONF or
 op-script bootstrap units), ``fetch`` (download a pre-release and check its provenance) and ``open`` (how
@@ -36,6 +37,7 @@ import os
 import re
 import shlex
 import sys
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -177,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"jwicket-install {__version__}")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="diagnostics on standard error")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    guide = commands.add_parser(
+        "guide", allow_abbrev=False, help="interactive setup, preview and optional install on a lab device"
+    )
+    guide.add_argument("--release", default=f"v{__version__}", help="the published lab release (default: this version)")
+    guide.add_argument("--port", type=int, default=22, help="device SSH port (default: 22)")
+    guide.add_argument("--netconf-port", type=int, default=None, help="separate NETCONF port, if already configured")
+    guide.add_argument("--lab-hardware", action="store_true", help="allow the existing physical lab SRX gate")
 
     install = commands.add_parser(
         "install", allow_abbrev=False, help="install, upgrade or repair (dry run unless --apply)"
@@ -524,8 +534,15 @@ def _emit(console: Console, document: Dict[str, Any]) -> None:
 ExecutorFactory = Callable[[transport.Target, Console, RunOptions], Executor]
 
 
-def _real_executor(target: transport.Target, console: Console, run: RunOptions, args: argparse.Namespace) -> Executor:
-    creds = credentials(args)
+def _real_executor(
+    target: transport.Target,
+    console: Console,
+    run: RunOptions,
+    args: argparse.Namespace,
+    creds: Optional[transport.Credentials] = None,
+) -> Executor:
+    if creds is None:
+        creds = credentials(args)
     clock = transport.SystemClock()
     return Executor(target, transport.RealConnector(target, creds, clock), console, clock, _state_store(), run)
 
@@ -533,11 +550,13 @@ def _real_executor(target: transport.Target, console: Console, run: RunOptions, 
 _FACTORY: Optional[ExecutorFactory] = None  # tests inject a fake device here through main(executor_factory=...)
 
 
-def _executor(args: argparse.Namespace, console: Console, run: RunOptions) -> Executor:
+def _executor(
+    args: argparse.Namespace, console: Console, run: RunOptions, creds: Optional[transport.Credentials] = None
+) -> Executor:
     target = target_of(args)
     if _FACTORY is not None:
         return _FACTORY(target, console, run)
-    return _real_executor(target, console, run, args)
+    return _real_executor(target, console, run, args, creds)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -550,6 +569,136 @@ def _gate_source(args: argparse.Namespace) -> None:
     other caller types the host name at a terminal (no terminal: exit 3)."""
     if getattr(args, "gate_from_stdin", False) and getattr(args, "method", None) != "ansible":
         raise CliError("--gate-from-stdin is for the Ansible play only (with --method ansible); type the host name")
+
+
+def _guide_answer(console: Console, prompt: str) -> str:
+    answer = console.prompt(prompt)
+    if answer is None:
+        raise Refused("guide stopped; no install was applied")
+    return answer.strip()
+
+
+def _guide_account(console: Console, host: str, port: int) -> str:
+    user = _guide_answer(console, "SRX non-root super-user account (Enter to set up jwicket): ")
+    if user:
+        plan.validate_user(user)
+        if user.lower() == "root":
+            raise Refused("R-ROOT: use a named non-root Junos super-user, not root")
+        return user
+    console.say(
+        "Use a trusted console or an existing administrator session for this one-time setup. "
+        "The installer will not log in as root or handle an administrator password.\n"
+        "This account is dedicated to J-Wicket, but Junos super-user has full device permissions. "
+        "Use it only on an authorized lab device.\n"
+        f"On the verified lab SRX {host}:\n"
+        "  show configuration system login user jwicket | display inheritance\n"
+        "If the account already exists, stop rather than overwrite it. Restart the guide and enter jwicket.\n"
+        "  show system commit | no-more\n"
+        "If there is a pending commit, stop. Otherwise, enter these at the Junos CLI:\n"
+        "  configure exclusive\n"
+        "  show | compare\n"
+        "Continue only if the candidate is empty:\n"
+        "  set system login user jwicket class super-user\n"
+        "  set system login user jwicket authentication plain-text-password\n"
+        "Type a strong new password at the device's prompt, not here. Check 'show | compare' contains only "
+        "this new account before running:\n"
+        '  commit confirmed 5 comment "Create dedicated J-Wicket lab installer account"\n'
+        f"In a separate terminal, verify the device's SSH host key and test: ssh -p {port} jwicket@{host}\n"
+        "Run 'show cli authorization' and verify the super-user class. If it matches, confirm with 'commit' "
+        "in the original session; otherwise let the trial commit roll back."
+    )
+    if _guide_answer(console, "Type ready after creating and verifying jwicket (anything else stops): ") != "ready":
+        raise Refused("guide stopped before the install preview")
+    return "jwicket"
+
+
+def cmd_guide(args: argparse.Namespace, console: Console) -> int:
+    if not console.interactive:
+        console.say("The guide needs a terminal. For automation, use jwicket-install install with explicit options.")
+        return plan.EXIT_GATE
+    console.say("Guided lab install. No root login, automatic trust, or management overrides.")
+    address = _guide_answer(console, "SRX management IPv4 address: ")
+    try:
+        ip = IPv4Address(address)
+    except ValueError:
+        raise CliError("enter an IPv4 address reachable on your private management network") from None
+    if ip.is_unspecified or ip.is_multicast or ip.is_loopback or ip.is_reserved:
+        raise CliError("enter the SRX's usable private management IPv4 address")
+    host = str(ip)
+    port = _port(args.port, "--port") or 22
+    netconf_port = _port(args.netconf_port, "--netconf-port")
+    user = _guide_account(console, host, port)
+    console.say(
+        f"Verify the device's SSH host-key fingerprint using the lab console or provider. Record it by signing "
+        f"in with ssh -p {port} {user}@{host}. The device's host key is not a personal login key. "
+        "Use 'show cli authorization' to check the account is a Junos super-user.\n"
+        "At the Junos > prompt, use 'start shell user root' or open a root shell through your lab's console. "
+        "Check 'id -u' returns 0, then check /var/db/jwicket. If absent on a fresh target, run:\n"
+        f"  mkdir -m 700 /var/db/jwicket && chown {shlex.quote(user)} /var/db/jwicket\n"
+        f"If already present, keep it only if it is a real directory (not a symlink), mode 0700, owned by {user}, "
+        "and not part of an existing deployment. Do not change ownership under an existing install."
+    )
+    if _guide_answer(console, "Type ready when host identity and the state directory are ready: ") != "ready":
+        raise Refused("guide stopped before the install preview")
+    auth = _guide_answer(console, "Sign in with [p]assword, [k]ey file, or [a]gent (Enter = password): ").lower()
+    words = [
+        "install",
+        "--host", host,
+        "--user", user,
+        "--port", str(port),
+        "--release", args.release,
+        "--access", "tls",
+        "--listen-address", host,
+    ]
+    if netconf_port is not None:
+        words.extend(("--netconf-port", str(netconf_port)))
+    if args.lab_hardware:
+        words.append(plan.LAB_HARDWARE_FLAG)
+    if auth in ("", "p"):
+        words.append("--password-prompt")
+    elif auth == "k":
+        key = _guide_answer(console, "SSH private key file: ")
+        if not key:
+            raise CliError("a key file path is required with key-file sign-in")
+        words.append(f"--identity-file={key}")
+    elif auth != "a":
+        raise CliError("choose password (p), key file (k), or agent (a)")
+
+    install = build_parser().parse_args(words)
+    options = options_of(install)
+    target_of(install)
+    # Keep the non-root credential only in memory and only for this invocation. The test factory
+    # supplies its own transport; production uses the same getpass/identity-file path as install.
+    console.say(
+        "Before any apply, including after a NETCONF bootstrap, verify management ingress allows TCP 9443 "
+        "only from designated jump hosts or operator prefixes. If you cannot enforce and test it, do not apply."
+    )
+    creds = credentials(install) if _FACTORY is None else None
+    data, identity, prov, bundle_path = obtain_bundle(install, console)
+    try:
+        console.say("Preview: read-only device checks and plan. No install writes.")
+        code = _install(install, console, options, data, identity, prov, creds)
+        if code != plan.EXIT_OK:
+            console.say(
+                "The guide did not apply anything. Resolve the reported refusal without weakening checks. "
+                "If NETCONF is disabled and bootstrap instructions were printed, follow those exact units "
+                "and inspect the generated apply command before running it. Do not manually confirm its timed commit."
+            )
+            return code
+        if _guide_answer(console, "Type apply if the preview and source filter are correct (Enter stops): ") != "apply":
+            console.say("Preview only. No install was applied.")
+            return plan.EXIT_OK
+        install.apply = True
+        code = _install(install, console, options, data, identity, prov, creds)
+        if code == plan.EXIT_OK:
+            console.say(
+                "Verify TCP 9443 from an allowed and a denied source. From the allowed source, compare the displayed "
+                "TLS fingerprint before signing in. Use a restricted operator to check one allowed read, "
+                "one denied read, and sign-out."
+            )
+        return code
+    finally:
+        _drop_download(install, bundle_path)
 
 
 def cmd_install(args: argparse.Namespace, console: Console) -> int:
@@ -581,6 +730,7 @@ def _install(
     data: bytes,
     identity: plan.BundleId,
     prov: plan.Provenance,
+    creds: Optional[transport.Credentials] = None,
 ) -> int:
     if (args.apply or args.device_diff) and prov.kind == "none":
         message, override = plan.REFUSALS["R-PROVENANCE"]
@@ -597,7 +747,7 @@ def _install(
         follow_up=_follow_up(args),
         known_hosts=tuple(Path(p) for p in args.known_hosts),
     )
-    executor = _executor(args, console, run)
+    executor = _executor(args, console, run, creds)
     code = executor.install(identity, data, prov, options, method=METHODS[args.method], overrides=overrides_of(args))
     if args.json:
         plan_text = executor.json_doc.get("plan")
@@ -832,6 +982,7 @@ def cmd_open(args: argparse.Namespace, console: Console) -> int:
 
 
 COMMANDS = {
+    "guide": cmd_guide,
     "install": cmd_install,
     "uninstall": cmd_uninstall,
     "status": cmd_status,
