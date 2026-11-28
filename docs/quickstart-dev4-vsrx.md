@@ -53,8 +53,10 @@ Read the whole preview, especially the management address, the listener port, an
 
 ## 4. Apply and verify
 
+Before applying, verify the management ingress filter permits TCP 9443 only from designated jump hosts or operator source prefixes. If you cannot enforce and test that filter, do not enable the non-loopback listener. See the [dev4 management filter requirement](https://github.com/robertsonc/jwicket/blob/v0.1.0.dev4/docs/install.md#L79-L86).
+
 If the preview has no blocking refusal, repeat the command with `--apply` and type the device's hostname when prompted. If you followed the bootstrap path, use its generated apply command instead.
 
-From the private management network, open `https://MGMT_IP:9443/`. Compare the presented certificate's SHA-256 fingerprint with the fingerprint printed by the installer **before** entering credentials. Sign in with a restricted operator account, verify an allowed read and a denied read, and sign out. Do not expose the listener publicly.
+Once the listener starts, verify that an allowed management source can connect to TCP 9443 and that a denied source cannot. From the allowed source, open `https://MGMT_IP:9443/`. Compare the presented certificate's SHA-256 fingerprint with the fingerprint printed by the installer **before** entering credentials. Sign in with a restricted operator account, verify an allowed read and a denied read, and sign out. Do not expose the listener publicly.
 
 If you need to remove the install, start with the [uninstall preview](https://github.com/robertsonc/jwicket/blob/v0.1.0.dev4/docs/install.md#uninstall); verify the removal restores your baseline.
