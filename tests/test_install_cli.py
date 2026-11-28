@@ -85,6 +85,7 @@ class GuideTests(CliBase):
         self.assertIn("non-root super-user", console.prompts[1])
         self.assertIn("not a personal login key", console.text())
         self.assertIn("Preview only", console.text())
+        self.assertIn("clean-up-manual-guided-setup", console.text().split("Preview only")[1])
         self.assertFalse(any(call[0] in f.WRITES for call in self.device.calls))
         self.assertNotIn(("gate",), self.device.calls)
 
@@ -162,6 +163,7 @@ class GuideTests(CliBase):
         code, console = self.guided(f.ADDRESS, f.USER, "ready", "a", "apply", f.HOST)
         self.assertEqual(code, plan.EXIT_REFUSED, console.text())
         self.assertIn("R-MANAGED (blocks)", console.text())
+        self.assertIn("clean-up-manual-guided-setup", console.text().split("R-MANAGED (blocks)")[1])
         self.assertFalse(any("Type apply" in prompt for prompt in console.prompts))
         self.assertFalse(any(call[0] in f.WRITES for call in self.device.calls))
 
