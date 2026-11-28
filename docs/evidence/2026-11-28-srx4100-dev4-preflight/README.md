@@ -1,6 +1,6 @@
 # SRX4100 dev4 installer preflight, 2026-11-28
 
-**Result: blocked before device discovery.** The published M1 workstation installer rejected the supplied root installer identity. This demonstrates the expected `R-ROOT` refusal only; it is not a completed installation or a Q-INST-06 pass.
+**Result: authenticated device preview completed and refused to apply.** The first run demonstrated the expected local `R-ROOT` refusal. A second run using a dedicated non-root account authenticated and reached the device planner. Neither run applied changes or passed Q-INST-06.
 
 ## Build and lab baseline
 
@@ -10,7 +10,7 @@
 - Target: physical lab SRX4100, Junos `25.2R1-S1.4`, reached over private management from macOS. A separate operator SSH check used strict host-key validation and confirmed a root shell (UID 0). That check was not part of M1.
 - The device was not clean: an enabled JET entry pointed to an existing dev3 bundle. Its on-device SHA-256 matched the [published dev3 checksum record](../../releases/v0.1.0.dev3.sha256sums). The state directory already existed with mode `0700`, owned by a named non-root Junos `super-user`. NETCONF over SSH and outbound SSH were configured; this run did not establish their operability for the installer account or determine the outbound SSH management owner.
 
-## Exact checkpoint
+## Run 1: root identity refusal
 
 Ran the stock preview (address redacted), without `--apply` or a credential argument:
 
@@ -30,6 +30,21 @@ The CLI returned exit status `1` and `R-ROOT: J-Wicket must not run as root.` It
 
 The lab owner separately requested a root credential rotation. It was committed after a successful fresh password-authenticated root SSH login and reverified after permanent confirmation. This was administrative work, not an M1 action or installer rollback. No credential values, private addresses, or raw configuration are included.
 
+## Run 2: authenticated non-root device preview
+
+The lab owner authorized a dedicated non-root Junos `super-user` account. A confirmed commit added only that account and its ED25519 public key, with a nonzero Junos-assigned UID. A fresh SSH session verified the effective `super-user` class before permanent confirmation and again afterward. The dedicated private key stayed on the workstation with mode `0600`.
+
+The stock dev4 M1 preview used the same release and physical-lab flag as run 1, with the dedicated account and an explicit identity file. It accepted release provenance (`P-A`), verified the management SSH host key on port 22, authenticated NETCONF, read the device model and Junos version, and reached the planner. It reported:
+
+| Check | Observation |
+| --- | --- |
+| `R-MODEL` | Shown; acknowledged for preview by the documented `--lab-hardware` flag. |
+| `R-UNREADABLE`, `R-STATEDIR` | The state directory was not readable by the new account and was owned by the existing dev3 account. |
+| `R-USER`, `R-FOREIGN` | Existing JET entries/files belong to the earlier account; installer ownership evidence did not cover the reported stanzas. |
+| `R-MANAGED` | One outbound SSH client was configured; an active manager session was not established by this preview. |
+
+Exit status `1`: `Refused before any write. Nothing was changed.` No `--apply`, adoption or management override was passed. The prior deployment and its files were left intact. Startup, restricted operator tests, restart and removal remain untested for dev4. The account-creation commit is separate from the installer.
+
 ## Next run
 
-Prefer a clean isolated lab target for install and removal evidence. If reusing this SRX4100, agree in advance how to preserve and restore the existing dev3 deployment and verify the role of outbound management; do not pass adoption or management overrides just to get through preflight. Authenticate M1 with the named non-root Junos `super-user` through its own password prompt or a verified accepted key. Proceed only if the stock preview produces an agreed plan. Record startup and restart recovery, restricted sign-in, one allowed read, one denied read, and sign-out over verified private TLS, then verify rollback or removal. This record does not close G1 or authorize a read-only alpha.
+Prefer a clean isolated lab target for install and removal evidence. If reusing this SRX4100, agree in advance how to preserve and restore the existing dev3 deployment and verify the role of outbound management; do not pass adoption or management overrides just to get through preflight. On a clean target, prepare the state directory for that target's named non-root Junos `super-user` and authenticate M1 with an accepted key or the installer's own password prompt. Proceed only if the stock preview produces an agreed plan. Record startup and restart recovery, restricted sign-in, one allowed read, one denied read, and sign-out over verified private TLS, then verify rollback or removal. This record does not close G1 or authorize a read-only alpha.
