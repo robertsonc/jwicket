@@ -72,6 +72,100 @@ class CliBase(unittest.TestCase):
         ]
 
 
+class GuideTests(CliBase):
+    def guided(self, *answers: str, **settings: Any) -> Tuple[int, f.FakeConsole]:
+        artifact = (self.data, f.bundle_identity(self.data), f.provenance_ok(), self.bundle)
+        with mock.patch.object(cli, "obtain_bundle", return_value=artifact):
+            return self.run_cli(["guide"], *answers, **settings)
+
+    def test_existing_account_default_password_and_read_only_preview(self) -> None:
+        code, console = self.guided(f.ADDRESS, f.USER, "ready", "", "")
+        self.assertEqual(code, plan.EXIT_OK)
+        self.assertIn("SRX management IPv4", console.prompts[0])
+        self.assertIn("non-root super-user", console.prompts[1])
+        self.assertIn("not a personal login key", console.text())
+        self.assertIn("Preview only", console.text())
+        self.assertFalse(any(call[0] in f.WRITES for call in self.device.calls))
+        self.assertNotIn(("gate",), self.device.calls)
+
+    def test_new_account_is_an_explicit_manual_setup_not_a_remote_mutation(self) -> None:
+        code, console = self.guided(f.ADDRESS, "", "ready", "")
+        self.assertEqual(code, plan.EXIT_REFUSED)
+        self.assertIn("set system login user jwicket class super-user", console.text())
+        self.assertIn("Junos super-user has full device permissions", console.text())
+        self.assertIn("commit confirmed 5", console.text())
+        self.assertIn("chown jwicket /var/db/jwicket", console.text())
+        self.assertTrue(all(call[0] == "prompt" for call in self.device.calls))
+
+    def test_rejects_root_bad_address_and_piped_input_before_contact(self) -> None:
+        for answers, settings, expected in (
+            ((f.ADDRESS, "root"), {}, plan.EXIT_REFUSED),
+            (("host.example",), {}, plan.EXIT_INPUT),
+            ((f.ADDRESS, f.USER), {"interactive": False}, plan.EXIT_GATE),
+        ):
+            with self.subTest(answers=answers):
+                self.device.calls.clear()
+                code, _ = self.guided(*answers, **settings)
+                self.assertEqual(code, expected)
+                self.assertTrue(all(call[0] == "prompt" for call in self.device.calls))
+
+    def test_apply_still_needs_native_hostname_and_checks_tls_first(self) -> None:
+        code, console = self.guided(f.ADDRESS, f.USER, "ready", "a", "apply", "wrong-host")
+        self.assertEqual(code, plan.EXIT_GATE)
+        self.assertIn(("gate",), self.device.calls)
+        self.assertFalse(any(call[0] in f.WRITES for call in self.device.calls))
+        self.assertIn("management ingress allows TCP 9443", console.text())
+
+    def test_apply_runs_real_workflow_against_fixture(self) -> None:
+        code, console = self.guided(f.ADDRESS, f.USER, "ready", "a", "apply", f.HOST)
+        self.assertEqual(code, plan.EXIT_OK, console.text())
+        self.assertTrue(any(call[0] in f.WRITES for call in self.device.calls))
+        self.assertIn("one denied read", console.text())
+
+    def test_password_is_prompted_once_for_nonroot_and_not_echoed(self) -> None:
+        console = f.FakeConsole(self.device, [f.ADDRESS, f.USER, "ready", "", "apply", f.HOST])
+        artifact = (self.data, f.bundle_identity(self.data), f.provenance_ok(), self.bundle)
+        factory = self.harness.factory()
+
+        def use_fake(target: Any, ui: Any, run: Any, args: Any, creds: Any) -> Any:
+            self.assertEqual(target.user, f.USER)
+            self.assertEqual(creds.password, "fixture-nonroot-password")
+            return factory(target, ui, run)
+
+        with contextlib.ExitStack() as stack:
+            terminal = stack.enter_context(mock.patch.object(cli.sys, "stdin"))
+            terminal.isatty.return_value = True
+            ask = stack.enter_context(
+                mock.patch.object(cli.getpass, "getpass", return_value="fixture-nonroot-password")
+            )
+            execute = stack.enter_context(mock.patch.object(cli, "_real_executor", side_effect=use_fake))
+            stack.enter_context(mock.patch.object(cli, "obtain_bundle", return_value=artifact))
+            code = cli.main(["guide"], console=console)
+        self.assertEqual(code, plan.EXIT_OK, console.text())
+        ask.assert_called_once_with(f"SSH password for {f.USER}: ")
+        self.assertEqual(execute.call_count, 2)
+        self.assertNotIn("fixture-nonroot-password", console.text())
+
+    def test_netconf_off_prints_exact_bootstrap_without_applying(self) -> None:
+        self.device = f.FakeDevice(netconf=False)
+        self.harness = f.Harness(self.device, self.root)
+        code, console = self.guided(f.ADDRESS, f.USER, "ready", "")
+        self.assertEqual(code, plan.EXIT_REFUSED, console.text())
+        self.assertIn("--bootstrap-nonce", console.text())
+        self.assertIn("--password-prompt", console.text())
+        self.assertIn("including after a NETCONF bootstrap", console.text())
+        self.assertFalse(any(call[0] in f.WRITES for call in self.device.calls))
+
+    def test_blocked_preview_is_not_an_apply_prompt(self) -> None:
+        self.device = f.FakeDevice(config=(("system services outbound-ssh client fixture-manager", ""),))
+        self.harness = f.Harness(self.device, self.root)
+        code, console = self.guided(f.ADDRESS, f.USER, "ready", "a", "apply", f.HOST)
+        self.assertEqual(code, plan.EXIT_REFUSED, console.text())
+        self.assertIn("R-MANAGED (blocks)", console.text())
+        self.assertFalse(any("Type apply" in prompt for prompt in console.prompts))
+        self.assertFalse(any(call[0] in f.WRITES for call in self.device.calls))
+
+
 class SurfaceTests(CliBase):
     """AC-006-30: exit codes of 9.7, one JSON document with --json, DEVICE_STATUS first."""
 
