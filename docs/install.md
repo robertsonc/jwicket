@@ -397,6 +397,10 @@ against a replaced release: whoever could replace the files could replace `SHA25
 Check at least one source that is independent of the release page
 ([Spec 006, section 8.9](specs/006-installation.md#89-provenance-and-bundle-integrity-inv-07)):
 
+If using `gh` for release or attestation verification (directly or through the installer), run
+`gh --version` first and use an up-to-date version, at least 2.93.0. Update older clients before
+verifying. See [GitHub's token-handling advisory](https://github.com/cli/cli/security/advisories/GHSA-8xvp-7hj6-mcj9).
+
 | Source | How to check it |
 | --- | --- |
 | P-A, the immutable release's attestation | `gh release verify-asset <tag> <file> --repo <owner>/<repo>`, for each file (needs the GitHub CLI) |
