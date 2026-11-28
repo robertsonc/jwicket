@@ -51,6 +51,10 @@ The lab owner authorized removal of the manual dev3 deployment. A root-private r
 
 The stock dev4 preview authenticated, passed release provenance, and no longer reported the earlier state or ownership refusals. The remaining blocking refusal was `R-MANAGED` for a configured outbound SSH client. `R-MODEL` was shown with the documented physical lab flag. Preview returned exit 1 and stopped before any write. The manual cleanup is not evidence for the installer uninstall method, and the preview is not evidence of startup or a completed dev4 install.
 
+## Run 4: management-acknowledged preview, no apply
+
+A separate dry run used `--lab-hardware` and `--ack-managed`, without `--apply`. Release provenance passed; exit `0` and `Dry run: nothing was written` were observed. The displayed configuration diff added only three J-Wicket JET entries (probe, self-test, and runtime), with shared NETCONF and Python settings kept. The proposed listener used private management TLS. This was not acknowledgment to apply outside the device's manager, and no installation or listener validation was performed.
+
 ## Next run
 
 Use the [pinned install guide](https://github.com/robertsonc/jwicket/blob/v0.1.0.dev4/docs/install.md). For this physical lab SRX, review the owner-approved handling of the configured manager before any out-of-band apply. A fresh, standalone lab vSRX without a configured manager does not exercise that coexistence case. On either target, record the final stock plan, startup and restart recovery, restricted sign-in, one allowed read, one denied read, and sign-out over verified private TLS, then verify removal or restoration. This record does not close G1 or authorize a read-only alpha.
