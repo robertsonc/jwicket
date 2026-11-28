@@ -43,6 +43,8 @@ Stop if any command fails. Check `.venv/bin/jwicket-install --version` reports `
 
 ## 3. Preview with the named Junos account
 
+**You do not need a personal SSH key.** The command below uses your named Junos account's password. The SRX's SSH **host key** is separate: it verifies the device's identity, and the installer checks it whether you sign in with a password or a key.
+
 ```sh
 .venv/bin/jwicket-install install --release v0.1.0.dev4 \
   --host MGMT_IP --user LAB_USER --password-prompt \
