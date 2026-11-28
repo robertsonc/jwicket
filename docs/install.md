@@ -1123,6 +1123,23 @@ paste the units in `/var/db/jwicket/uninstall-cli.txt` (`file show /var/db/jwick
 M6: `jwicket-install render --method cli-uninstall --user <user> --host <device>`; its last unit is
 root's `rmdir`. M2: `uninstall.yml -e jwicket_apply=true`.
 
+### Clean up manual guided setup
+
+The guided installer and uninstaller do not remove an account created in a separate Junos
+session or remove the state-directory entry created by root. Those changes may remain even
+if you canceled or the preview refused.
+
+1. Check the current device state. If J-Wicket was installed or is still running, follow
+   [Uninstall](#uninstall) first. Verify the process has stopped and its application entries
+   are gone before removing the account it runs as. Keep the account available until then.
+2. In a separate root shell, remove the state directory only if it was created for this run,
+   is a real directory, and is empty. Use `rmdir /var/db/jwicket`, not recursive deletion.
+3. In a separate Junos administrator session, delete only a dedicated account created for
+   this run, after checking that nothing still uses it. Review the exact account-only diff
+   before committing. Keep any pre-existing account, files, and configuration.
+4. Verify the starting device state was restored. The guided installer never receives the
+   root credential for these steps.
+
 ## Revert after a failure
 
 When a check fails after a `commit confirmed`, the installer does not confirm. It prints which check

@@ -571,6 +571,13 @@ def _gate_source(args: argparse.Namespace) -> None:
         raise CliError("--gate-from-stdin is for the Ansible play only (with --method ansible); type the host name")
 
 
+_GUIDE_CLEANUP = (
+    "Manual account and directory setup is separate from the install and stays in place if you stop. "
+    "Remove only resources you created for this run. See "
+    "https://github.com/robertsonc/jwicket/blob/main/docs/install.md#clean-up-manual-guided-setup."
+)
+
+
 def _guide_answer(console: Console, prompt: str) -> str:
     answer = console.prompt(prompt)
     if answer is None:
@@ -627,6 +634,7 @@ def cmd_guide(args: argparse.Namespace, console: Console) -> int:
     host = str(ip)
     port = _port(args.port, "--port") or 22
     netconf_port = _port(args.netconf_port, "--netconf-port")
+    console.say(_GUIDE_CLEANUP)
     user = _guide_account(console, host, port)
     console.say(
         f"Verify the device's SSH host-key fingerprint using the lab console or provider. Record it by signing "
@@ -684,9 +692,11 @@ def cmd_guide(args: argparse.Namespace, console: Console) -> int:
                 "If NETCONF is disabled and bootstrap instructions were printed, follow those exact units "
                 "and inspect the generated apply command before running it. Do not manually confirm its timed commit."
             )
+            console.say(_GUIDE_CLEANUP)
             return code
         if _guide_answer(console, "Type apply if the preview and source filter are correct (Enter stops): ") != "apply":
             console.say("Preview only. No install was applied.")
+            console.say(_GUIDE_CLEANUP)
             return plan.EXIT_OK
         install.apply = True
         code = _install(install, console, options, data, identity, prov, creds)
